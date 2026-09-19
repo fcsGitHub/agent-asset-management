@@ -1,0 +1,32 @@
+# secrets — never commit
+keys.txt
+.env
+.env.local
+*.pem
+
+# deps / builds
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# runtime data
+data/
+blobs/
+backups/
+*.log
+logs/
+
+# extracted scratch
+_design_extracted.txt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# test artifacts
+playwright-report/
+test-results/
+coverage/

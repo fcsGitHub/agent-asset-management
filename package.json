@@ -1,0 +1,46 @@
+{
+  "name": "team-asset-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "工作集 Team Asset Workspace — 小型团队 LLM Agent 资产协同管理软件",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "migrate": "tsx scripts/migrate.ts",
+    "migrate:admin": "tsx scripts/migrate.ts --role=admin",
+    "db:up": "docker compose up -d postgres",
+    "typecheck": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "dev:api": "tsx watch apps/api/src/server.ts",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:worker": "tsx watch apps/worker/src/worker.ts",
+    "smoke:llm": "tsx scripts/smoke-llm.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/cors": "^10.1.0",
+    "@fastify/multipart": "^9.4.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "fastify": "^5.12.5",
+    "pg": "^8.23.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.4",
+    "vite": "^7.3.6",
+    "zod": "^4.6.5"
+  }
+}

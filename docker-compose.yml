@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: taw-postgres
+    environment:
+      POSTGRES_DB: taw
+      POSTGRES_USER: taw_admin
+      POSTGRES_PASSWORD: taw_admin_dev
+    ports:
+      - "127.0.0.1:5437:5432"
+    volumes:
+      - taw_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taw_admin -d taw"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  taw_pgdata:
