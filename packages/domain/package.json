@@ -3,5 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" }
+  "exports": {
+    ".": "./src/index.ts",
+    "./defaults": "./src/defaults.ts",
+    "./validate": "./src/validate.ts"
+  },
+  "dependencies": {
+    "ajv": "^8.17.0"
+  }
 }

@@ -15,7 +15,7 @@ describe("M0 基线", () => {
   });
 
   it("API healthz 返回 ok", async () => {
-    const app = buildServer();
+    const app = await buildServer();
     const res = await app.inject({ method: "GET", url: "/healthz" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, service: "api" });
