@@ -13,7 +13,8 @@ export class AppError extends Error {
 
 export const ERR = {
   UNAUTHORIZED: () => new AppError("UNAUTHORIZED", 401, "未登录或会话已失效"),
-  FORBIDDEN: () => new AppError("ACTION_NOT_ALLOWED", 403, "当前身份无权执行该操作"),
+  FORBIDDEN: (message = "当前身份无权执行该操作") =>
+    new AppError("ACTION_NOT_ALLOWED", 403, message),
   NOT_FOUND: () => new AppError("NOT_FOUND", 404, "对象不存在或无权访问"),
   CONFLICT: (code: string, message: string, details?: unknown) =>
     new AppError(code, 409, message, false, details),
