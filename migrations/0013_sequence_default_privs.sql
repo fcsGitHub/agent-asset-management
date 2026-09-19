@@ -1,0 +1,6 @@
+-- 0013: 序列授权补齐 + 默认权限（今后新迁移的序列自动对应用角色可用）。
+
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO taw_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE taw_admin IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO taw_app;

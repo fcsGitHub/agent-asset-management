@@ -33,3 +33,6 @@ coverage/
 
 .playwright-mcp/
 *.png
+
+.venv-sema/
+tmp/
