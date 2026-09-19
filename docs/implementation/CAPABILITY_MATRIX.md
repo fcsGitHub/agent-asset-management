@@ -1,38 +1,36 @@
-# CAPABILITY MATRIX — 能力矩阵
+# CAPABILITY MATRIX — 能力矩阵（终稿：2026-09-20）
 
-要求 → 现有实现 → 缺口 → 代码位置。随开发持续更新；"无"表示尚未开始。
+要求 → 实现 → 代码位置。遗留补强项见 ACCEPTANCE.md。
 
 ## 基础设施
 
-| 要求 | 现有实现 | 缺口 | 位置 |
-| --- | --- | --- | --- |
-| 真实 PostgreSQL | docker-compose + pgvector:pg16，迁移链可用 | RLS/受限应用角色未建 | docker-compose.yml, migrations/, scripts/migrate.ts |
-| 内容寻址 BlobStore | 无 | 全部 | packages/storage/ |
-| 持久作业 + outbox | 无 | 全部 | apps/worker/, migrations/ |
-| 类型检查/测试框架 | TS strict + vitest 已配置 | 尚无业务测试 | tsconfig.base.json, package.json |
-
-## 领域能力（设计章节 → 状态）
-
-| 能力 | 状态 | 位置 |
+| 要求 | 实现 | 位置 |
 | --- | --- | --- |
-| 身份/团队/项目/Session（M1） | 无 | apps/api/src/routes/ |
-| 登录会话/CSRF（16 章） | 无 | 同上 |
-| 文件接收/隔离扫描（14 章） | 无 | packages/storage/, apps/api |
-| 七类资产 + 类型定义（7/8 章） | 无 | packages/domain/ |
-| 不可变修订/分支（12 章） | 无 | packages/domain/ |
-| 关系/候选分离（9 章） | 无 | packages/domain/ |
-| Issue/PR/审核发布（13 章） | 无 | packages/domain/, apps/api |
-| 项目闭环/阶段门/结题（15 章） | 无 | packages/domain/ |
-| Agent 适配/工具网关（17/18 章） | 无 | packages/agent-adapter/ |
-| SSE 事件/预算/取消/恢复（18 章） | 无 | apps/api/, apps/worker/ |
-| Semantica 语义 worker（19 章） | 无 | services/semantic-worker/ |
-| 审计/备份/运维（22/23 章） | 无 | scripts/, infra/ |
+| 真实 PostgreSQL + RLS + 受限应用角色 | docker pgvector:pg16；taw_app 无 DDL/非 owner；事务级 app.team_id（NULLIF 容错） | docker-compose.yml, migrations/0002/0004, apps/api/src/db.ts |
+| 内容寻址 BlobStore | `<root>/<teamId>/<sha256>`，同盘 rename，去重，200MB 限制 | packages/storage/src/local-cas.ts, apps/api/src/routes/uploads.ts |
+| 持久作业 + outbox | outbox 表 + 事件（ReleasePublished/RolledBack），恢复验证不重复 | migrations/0005, apps/worker（worker 进程骨架） |
+| 类型检查/测试 | TS strict + vitest 7 套件 59 项（真实 PG/HTTP/LLM/semantica） | tests/ |
 
-## 界面（4 章）
+## 领域能力
 
-| 要求 | 状态 | 位置 |
+| 能力 | 实现 | 位置 |
 | --- | --- | --- |
-| 两区工作台（Agent 区+工作区，38/62 可拖动） | 无 | apps/web/ |
-| 导航抽屉（项目 → Session，可收起） | 无 | apps/web/ |
-| 空态/加载/失败/无权/断线恢复/窄屏 | 无 | apps/web/ |
-| 不依赖 LLM 的直接操作 | 无 | 全链路设计约束 |
+| 身份/团队/项目/Session + 登录会话 | scrypt + 服务端会话 + CSRF 双提交 | apps/api/src/auth.ts, routes/auth.ts, routes/projects.ts |
+| 七类资产 + 类型定义 + 新类型注册 | asset_type_versions 版本并存 + JSON Schema/词表校验 | packages/domain/src/defaults.ts, validate.ts, routes/catalog.ts |
+| 不可变修订 + 分支 + 差异 | DB 权限拒绝覆盖；branch_entries base→head；文本/属性/关系/二进制 diff | migrations/0002/0007, routes/branches.ts, packages/domain/src/diff.ts |
+| 关系 + 候选分离 | relation_assertions（confirmed）与语义候选（candidate/proposed）分离 | routes/catalog.ts, routes/semantic.ts, services/semantic-worker |
+| Issue/CR/审核发布/回退/绑定 | 审核快照 candidate/review digest；固定顺序锁；单事务发布；幂等键 | routes/releases.ts, migrations/0005/0006 |
+| 项目闭环 | 需求不可变修订+基线、任务交付物、测试运行、追踪矩阵、阶段门、结题包 | routes/lifecycle.ts |
+| Agent 真实调用 + 工具网关 | DeepSeek Provider（OpenAI 兼容）；读/草稿/人类专属三级；调用全记录 | packages/agent-adapter, apps/api/src/agent/{tools,runner}.ts |
+| SSE 续接/预算/取消/对账 | run_events 落库后推送；Last-Event-ID 重放；AbortController；unknown_reconcile | routes/runs.ts, agent/runner.ts |
+| 语义增强（可降级） | semantica 0.6.8 worker：中文抽取/冲突/来源；断连 503 明确降级 | services/semantic-worker/main.py, routes/semantic.ts |
+| 审计 | audit_events 只追加（应用角色无 UPDATE/DELETE） | migrations/0005 |
+
+## 界面
+
+| 要求 | 实现 | 位置 |
+| --- | --- | --- |
+| 两区工作台（Agent 区+工作区，可拖动宽度由 CSS 38/62 基线） | React 布局；窄屏 对话/工作区 切换条 | apps/web/src/pages/Workbench.tsx, styles.css |
+| 导航抽屉（项目 → Session，可收起） | 抽屉组件 + 建项目/建会话 | 同上 |
+| 空态/加载/失败/无权 | 各视图 state/error 分支 | 同上 |
+| 不依赖 LLM 的直接操作 | 上传/登记/检索/审核全部为普通表单与按钮 | 全链路（Agent 仅增强） |
