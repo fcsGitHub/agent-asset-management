@@ -146,3 +146,10 @@
 - `npx vitest run`：7 套件 59 项全部通过
 - 浏览器（Playwright MCP）：重启后服务照常，原会话/消息/资产保留；
   docs/evidence/final-workbench-desktop.png
+
+### EV-018 ｜ 2026-09-20 ｜ C07/C08 补强完成
+- 命令：`npx vitest run`（8 套件 62 项全部通过，含 tests/m5-c7c8.test.ts 3 项）
+- C07：PATCH /assets/:id/meta + If-Match ETag（meta_version 乐观锁）——缺头 422、
+  过期 409 STALE_HEAD（返回当前 ETag）、成功后版本前移。
+- C08：POST /sessions/:id/share-check + /share——secret/restricted 引用与 [private]
+  消息阻断；检查摘要比对防 TOCTOU；分享后项目成员可见；阻断态保持私有。

@@ -63,7 +63,7 @@ python -m venv .venv-sema
 
 ```bash
 npx tsc -b tsconfig.json          # 类型检查（TS strict）
-npx vitest run                    # 全量集成测试（56 项，需 PostgreSQL 运行中）
+npx vitest run                    # 全量集成测试（62 项，需 PostgreSQL 运行中）
 npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 token）
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）
@@ -84,7 +84,7 @@ packages/agent-adapter/  DeepSeek Provider（OpenAI 兼容）+ env 加载
 services/semantic-worker/  Python 语义服务（真实 semantica 0.6.8 适配）
 migrations/          0001–0013 SQL 迁移（含 RLS 与受限应用角色）
 scripts/             迁移、冒烟、端到端、恢复演练、性能
-tests/               56 项 vitest 集成测试（真实 PG/HTTP/LLM）
+tests/               62 项 vitest 集成测试（真实 PG/HTTP/LLM）
 docs/implementation/ 计划、能力矩阵、验收台账、证据、交接
 docs/ops/            管理员手册、备份恢复手册、配置说明
 ```
