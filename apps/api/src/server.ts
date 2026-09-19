@@ -9,6 +9,9 @@ import { projectRoutes } from "./routes/projects.js";
 import { uploadRoutes } from "./routes/uploads.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { messageRoutes } from "./routes/messages.js";
+import { branchRoutes } from "./routes/branches.js";
+import { issueRoutes } from "./routes/issues.js";
+import { releaseRoutes } from "./routes/releases.js";
 
 export async function buildServer() {
   const app = Fastify({
@@ -64,6 +67,9 @@ export async function buildServer() {
   await app.register(uploadRoutes, { prefix: "/api/v1" });
   await app.register(catalogRoutes, { prefix: "/api/v1" });
   await app.register(messageRoutes, { prefix: "/api/v1" });
+  await app.register(branchRoutes, { prefix: "/api/v1" });
+  await app.register(issueRoutes, { prefix: "/api/v1" });
+  await app.register(releaseRoutes, { prefix: "/api/v1" });
 
   return app;
 }

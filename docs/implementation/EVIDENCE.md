@@ -82,3 +82,14 @@
 - 截图：docs/evidence/m1-desktop-workbench.png（桌面两区）、m1-narrow-chat2.png（窄屏对话）、
   m1-narrow-workspace.png（窄屏工作区，切换条双向可用）
 - 修复记录：GET /projects 的 RLS 上下文重构；窄屏切换条移出隐藏面板；CSS 规则顺序
+
+### EV-011 ｜ 2026-09-20 ｜ M2 发布链集成测试
+- 命令：`npx vitest run`（全量 31 passed，含 tests/m2-release.test.ts 12 项）
+- 覆盖：分支草稿写入（新不可变修订+头移动+STALE_HEAD 409）、差异接口（属性逐字段+二进制摘要，B02）、
+  成员提交 CR→prepare-review→管理员发布全链；成员发布 403（B03）；自审自发默认 403、
+  单人管理例外需 DB 预配置+留痕说明（发布策略）；prepare 后分支改动 → 发布 409 REVIEW_DIGEST_CHANGED（B04）；
+  并发发布同资产：后发者因目标头移动失效（B05）；双资产发布中制品文件被删 → ARTIFACT_MISSING 全事务回滚（B06）；
+  同幂等键重复发布返回首次结果且 release_set 唯一（B10）；绑定锁 r1 发布 r2 后不动（B09）+ 复合外键拒绝错配；
+  回退生成新 rollback 发布集与事件、历史保留、通道指回（B08 部分）。
+- 修复记录：prepare-review 未用参数 42P18；review_snapshots 列级 UPDATE 授权（仅 superseded）；
+  序列授权补齐（0008）；发布重算摘要补 expected_channel_head。

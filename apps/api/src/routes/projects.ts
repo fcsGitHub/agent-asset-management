@@ -59,6 +59,11 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         `INSERT INTO project_members (team_id, project_id, user_id, role) VALUES ($1, $2, $3, 'lead')`,
         [body.teamId, id, auth.userId]
       );
+      // main 分支：受保护的正式发布内容视图（设计 12 章）
+      await client.query(
+        `INSERT INTO branches (team_id, id, project_id, name, created_by) VALUES ($1, $2, $3, 'main', $4)`,
+        [body.teamId, newId(), id, auth.userId]
+      );
     });
     return reply.code(201).send({ teamId: body.teamId, projectId: id, name: body.name, code: body.code });
   });

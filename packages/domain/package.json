@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./defaults": "./src/defaults.ts",
-    "./validate": "./src/validate.ts"
+    "./validate": "./src/validate.ts",
+    "./digest": "./src/digest.ts",
+    "./diff": "./src/diff.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"
