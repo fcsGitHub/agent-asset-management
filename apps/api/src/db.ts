@@ -27,6 +27,10 @@ export function getPool(): Pool {
       connectionString: process.env.DATABASE_URL,
       max: 10,
     });
+    // 空闲连接错误（如数据库重启 57P01）：记录并让连接池自动重建，不崩溃进程
+    pool.on("error", (err) => {
+      console.error("pg pool idle-client error:", err.message);
+    });
   }
   return pool;
 }

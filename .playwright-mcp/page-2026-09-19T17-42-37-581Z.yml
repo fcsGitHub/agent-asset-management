@@ -1,0 +1,93 @@
+- generic [ref=f1e4]:
+  - banner [ref=f1e5]:
+    - button "切换导航抽屉" [ref=f1e6] [cursor=pointer]: ☰
+    - generic [ref=f1e7]: 工作集
+    - combobox "选择项目" [ref=f1e8]:
+      - option "轨道传播验证" [selected]
+    - generic [ref=f1e9]: 整理模型与测试
+    - generic [ref=f1e10]: 已连接
+    - generic [ref=f1e11]: 浏览器验证员
+    - button "退出" [ref=f1e12] [cursor=pointer]
+  - generic [ref=f1e13]:
+    - navigation "项目与会话导航" [ref=f1e14]:
+      - heading "项目 → SESSION" [level=3] [ref=f1e15]
+      - button "＋ 新建项目" [ref=f1e16] [cursor=pointer]
+      - generic [ref=f1e17]:
+        - generic [ref=f1e18]: 轨道传播验证
+        - button "＋ 新建会话" [ref=f1e19] [cursor=pointer]
+        - button "整理模型与测试" [ref=f1e49] [cursor=pointer]
+    - generic [ref=f1e21]:
+      - complementary "Agent 对话区" [ref=f1e22]:
+        - generic [ref=f1e23]: AGENT · 轨道传播验证
+        - generic [ref=f1e24]: 开始这段会话。你可以先在右侧「登记资产」完成上传与登记；Agent 助手稍后接入。
+        - generic [ref=f1e26]:
+          - textbox "输入消息…（Agent 将在后续里程碑接入；上传、登记、检索等操作不依赖模型）" [ref=f1e27]
+          - button "发送" [disabled] [ref=f1e28]
+        - generic [ref=f1e29]: Ctrl+Enter 发送 · 会话内容持久化保存
+      - region "工作区" [ref=f1e30]:
+        - generic [ref=f1e31]:
+          - button "项目概况" [ref=f1e32] [cursor=pointer]
+          - button "资产目录" [ref=f1e33] [cursor=pointer]
+          - button "登记资产" [ref=f1e34] [cursor=pointer]
+        - generic [ref=f1e51]:
+          - heading "登记资产" [level=3] [ref=f1e52]
+          - generic [ref=f1e53]:
+            - generic [ref=f1e54]: 资产类型（同一套版本与审批机制覆盖所有类型）
+            - combobox [ref=f1e55]:
+              - option "选择类型…"
+              - option "Agent 库（agent.template v1.0.0）"
+              - option "文档（document v1.0.0）"
+              - option "仿真引擎（simulation.engine v1.0.0）"
+              - option "仿真模型（simulation.model v1.0.0）" [selected]
+              - option "仿真场景（simulation.scenario v1.0.0）"
+              - option "软件（software v1.0.0）"
+              - option "测试库（test.suite v1.0.0）"
+          - generic [ref=f1e56]:
+            - generic [ref=f1e57]: 资产名称
+            - textbox [ref=f1e58]: 轨道传播模型A（UI登记）
+          - group "类型属性（* 必填，由类型定义 v1.0.0 校验）" [ref=f1e64]:
+            - generic [ref=f1e66]:
+              - generic [ref=f1e67]: frame *（ECI / ECEF / ICRF / ITRF / LVLH / RTN）
+              - combobox [ref=f1e68]:
+                - option "—"
+                - option "ECI" [selected]
+                - option "ECEF"
+                - option "ICRF"
+                - option "ITRF"
+                - option "LVLH"
+                - option "RTN"
+            - generic [ref=f1e69]:
+              - generic [ref=f1e70]: timeScale *（TAI / UTC / TT / TDB / GPST）
+              - combobox [ref=f1e71]:
+                - option "—"
+                - option "TAI" [selected]
+                - option "UTC"
+                - option "TT"
+                - option "TDB"
+                - option "GPST"
+            - generic [ref=f1e72]:
+              - generic [ref=f1e73]: validDomain
+              - textbox "文本" [ref=f1e74]
+            - generic [ref=f1e75]:
+              - generic [ref=f1e76]: positionUnit *（m / km / AU）
+              - combobox [ref=f1e77]:
+                - option "—"
+                - option "m" [selected]
+                - option "km"
+                - option "AU"
+            - generic [ref=f1e78]:
+              - generic [ref=f1e79]: velocityUnit *（m/s / km/s）
+              - combobox [ref=f1e80]:
+                - option "—"
+                - option "m/s" [selected]
+                - option "km/s"
+            - generic [ref=f1e81]:
+              - generic [ref=f1e82]: interfaceVersion *
+              - textbox "文本" [ref=f1e83]: prop-v2
+            - generic [ref=f1e84]:
+              - generic [ref=f1e85]: validStepSeconds *
+              - textbox "JSON 对象" [ref=f1e86]: "{\"min\":0.1,\"max\":60}"
+          - generic [ref=f1e59]:
+            - generic [ref=f1e60]: 制品文件（可选；内容寻址存储，重复文件自动去重）
+            - button "Choose File" [active] [ref=f1e61]
+          - button "登记" [ref=f1e63] [cursor=pointer]

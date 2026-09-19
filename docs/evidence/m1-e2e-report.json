@@ -1,0 +1,55 @@
+{
+  "startedAt": "2026-09-19T17:30:07.250Z",
+  "runId": "6e1ba0",
+  "steps": [
+    {
+      "step": "启动 API 服务（端口 4200）",
+      "ok": true,
+      "detail": "healthz ok",
+      "ms": 146
+    },
+    {
+      "step": "用户甲注册（团队管理员）",
+      "ok": true,
+      "detail": "teamId=4eb049b3-5743-485f-9c14-aed7dc6458a5",
+      "ms": 69
+    },
+    {
+      "step": "用户乙注册并由甲加入团队（普通成员）",
+      "ok": true,
+      "detail": "乙已是团队成员",
+      "ms": 57
+    },
+    {
+      "step": "甲建项目、乙建 Session 并互相可见",
+      "ok": true,
+      "detail": "session=5545e762-272c-4284-89ad-be085673e112",
+      "ms": 33
+    },
+    {
+      "step": "乙上传真实文件（模型压缩包内容）",
+      "ok": true,
+      "detail": "digest=c76f136ff7f9…",
+      "ms": 29
+    },
+    {
+      "step": "乙登记三类资产（模型/文档/测试），关联关系",
+      "ok": true,
+      "detail": "model=548dd779… doc=584f5f28… test=3d2ac045…",
+      "ms": 110
+    },
+    {
+      "step": "重启 PostgreSQL 容器（docker restart）",
+      "ok": true,
+      "detail": "容器 healthy（第 4 次探测）",
+      "ms": 4071
+    },
+    {
+      "step": "重启后用同一账号读取：项目、Session、资产与文件摘要全部保留",
+      "ok": true,
+      "detail": "项目/Session/资产/修订摘要/blob 全部保留",
+      "ms": 1537
+    }
+  ],
+  "conclusion": "M1 出口条件满足：两个真实用户完成登记与读取，容器重启后数据保留。"
+}

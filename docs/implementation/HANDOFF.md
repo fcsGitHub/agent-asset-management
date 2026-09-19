@@ -10,15 +10,18 @@
 
 ## 已完成
 
-- 完整读取 team_asset_design.html（29 章）与 team_asset_goal.md，提取 42 项验收项入台账
-- 环境盘点（Node24/Python3.11/Docker/PG16 容器），证据见 EVIDENCE.md EV-001~004
-- git 仓库初始化、.gitignore/.env.example、npm workspaces 单体仓库
-- docker-compose PostgreSQL（5437）+ 自研迁移 runner + 0001 基线迁移已真实执行
+- 完整读取两份基线文件；42 项验收入台账
+- M0 全部（EV-001~007）+ M1 后端/前端/E2E（EV-008~010）
+- M1 内容：登录会话（scrypt+服务端会话+CSRF）、团队/项目/Session、消息持久化、
+  内容寻址文件库（去重、大小限制、同盘 rename）、七类类型定义+动态属性校验（ajv+词表）、
+  不可变修订+关系断言、RLS（NULLIF 修复）、受限角色 taw_app、两区工作台 UI（含窄屏切换）
+- 真实 DeepSeek API 冒烟通过（deepseek-flash）
 
 ## 未完成
 
-- M1 及全部业务功能（见 PLAN.md、CAPABILITY_MATRIX.md）
-- 42 项验收全部"未开始"
+- M2~M5 全部（分支/发布/项目闭环/Agent/语义/硬化）
+- A01 归档动作、B01 API 层修订写入口（随 M2 分支 API 复核）
+- 已知技术债：多团队用户的项目枚举逐团队循环查询（N+1，规模后优化）
 
 ## 风险
 

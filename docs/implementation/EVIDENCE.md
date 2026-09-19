@@ -59,3 +59,26 @@
 ## M0 结论
 
 出口条件核对（设计 25 章）：可运行基线 ✅（PG 容器 + 迁移 + API healthz + 测试）；真实能力清单 ✅（CAPABILITY_MATRIX.md）；锁定上游版本与许可证记录 ✅（PLAN.md 依赖节 + EV-002；Pi 系 MIT；Semantica 许可证接入时按锁定版本复核）。
+
+### EV-008 ｜ 2026-09-20 ｜ M1 集成测试（真实 PostgreSQL + 真实 HTTP）
+- 命令：`npx vitest run`（tests/m1-flow.test.ts + baseline）
+- 退出码：0
+- 结果：19 passed / 0 failed
+- 覆盖：三用户注册、管理员加成员、401/CSRF 负例、项目+Session、七类类型播种、
+  真实文件上传与摘要、七类资产登记、非法属性 422（A03）、关系正反向（A04）、
+  跨团队关系拒绝（A08）、外人 404 不泄露存在性、RLS 无上下文不可见/写入拒绝、
+  B01 应用角色对修订无 UPDATE/DELETE（DB 层）、blob 去重幂等
+
+### EV-009 ｜ 2026-09-20 ｜ M1 端到端（含真实容器重启）
+- 命令：`npx tsx scripts/e2e-m1.ts`
+- 退出码：0
+- 报告：docs/evidence/m1-e2e-report.json
+- 关键步骤：两用户注册→加团队→项目/Session→上传→三类资产登记→
+  `docker restart taw-postgres`→同一账号重读：项目/Session/资产/摘要/blob 全部保留
+
+### EV-010 ｜ 2026-09-20 ｜ 浏览器端到端（Playwright MCP，真实服务）
+- 步骤：注册团队（UI）→建项目（orbit-ui）→建会话→登记资产表单（类型动态属性+
+  枚举下拉）→上传真实文件→目录出现资产→详情（修订摘要/关系）→发送会话消息并持久化
+- 截图：docs/evidence/m1-desktop-workbench.png（桌面两区）、m1-narrow-chat2.png（窄屏对话）、
+  m1-narrow-workspace.png（窄屏工作区，切换条双向可用）
+- 修复记录：GET /projects 的 RLS 上下文重构；窄屏切换条移出隐藏面板；CSS 规则顺序

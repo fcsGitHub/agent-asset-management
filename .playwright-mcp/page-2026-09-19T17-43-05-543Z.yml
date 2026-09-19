@@ -1,0 +1,50 @@
+- generic [ref=f1e4]:
+  - banner [ref=f1e5]:
+    - button "切换导航抽屉" [ref=f1e6] [cursor=pointer]: ☰
+    - generic [ref=f1e7]: 工作集
+    - combobox "选择项目" [ref=f1e8]:
+      - option "轨道传播验证" [selected]
+    - generic [ref=f1e9]: 整理模型与测试
+    - generic [ref=f1e10]: 已连接
+    - generic [ref=f1e11]: 浏览器验证员
+    - button "退出" [ref=f1e12] [cursor=pointer]
+  - generic [ref=f1e13]:
+    - navigation "项目与会话导航" [ref=f1e14]:
+      - heading "项目 → SESSION" [level=3] [ref=f1e15]
+      - button "＋ 新建项目" [ref=f1e16] [cursor=pointer]
+      - generic [ref=f1e17]:
+        - generic [ref=f1e18]: 轨道传播验证
+        - button "＋ 新建会话" [ref=f1e19] [cursor=pointer]
+        - button "整理模型与测试" [ref=f1e49] [cursor=pointer]
+    - generic [ref=f1e21]:
+      - complementary "Agent 对话区" [ref=f1e22]:
+        - generic [ref=f1e23]: AGENT · 轨道传播验证
+        - generic [ref=f1e24]: 开始这段会话。你可以先在右侧「登记资产」完成上传与登记；Agent 助手稍后接入。
+        - generic [ref=f1e26]:
+          - textbox "输入消息…（Agent 将在后续里程碑接入；上传、登记、检索等操作不依赖模型）" [ref=f1e27]
+          - button "发送" [disabled] [ref=f1e28]
+        - generic [ref=f1e29]: Ctrl+Enter 发送 · 会话内容持久化保存
+      - region "工作区" [ref=f1e30]:
+        - generic [ref=f1e31]:
+          - button "项目概况" [ref=f1e32] [cursor=pointer]
+          - button "资产目录" [ref=f1e33] [cursor=pointer]
+          - button "登记资产" [ref=f1e34] [cursor=pointer]
+        - generic [ref=f1e87]:
+          - heading [level=3] [ref=f1e88]:
+            - text: 团队资产目录
+            - button "登记新资产" [ref=f1e89] [cursor=pointer]
+          - textbox "按名称搜索…" [ref=f1e91]
+          - table [ref=f1e92]:
+            - rowgroup [ref=f1e93]:
+              - row [ref=f1e94]:
+                - columnheader "名称" [ref=f1e95]
+                - columnheader "类型" [ref=f1e96]
+                - columnheader "类型版本" [ref=f1e97]
+                - columnheader "修订摘要" [ref=f1e98]
+            - rowgroup [ref=f1e99]:
+              - row [ref=f1e100]:
+                - cell "轨道传播模型A（UI登记）" [ref=f1e101]
+                - cell "simulation.model" [ref=f1e102]
+                - cell "1.0.0" [ref=f1e104]
+                - cell [ref=f1e105]:
+                  - code [ref=f1e106]: 5d04647dd2b1…

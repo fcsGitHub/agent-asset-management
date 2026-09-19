@@ -1,0 +1,12 @@
+- generic [ref=e4]:
+  - heading "工作集" [level=1] [ref=e5]
+  - generic [ref=e6]: 小型团队 LLM Agent 资产协同管理
+  - generic [ref=e7]:
+    - generic [ref=e8]: 邮箱
+    - textbox [ref=e9]
+  - generic [ref=e10]:
+    - generic [ref=e11]: 密码
+    - textbox [ref=e12]
+  - button "登录" [ref=e14] [cursor=pointer]
+  - link "没有账号？注册新团队" [ref=e16] [cursor=pointer]:
+    - /url: "#"

@@ -65,15 +65,27 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/projects", async (req) => {
     const auth = requireAuth(req);
-    // 服务端从成员关系反查可见项目；不信任客户端 teamId 扩权
-    const { rows } = await q<{ team_id: string; id: string; name: string; code: string; status: string }>(
-      `SELECT p.team_id, p.id, p.name, p.code, p.status
-         FROM projects p
-         JOIN project_members pm ON pm.team_id = p.team_id AND pm.project_id = p.id AND pm.user_id = $1
-        ORDER BY p.created_at DESC`,
+    // 服务端从成员关系反查可见项目；RLS 表必须逐团队在租户上下文内查询
+    const { rows: teams } = await q<{ team_id: string }>(
+      `SELECT team_id FROM team_members WHERE user_id = $1`,
       [auth.userId]
     );
-    return rows.map((r) => ({ teamId: r.team_id, projectId: r.id, name: r.name, code: r.code, status: r.status }));
+    const all: { teamId: string; projectId: string; name: string; code: string; status: string }[] = [];
+    for (const t of teams) {
+      const rows = await withTeam(t.team_id, async (client) =>
+        client.query<{ id: string; name: string; code: string; status: string }>(
+          `SELECT p.id, p.name, p.code, p.status
+             FROM projects p
+             JOIN project_members pm ON pm.team_id = p.team_id AND pm.project_id = p.id AND pm.user_id = $1
+            ORDER BY p.created_at DESC`,
+          [auth.userId]
+        )
+      );
+      for (const r of rows.rows) {
+        all.push({ teamId: t.team_id, projectId: r.id, name: r.name, code: r.code, status: r.status });
+      }
+    }
+    return all;
   });
 
   app.post("/projects/:projectId/sessions", async (req, reply) => {
