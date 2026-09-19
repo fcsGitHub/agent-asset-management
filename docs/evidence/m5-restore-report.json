@@ -1,0 +1,59 @@
+{
+  "runId": "1c484e",
+  "startedAt": "2026-09-19T19:32:00.984Z",
+  "steps": [
+    {
+      "name": "注册用户并持有活动会话",
+      "ok": true,
+      "detail": "{\"status\":201}"
+    },
+    {
+      "name": "第二会话已撤销（登出后 401）",
+      "ok": true,
+      "detail": "401"
+    },
+    {
+      "name": "创建项目/资产/制品",
+      "ok": true,
+      "detail": "{\"assetId\":\"2e2ec5ce-cf44-4b67-b2be-115b9b147a88\"}"
+    },
+    {
+      "name": "真实发布产生 outbox 事件",
+      "ok": true,
+      "detail": "{\"status\":200}"
+    },
+    {
+      "name": "pg_dump 逻辑备份",
+      "ok": true,
+      "detail": "{\"dumpSize\":1839814}"
+    },
+    {
+      "name": "blob 目录文件备份",
+      "ok": true,
+      "detail": "{\"teamId\":\"ac6cfd45-9c8c-4a04-a397-563857fd4494\",\"digest\":\"dd8f83748b65…\"}"
+    },
+    {
+      "name": "新容器启动（5438，全新卷）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "先按手册重建应用角色（集群级对象）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "恢复 SQL dump 到新实例",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "新实例端到端验证（登录/资产/摘要/blob/撤销会话/outbox）",
+      "ok": true,
+      "detail": "2ec5ce-cf44-4b67-b2be-115b9b147a88\",\"name\":\"恢复验证模型\",\"lifecycle\":\"active\",\"created_at\":\"2026-09-19T19:32:02.088Z\",\"type_key\":\"simulation.model\",\"type_version\":\"1.0.0\",\"type_version_id\":\"420857\nOK 修订存在且摘要一致（64 hex） :: {\"id\":\"509b501b-801f-4eb8-8b0c-5845efc4c494\",\"seq\":1,\"content_digest\":\"80e1e727f2ff5d77015f60273f229cb32c7493da3e65d88da0b4c9bcff457fe5\",\"properties\":{\"frame\":\"ECI\",\"timeScale\":\"TAI\",\"positionUnit\":\"m\nOK blob 可下载且 sha256 匹配 :: {\"sha\":\"dd8f83748b65…\",\"expected\":\"dd8f83748b65…\"}\nOK 已撤销会话恢复后仍 401 :: 401\nOK outbox 发布事件恰一条（不重复） :: [{\"event_type\":\"ReleasePublished\",\"n\":\"1\"}]\nVERIFY_PASS\n"
+    }
+  ],
+  "verifyOutput": "OK 恢复库可连通（/auth/me 用原会话） :: {}\nOK 资产在新实例可读 :: {\"id\":\"2e2ec5ce-cf44-4b67-b2be-115b9b147a88\",\"name\":\"恢复验证模型\",\"lifecycle\":\"active\",\"created_at\":\"2026-09-19T19:32:02.088Z\",\"type_key\":\"simulation.model\",\"type_version\":\"1.0.0\",\"type_version_id\":\"420857\nOK 修订存在且摘要一致（64 hex） :: {\"id\":\"509b501b-801f-4eb8-8b0c-5845efc4c494\",\"seq\":1,\"content_digest\":\"80e1e727f2ff5d77015f60273f229cb32c7493da3e65d88da0b4c9bcff457fe5\",\"properties\":{\"frame\":\"ECI\",\"timeScale\":\"TAI\",\"positionUnit\":\"m\nOK blob 可下载且 sha256 匹配 :: {\"sha\":\"dd8f83748b65…\",\"expected\":\"dd8f83748b65…\"}\nOK 已撤销会话恢复后仍 401 :: 401\nOK outbox 发布事件恰一条（不重复） :: [{\"event_type\":\"ReleasePublished\",\"n\":\"1\"}]\nVERIFY_PASS\n",
+  "conclusion": "E03 完成：数据库与 blob 共同恢复到新实例，摘要/权限/撤销状态/outbox 均一致。",
+  "finishedAt": "2026-09-19T19:32:20.759Z"
+}

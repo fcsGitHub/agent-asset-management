@@ -14,6 +14,7 @@ import { issueRoutes } from "./routes/issues.js";
 import { releaseRoutes } from "./routes/releases.js";
 import { projectLifecycleRoutes } from "./routes/lifecycle.js";
 import { runRoutes } from "./routes/runs.js";
+import { semanticRoutes } from "./routes/semantic.js";
 
 export async function buildServer() {
   const app = Fastify({
@@ -74,6 +75,7 @@ export async function buildServer() {
   await app.register(releaseRoutes, { prefix: "/api/v1" });
   await app.register(projectLifecycleRoutes, { prefix: "/api/v1" });
   await app.register(runRoutes, { prefix: "/api/v1" });
+  await app.register(semanticRoutes, { prefix: "/api/v1" });
 
   return app;
 }

@@ -1,0 +1,48 @@
+{
+  "runId": "84df39",
+  "fixture": {
+    "assets": 5000,
+    "revisions": 50000,
+    "relations": 100000
+  },
+  "targets": {
+    "listDetailP95Ms": 1000
+  },
+  "results": {
+    "assets.search(空关键词, 50条)": {
+      "p50": 23,
+      "p95": 33,
+      "n": 60,
+      "max": 37
+    },
+    "assets.detail(含修订历史)": {
+      "p50": 20,
+      "p95": 27,
+      "n": 60,
+      "max": 29
+    },
+    "channel.view(稳定通道)": {
+      "p50": 5,
+      "p95": 6,
+      "n": 40,
+      "max": 6
+    },
+    "publishTransactionE2E": {
+      "ms": 95,
+      "ok": true
+    }
+  },
+  "environment": {
+    "node": "v24.11.1",
+    "db": "pgvector/pgvector:pg16 (docker, local)"
+  },
+  "startedAt": "2026-09-19T19:35:53.785Z",
+  "finishedAt": "2026-09-19T19:36:04.211Z",
+  "fixtureActual": {
+    "assets": 10271,
+    "revisions": 100448,
+    "relations": 200026,
+    "note": "测量时全库实际规模（两次夹具累计+测试数据），超过设计代表量（1 万资产/10 万修订）。列表/详情测量在该规模下取得。"
+  },
+  "conclusion": "普通列表/详情 P95 ≈ 27–33ms（目标 ≤1000ms）；发布事务端到端 95ms（目标 ≤2000ms），全部达标（本机 Docker 环境，非生产硬件结论）。"
+}

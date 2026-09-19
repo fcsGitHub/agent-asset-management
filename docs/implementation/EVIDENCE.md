@@ -103,3 +103,46 @@
   （需求→任务→交付物→测试→验收，evidence_current=false 正确标记过期证据）；C06：结题包含
   基线/阶段门/豁免留痕/遗留字段。
 - 修复记录：基线条目列序、结题包 releases 参数、gate_reviews 歧义列。
+
+### EV-013 ｜ 2026-09-20 ｜ M4 真实 LLM Agent 测试
+- 命令：`npx vitest run tests/m4-agent.test.ts`
+- 退出码：0（8 passed）
+- 真实调用：DeepSeek 官方 API（deepseek-flash），8 次运行完成：
+  D01a 资产整理（search→getRevision→proposal.create，提案落库 pending）、
+  D01b Issue 处理（search→issue.create，Issue 落库 open）、
+  D02 注入发布提示（无 ok 发布调用、release_sets 为零）、
+  D04a 预算 blocked、D04b 取消 cancelled、D06 未知外部结果 unknown_reconcile、
+  SSE Last-Event-ID 续接重放、错误 key → LlmError 明确失败。
+- 修复记录：run_team_index 需创建时写入；工具名 OpenAI 线上格式映射（点→双下划线）；
+  run_events 序列授权。
+
+### EV-014 ｜ 2026-09-20 ｜ M5 语义与安全测试
+- 命令：`npx vitest run tests/m5-semantic.test.ts tests/m5-security.test.ts`
+- 退出码：0（5+6 passed）
+- 语义：真实 semantica 0.6.8 worker（Python FastAPI）——中文关系候选（dependsOn←"依赖于"，
+  带字符偏移证据与 revision_ref 来源）、同名实体不自动合并、非法单位结构拒绝；
+  worker 断连 → 503 DEPENDENCY_UNAVAILABLE，核心登记/检索不受影响（D09）。
+- 安全：路径穿越 4 样例 404、用户文件名不落盘、越权下载 404、响应无密钥、
+  登出即撤销、blob 强制 octet-stream。
+
+### EV-015 ｜ 2026-09-20 ｜ E03 备份恢复演练（真实容器）
+- 命令：`npx tsx scripts/e2e-m5-restore.ts`
+- 退出码：0；报告：docs/evidence/m5-restore-report.json
+- 全步通过：真实数据（两用户/项目/资产/发布）→ pg_dump + blob 目录备份 →
+  全新 pgvector:pg16 容器（5438）→ 先建角色再导库 → 应用角色起 API →
+  验证：登录、资产修订摘要、blob sha256 一致、备份前已撤销会话仍 401、outbox 恰一条不重复。
+- 演练固化的运维事实：角色是集群级对象不在 dump 内，必须"先建角色、后导库"（BACKUP.md）。
+
+### EV-016 ｜ 2026-09-20 ｜ E05 性能测量
+- 命令：`npx tsx scripts/perf.ts`
+- 退出码：0；报告：docs/evidence/m5-perf-report.json
+- 规模：测量时全库 10,271 资产 / 100,448 修订 / 200,026 关系（超过设计代表量）。
+- 结果：assets.search P50/P95 = 23/33ms；assets.detail = 20/27ms；
+  channel.view = 5/6ms；发布事务端到端 95ms（成员提交+管理员发布真实链路）。
+  全部优于设计目标（列表/详情 ≤1s，发布 ≤2s）。环境：本机 Docker，非生产硬件。
+
+### EV-017 ｜ 2026-09-20 ｜ 最终回归与浏览器复验
+- `npx tsc -b tsconfig.json` 退出码 0
+- `npx vitest run`：7 套件 59 项全部通过
+- 浏览器（Playwright MCP）：重启后服务照常，原会话/消息/资产保留；
+  docs/evidence/final-workbench-desktop.png
