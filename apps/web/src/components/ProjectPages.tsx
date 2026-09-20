@@ -33,6 +33,9 @@ interface ActivityItem {
   project?: string;
 }
 
+// 历史分页游标：页尾条目的（精确时间戳, kind, id），由服务端签发、原样回传
+interface ActivityCursor { before: string; beforeKind: string; beforeId: string }
+
 interface CRRow { id: string; title: string; status: string; created_at: string; created_by_name: string; branch_name: string; item_count: number }
 interface IssueRow { id: string; title: string; status: string; created_at: string; asset_name: string | null }
 interface CRDetail {
@@ -235,17 +238,50 @@ export function ActivityPage({
   const [live, setLive] = useState(false);
   const limitRef = useRef(limit);
   limitRef.current = limit;
+  // 历史分页游标（M20）：页尾（精确时间戳, kind, id）；null = 没有更早的历史
+  const [next, setNext] = useState<ActivityCursor | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const applyItems = useCallback((incoming: ActivityItem[], append: boolean) => {
+    setItems((prev) => {
+      if (!append) return incoming;
+      const seen = new Set((prev ?? []).map((x) => x.key));
+      return [...(prev ?? []), ...incoming.filter((x) => x.key && !seen.has(x.key))];
+    });
+  }, []);
+
+  const fetchPage = useCallback(async (cursor: ActivityCursor | null): Promise<ActivityCursor | null> => {
+    if (!project) return null;
+    const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
+    if (filterProjectId) query.projectId = filterProjectId;
+    if (cursor) {
+      query.before = cursor.before;
+      query.beforeKind = cursor.beforeKind;
+      query.beforeId = cursor.beforeId;
+    }
+    const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null }>("/activity", { query });
+    applyItems(r.items, !!cursor);
+    return r.next;
+  }, [project, filterProjectId, applyItems]);
 
   const reload = useCallback(() => {
     if (!project) return;
-    const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
-    if (filterProjectId) query.projectId = filterProjectId;
-    void api<{ items: ActivityItem[] }>("/activity", { query })
-      .then((r) => setItems(r.items))
+    setError("");
+    void fetchPage(null)
+      .then((n) => setNext(n))
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载动态失败"));
-  }, [project, filterProjectId]);
+  }, [project, fetchPage]);
 
   useEffect(reload, [reload]);
+
+  const loadOlder = useCallback(() => {
+    if (!next || loadingMore) return;
+    setLoadingMore(true);
+    void fetchPage(next)
+      .then((n) => setNext(n))
+      .catch((e) => setError(e instanceof ApiError ? e.message : "加载更早动态失败"))
+      .finally(() => setLoadingMore(false));
+  }, [next, loadingMore, fetchPage]);
 
   // 实时流：连接期间新事件由服务端推送；断线重连成功后整体刷新对齐（流本身只推实时事件）
   useEffect(() => {
@@ -311,6 +347,14 @@ export function ActivityPage({
       {error && <div className="error-text">{error}</div>}
       {items && <ActivityList items={items} />}
       {!items && !error && <div className="state">正在加载…</div>}
+      {next && (
+        <div className="btn-row" style={{ justifyContent: "center" }}>
+          <button disabled={loadingMore} onClick={loadOlder}>{loadingMore ? "加载中…" : "加载更早"}</button>
+        </div>
+      )}
+      {items !== null && !next && items.length > 0 && (
+        <p className="hint" style={{ textAlign: "center" }}>已加载全部动态。</p>
+      )}
       <p className="hint">点击动态中的资产类条目可在工作台打开资产。👤 为人的治理动作（审计），🤖 为 Agent 运行；流式更新由数据库触发器推送。</p>
     </div>
   );

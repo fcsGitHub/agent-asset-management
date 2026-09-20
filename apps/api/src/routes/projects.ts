@@ -1,5 +1,6 @@
 // /api/v1/projects + sessions — 项目与项目会话（设计 4/16 章）。
 import type { FastifyInstance } from "fastify";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import { q, withTeam, withTx } from "../db.js";
 import { ERR } from "../errors.js";
@@ -245,9 +246,16 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "release_published": "发布到通道",
     "release_rollback": "通道回滚",
   };
+  // 活动流历史分页（键集分页）：游标 = 页尾条目的（精确时间戳, kind, id）。
+  // 合并序为 (ts DESC, kind [audit 先于 agent], id DESC)；同 ts 跨源的边界语义：
+  //   边界是 audit → 同 ts 的 agent 全部落入下一页；边界是 agent → 同 ts 的 audit 已全部加载。
+  // ts 用 Postgres 原生文本往返（to_jsonb），避免 JS Date 毫秒截断丢失微秒导致漏项。
   app.get("/activity", async (req) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string; limit?: string; projectId?: string };
+    const query = (req.query ?? {}) as {
+      teamId?: string; limit?: string; projectId?: string;
+      before?: string; beforeKind?: string; beforeId?: string;
+    };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertTeamMember(auth.userId, teamId);
@@ -255,40 +263,75 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     // 项目过滤语义：项目级动作（审核准备/发布/回滚、Agent 运行）带 project_id；
     // 团队级动作（资产归档/恢复等）为 NULL——按项目过滤时仅显示该项目内的动作。
     const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
+
+    // 游标解析：字段齐全才生效；字段不合法如实 422（不静默从头重放）
+    const rawBefore = String(query.before ?? "");
+    const beforeKind = query.beforeKind === "audit" || query.beforeKind === "agent" ? query.beforeKind : null;
+    const rawBeforeId = String(query.beforeId ?? "");
+    let cursorTs: string | null = null;
+    let cursorAuditId: number | null = null;
+    let cursorRunId: string | null = null;
+    if (rawBefore || beforeKind || rawBeforeId) {
+      if (!/^\d{4}-\d{2}-\d{2}[T ][\d:.+Z-]{8,40}$/.test(rawBefore)) throw ERR.INVALID("before 游标格式不合法");
+      if (!beforeKind) throw ERR.INVALID("beforeKind 游标缺失");
+      if (beforeKind === "audit" && !/^\d{1,20}$/.test(rawBeforeId)) throw ERR.INVALID("beforeId 游标不合法");
+      if (beforeKind === "agent" && !/^[0-9a-f-]{36}$/.test(rawBeforeId)) throw ERR.INVALID("beforeId 游标不合法");
+      cursorTs = rawBefore;
+      if (beforeKind === "audit") cursorAuditId = Number(rawBeforeId);
+      else cursorRunId = rawBeforeId;
+    }
+
     return withTeam(teamId, async (client) => {
       const { rows: audits } = await client.query<{
         id: string;
         ts: string;
+        ts_exact: string;
         action: string;
         object_kind: string;
         object_id: string | null;
         actor: string | null;
         detail: Record<string, unknown>;
       }>(
-        `SELECT a.id::text AS id, a.created_at AS ts, a.action, a.object_kind, a.object_id, u.display_name AS actor, a.detail
+        `SELECT a.id::text AS id, a.created_at AS ts, to_jsonb(a.created_at)#>>'{}' AS ts_exact,
+                a.action, a.object_kind, a.object_id, u.display_name AS actor, a.detail
            FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id
           WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
-          ORDER BY a.created_at DESC LIMIT $2`,
-        [teamId, limit, filterProjectId]
+            AND (
+              $4::timestamptz IS NULL
+              OR a.created_at < $4::timestamptz
+              OR ($5::bigint IS NOT NULL AND a.created_at = $4::timestamptz AND a.id < $5::bigint)
+            )
+          ORDER BY a.created_at DESC, a.id DESC
+          LIMIT $2`,
+        [teamId, limit + 1, filterProjectId, cursorTs, cursorAuditId]
       );
       const { rows: agentRuns } = await client.query<{
         id: string;
         ts: string;
+        ts_exact: string;
         prompt: string;
         status: string;
         actor: string | null;
         project_name: string | null;
         session_title: string | null;
       }>(
-        `SELECT r.id::text AS id, r.created_at AS ts, r.prompt, r.status, u.display_name AS actor,
+        `SELECT r.id::text AS id, r.created_at AS ts, to_jsonb(r.created_at)#>>'{}' AS ts_exact,
+                r.prompt, r.status, u.display_name AS actor,
                 p.name AS project_name, s.title AS session_title
            FROM agent_runs r
            LEFT JOIN users u ON u.id = r.created_by
            LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
            LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
           WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
-          ORDER BY r.created_at DESC LIMIT $2`,
-        [teamId, limit, filterProjectId]
+            AND (
+              $4::timestamptz IS NULL
+              OR r.created_at < $4::timestamptz
+              OR ($5::bigint IS NOT NULL AND r.created_at = $4::timestamptz)
+              OR ($6::uuid IS NOT NULL AND r.created_at = $4::timestamptz AND r.id < $6::uuid)
+            )
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT $2`,
+        [teamId, limit + 1, filterProjectId, cursorTs, cursorAuditId, cursorRunId]
       );
       interface ActivityItem {
         key?: string;
@@ -300,6 +343,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         objectId: string | null;
         project?: string;
       }
+      const tsExactById = new Map<string, string>();
+      for (const a of audits) tsExactById.set(`audit:${a.id}`, a.ts_exact);
+      for (const r of agentRuns) tsExactById.set(`agent:${r.id}`, r.ts_exact);
       const items: ActivityItem[] = [
         ...audits.map((a): ActivityItem => ({
           key: `audit:${a.id}`,
@@ -321,9 +367,21 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           project: r.project_name ?? undefined,
         })),
       ]
-        .sort((x, y) => (x.ts < y.ts ? 1 : -1))
+        // 全序：ts DESC，同 ts 时 audit 先于 agent（数组构造序 + 稳定排序必须以 0 表相等，
+        // 否则不一致比较器会同 ts 跨源乱序，破坏键集分页的边界语义）
+        .sort((x, y) => (x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : 0))
         .slice(0, limit);
-      return { items };
+      // 稳定排序保证同 ts 时 audit 先于 agent；两类来源在 SQL 内再按 id DESC 定序
+      const boundary = items[items.length - 1];
+      const next =
+        items.length === limit && boundary && boundary.key
+          ? {
+              before: tsExactById.get(boundary.key) ?? new Date(boundary.ts).toISOString(),
+              beforeKind: boundary.kind,
+              beforeId: boundary.key.split(":")[1] ?? "",
+            }
+          : null;
+      return { items, next };
     });
   });
 
@@ -464,24 +522,74 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       req.body
     );
     await assertTeamMember(auth.userId, body.teamId);
-    return withTeam(body.teamId, async (client) => {
-      const { rows } = await client.query<{ id: string; status: string }>(
-        `SELECT id, status FROM agent_proposals WHERE team_id = $1 AND id = $2 FOR UPDATE`,
-        [body.teamId, proposalId]
-      );
-      if (!rows[0]) throw ERR.NOT_FOUND();
-      if (rows[0].status !== "pending") {
-        throw ERR.CONFLICT("PROPOSAL_NOT_PENDING", `提案已处于 ${rows[0].status} 状态`);
+    return withTeam(body.teamId, async (client) =>
+      reviewProposal(client, body.teamId, auth.userId, proposalId, body.decision, body.note ?? null)
+    );
+  });
+
+  // 提案批量审核：逐条独立判定，逐条如实回执（已处理条目标 PROPOSAL_NOT_PENDING，不中断其余）
+  app.post("/projects/:projectId/proposals/batch-review", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { projectId } = req.params as { projectId: string };
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        items: z.array(z.object({
+          proposalId: z.string().uuid(),
+          decision: z.enum(["accepted", "rejected"]),
+          note: z.string().max(2000).optional(),
+        })).min(1).max(50),
+      }),
+      req.body
+    );
+    await assertProjectAccess(auth.userId, body.teamId, projectId);
+    const results = await withTeam(body.teamId, async (client) => {
+      const out: Array<{ proposalId: string; ok: boolean; status?: string; code?: string; message?: string }> = [];
+      for (const item of body.items) {
+        try {
+          const r = await reviewProposal(client, body.teamId, auth.userId, item.proposalId, item.decision, item.note ?? null);
+          out.push({ proposalId: item.proposalId, ok: true, status: r.status });
+        } catch (err) {
+          const e = err as { code?: string; message?: string };
+          out.push({ proposalId: item.proposalId, ok: false, code: e.code ?? "INTERNAL", message: e.message });
+        }
       }
-      await client.query(
-        `UPDATE agent_proposals SET status = $3, reviewed_by = $4,
-           payload = payload || jsonb_build_object('review', jsonb_build_object(
-             'note', CASE WHEN $5::text IS NULL OR $5::text = '' THEN NULL ELSE $5::text END,
-             'reviewed_at', to_jsonb(now()::text)))
-         WHERE team_id = $1 AND id = $2`,
-        [body.teamId, proposalId, body.decision, auth.userId, body.note ?? null]
-      );
-      return { teamId: body.teamId, proposalId, status: body.decision };
+      return out;
+    });
+    return reply.code(200).send({
+      teamId: body.teamId,
+      projectId,
+      reviewed: results.filter((r) => r.ok).length,
+      results,
     });
   });
+}
+
+/** 共享审核核心：提案锁 + pending 状态机 + jsonb 合并审核回执（单条与批量同一路径）。 */
+async function reviewProposal(
+  client: PoolClient,
+  teamId: string,
+  userId: string,
+  proposalId: string,
+  decision: "accepted" | "rejected",
+  note: string | null
+): Promise<{ teamId: string; proposalId: string; status: string }> {
+  const { rows } = await client.query<{ id: string; status: string }>(
+    `SELECT id, status FROM agent_proposals WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+    [teamId, proposalId]
+  );
+  if (!rows[0]) throw ERR.NOT_FOUND();
+  if (rows[0].status !== "pending") {
+    throw ERR.CONFLICT("PROPOSAL_NOT_PENDING", `提案已处于 ${rows[0].status} 状态`);
+  }
+  await client.query(
+    `UPDATE agent_proposals SET status = $3, reviewed_by = $4,
+       payload = payload || jsonb_build_object('review', jsonb_build_object(
+         'note', CASE WHEN $5::text IS NULL OR $5::text = '' THEN NULL ELSE $5::text END,
+         'reviewed_at', to_jsonb(now()::text)))
+     WHERE team_id = $1 AND id = $2`,
+    [teamId, proposalId, decision, userId, note]
+  );
+  return { teamId, proposalId, status: decision };
 }

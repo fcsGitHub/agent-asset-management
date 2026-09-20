@@ -46,6 +46,9 @@ export function AgentProposals({ project, onPrefillRegister }: {
   const [status, setStatus] = useState("pending");
   const [error, setError] = useState("");
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  // 批量审核（M20）：勾选 + 批量接受/拒绝，逐条回执
+  const [pSel, setPSel] = useState<Record<string, boolean>>({});
+  const [pBusy, setPBusy] = useState(false);
 
   const load = useCallback(() => {
     if (!project) return;
@@ -66,6 +69,34 @@ export function AgentProposals({ project, onPrefillRegister }: {
       load();
     } catch (err) {
       setRowErrors((prev) => ({ ...prev, [p.id]: err instanceof ApiError ? err.message : "审核失败" }));
+    }
+  }
+
+  async function batchReview(decision: "accepted" | "rejected") {
+    if (!project || !rows) return;
+    const items = rows.filter((p) => pSel[p.id] && p.status === "pending")
+      .map((p) => ({ proposalId: p.id, decision }));
+    if (items.length === 0) return;
+    setPBusy(true);
+    setError("");
+    try {
+      const r = await api<{ reviewed: number; results: Array<{ proposalId: string; ok: boolean; code?: string; message?: string }> }>(
+        `/projects/${project.projectId}/proposals/batch-review`,
+        { method: "POST", body: { teamId: project.teamId, items } },
+      );
+      setRowErrors((prev) => {
+        const next = { ...prev };
+        for (const res of r.results) {
+          if (!res.ok) next[res.proposalId] = `${res.code ?? "INTERNAL"}：${res.message ?? "审核失败"}`;
+        }
+        return next;
+      });
+      setPSel({});
+      load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "批量审核失败");
+    } finally {
+      setPBusy(false);
     }
   }
 
@@ -95,6 +126,25 @@ export function AgentProposals({ project, onPrefillRegister }: {
           hint="在左侧对话区给 Agent 派任务（如「梳理资产并提出整理建议」），产出的提案会出现在这里。"
         />
       )}
+      {rows !== null && rows.length > 0 && status === "pending" && (
+        <div className="sem-batchbar">
+          <label className="sem-check">
+            <input
+              type="checkbox"
+              aria-label="全选待审提案"
+              checked={rows.every((p) => p.status !== "pending" || pSel[p.id])}
+              onChange={(e) => setPSel(Object.fromEntries(rows.filter((p) => p.status === "pending").map((p) => [p.id, e.target.checked])))}
+            />
+            全选
+          </label>
+          <span className="sem-conf">已选 {rows.filter((p) => pSel[p.id] && p.status === "pending").length} 个待审提案</span>
+          <button className="primary" disabled={pBusy} onClick={() => void batchReview("accepted")}>
+            {pBusy ? "处理中…" : "批量接受"}
+          </button>
+          <button disabled={pBusy} onClick={() => void batchReview("rejected")}>批量忽略</button>
+          <span className="sem-conf">接受不自动写库；逐条回执，失败不影响其余</span>
+        </div>
+      )}
       {rows !== null && rows.length > 0 && (
         <ul className="proposal-list">
           {rows.map((p) => {
@@ -105,6 +155,14 @@ export function AgentProposals({ project, onPrefillRegister }: {
             return (
               <li key={p.id} className={`proposal-item${p.status !== "pending" ? " proposal-done" : ""}`}>
                 <div className="proposal-head">
+                  {p.status === "pending" && status === "pending" && (
+                    <input
+                      type="checkbox"
+                      aria-label={`批选 ${pickName(payload) ?? p.id}`}
+                      checked={!!pSel[p.id]}
+                      onChange={(e) => setPSel((prev) => ({ ...prev, [p.id]: e.target.checked }))}
+                    />
+                  )}
                   <span className="badge">{KIND_LABELS[p.kind] ?? p.kind}</span>
                   <span className={`chip ${p.status === "pending" ? "chip-warn" : "chip-dim"}`}>
                     {p.status === "pending" ? "待审核" : p.status === "accepted" ? "已接受" : "已忽略"}

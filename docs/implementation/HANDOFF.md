@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 139 项基线仍绿
+4. `npx vitest run` 确认 142 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -77,5 +77,8 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    帧客户端重取对齐）；LISTEN 连接 application_name=taw_activity_hub 可观测；
    修复 connecting 缓存拒绝导致的枢纽永久死亡。队列状态筛选视图 + NL「打开提案页」
    （EV-041）。
+   M20 已完成：活动流历史键集分页（精确时间戳游标 to_jsonb 往返、同 instant 跨源
+   边界语义显式化；修复相等比较器双向 -1 的真实缺陷）+ 提案批量审核（reviewProposal
+   共享核心、逐条回执）；动态页「加载更早」、提案批审条（EV-042）。
    下一步候选：NL 意图再扩展（图谱聚焦资产）、批量导入去重（同团队同 type+端点
-   幂等）、活动流历史分页游标、提案批量审核、类型登记时的单位词表在线校验。
+   幂等）、提案批量审核备注、类型登记时的单位词表在线校验、动态页导出审计。
