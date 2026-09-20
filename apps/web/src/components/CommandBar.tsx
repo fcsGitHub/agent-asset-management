@@ -16,17 +16,20 @@ interface Command {
 }
 
 export interface NlIntentPayload {
-  intent: "navigate" | "search_assets" | "fill_register_form";
-  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string };
+  intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue";
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; title?: string; body?: string };
   parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
 }
 
 export function describeIntent(i: NlIntentPayload): string {
   if (i.intent === "navigate") {
-    const names: Record<string, string> = { dashboard: "总览", workbench: "工作台", activity: "团队动态", approvals: "审批队列" };
+    const names: Record<string, string> = {
+      dashboard: "总览", workbench: "工作台", activity: "团队动态", approvals: "审批队列", graph: "关系图谱",
+    };
     return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
   }
   if (i.intent === "search_assets") return `搜索资产：${i.params.query ?? ""}`;
+  if (i.intent === "create_issue") return `起草问题工单（确认后才创建）`;
   return `预填登记表单${i.params.typeKeyHint ? `（类型含 "${i.params.typeKeyHint}"）` : ""}${i.params.name ? `，名称 "${i.params.name}"` : ""}`;
 }
 
@@ -194,6 +197,13 @@ export function CommandBar({
               </span>
             </div>
             {nl.parser.note && <div className="nl-note">{nl.parser.note}</div>}
+            {nl.intent === "create_issue" && (
+              <div className="nl-preview">
+                <div className="nl-preview-title">{nl.params.title || "（无标题）"}</div>
+                {nl.params.body && <div className="nl-preview-body">{nl.params.body}</div>}
+                <div className="nl-note">写类操作双重确认：点「执行」才会调用真实接口创建工单；解析本身不落库。</div>
+              </div>
+            )}
             <div className="btn-row">
               <button className="primary" onClick={() => { const shouldClose = onExecuteNl(nl); setNl(null); if (shouldClose) onClose(); }}>执行</button>
               <button onClick={() => setNl(null)}>取消</button>

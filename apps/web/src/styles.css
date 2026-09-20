@@ -308,3 +308,49 @@ kbd {
   .body { flex-direction: column; }
   .drawer { width: 100%; }
 }
+
+/* ---------- M10：关系图谱页 ---------- */
+.graph-wrap { padding: 10px; }
+.rel-graph {
+  width: 100%; height: auto; display: block;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  touch-action: none; user-select: none;
+}
+.rel-graph .edge line { stroke: var(--muted); stroke-width: 1.4; opacity: 0.65; }
+.rel-graph .edge.proposed line { stroke-dasharray: 5 4; opacity: 0.55; }
+.rel-graph .edge-label {
+  font-size: 11px; fill: var(--muted); text-anchor: middle;
+  paint-order: stroke; stroke: var(--paper); stroke-width: 3px;
+}
+.rel-graph .node { cursor: pointer; }
+.rel-graph .node:hover circle { stroke: var(--accent); stroke-width: 3; }
+.rel-graph .node-label {
+  font-size: 12px; fill: var(--ink); text-anchor: middle; pointer-events: none;
+  paint-order: stroke; stroke: var(--paper); stroke-width: 3px;
+}
+.graph-legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 10px 6px 2px; font-size: 12.5px; color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.legend-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+
+/* ---------- M10：flash 操作反馈 ---------- */
+.flash {
+  position: fixed; right: 18px; bottom: 18px; z-index: 60;
+  max-width: min(420px, 80vw); padding: 10px 16px; border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(10, 25, 18, 0.25); font-size: 14px;
+  animation: flash-in 0.18s ease-out;
+}
+.flash-ok { background: #eaf6ee; border: 1px solid #b5d9c2; color: #1e5c3c; }
+.flash-error { background: #fbeeea; border: 1px solid #e0b7ab; color: #8a3222; }
+@keyframes flash-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---------- M10：NL 写类意图预览卡 ---------- */
+.nl-preview { margin-top: 6px; padding: 8px 10px; border-left: 3px solid var(--amber); background: #fdf8ef; border-radius: 0 8px 8px 0; }
+.nl-preview-title { font-weight: 650; font-size: 14px; }
+.nl-preview-body { font-size: 13px; color: var(--ink); margin-top: 3px; white-space: pre-wrap; }
+
+/* ---------- M10：总览最近问题 ---------- */
+.issue-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.issue-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.issue-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue-asset { color: var(--muted); font-size: 12.5px; }
+.issue-time { color: var(--muted); font-size: 12px; white-space: nowrap; }

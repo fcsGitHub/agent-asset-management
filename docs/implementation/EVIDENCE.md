@@ -296,3 +296,33 @@
   5) m2 STALE_HEAD 负例传入的是新头而非旧头（幽灵修订级联 4 个用例）等测试侧错误一并修正；
   m6-worker 补"排干遗留未投递事件"基线步骤，消除对干净 outbox 的隐含假设。
 - 全量：`npx vitest run` 16 套件 98 项全部通过（每一条断言都真实生效）。
+
+### EV-032 ｜ 2026-09-20 ｜ M10 迭代轮：NL 写类意图（预览-确认）+ 关系图谱 + 本体 Turtle 导出
+- NL 意图扩展到写类（create_issue）：解析端点保持零副作用（POST /nl/parse 只产草稿，
+  create_issue 无标题即判白名单校验失败、诚实回退）；界面命令栏卡片预览标题/正文，
+  点「执行」才调用既有 POST /issues 真实落库——写类操作双重确认，服务端不新增写权限面。
+  L1 规则新增确定性句式（报告/提交/新建/建/提 + 问题/工单/Issue：标题；打开/跳到 图谱），
+  L2 提示词白名单扩为四意图并注明"仅描述问题而非明确要求建工单时用 search_assets"。
+- 关系图谱页（rail「图谱」，g+m）：数据全部来自真实端点（团队级 GET /relations 不带
+  assetId + /assets/search lifecycle=all）；本地力导向布局（确定性圆环初始化、斥力+弹簧+
+  向心、alpha 收敛），节点按 type_key 着色、度数决定半径、拖拽重排（>2px 移动不误触
+  点击）、点击打开资产详情；关系类型/状态过滤、孤立资产如实提示隐藏数量。
+- 本体导出 Turtle：GET /ontology/export?format=turtle → RDF 1.1 Turtle（text/turtle），
+  确定性序列化（时间戳不入正文，ontologyDigest 以 owl:versionInfo 关联 JSON 文档；
+  类 owl:Class + rdfs:subClassOf、类属性 owl:DatatypeProperty + tk:enum、关系类型
+  owl:ObjectProperty + rdfs:domain/range（多值 owl:unionOf）、kind 层伪类）。
+  修复序列化顺序缺陷：kind 段原在对象属性遍历前渲染，而 kindIris 由该遍历收集——
+  调整为遍历后渲染。
+- 总览新增「最近问题」卡片（GET /projects/:id/issues），闭环 NL/Agent 建工单的可见性；
+  flash 操作反馈（6s 自动消失）替代无声成功。
+- 测试诚实化延续：m4 D04b（取消传播）原为与真实模型的单次赛跑，全量中偶发 completed
+  先于取消——改为至多 3 轮真实重试、断言至少一轮取消真实传播（不 mock、不放宽语义）。
+- 全量：`npx vitest run` **17 套件 105 项全部通过**（新增 tests/m10-graph-nl-turtle 7 项：
+  L1 写意图规则确定性、L2 真实 DeepSeek 建工单解析、白名单注入防护、解析零副作用 +
+  确认路径真实落库、图谱数据端点、Turtle 结构/digest 关联/确定性）。
+- 浏览器实测（真实 DeepSeek）：「报告问题：轨道衰减数据与实测偏差过大」规则解析 → 预览卡
+  → 执行 → 工单落库并在总览可见；自然口吻建工单 LLM·deepseek-chat·334 tokens 准确提取
+  标题/正文 → 执行 → flash「问题工单已创建（404bf709…）」；图谱页 2 节点 1 边正常渲染、
+  点击节点打开资产详情、拖拽不误触；⌘K「打开图谱」导航直达。
+  截图 m10-ui-nl-issue-preview.png、m10-ui-nl-issue-llm.png、m10-ui-issue-flash.png、
+  m10-ui-graph.png。

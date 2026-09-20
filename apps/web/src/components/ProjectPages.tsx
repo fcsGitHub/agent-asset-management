@@ -33,6 +33,7 @@ interface ActivityItem {
 }
 
 interface CRRow { id: string; title: string; status: string; created_at: string; created_by_name: string; branch_name: string; item_count: number }
+interface IssueRow { id: string; title: string; status: string; created_at: string; asset_name: string | null }
 interface CRDetail {
   id: string; title: string; status: string; branch_name: string; created_by_name: string;
   motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number }[];
@@ -48,6 +49,10 @@ const STATUS_LABELS: Record<string, string> = {
   draft: "草稿", open: "待准备", awaiting_review: "待审核", changes_requested: "已退回",
   merged: "已合并", withdrawn: "已撤回", completed: "完成", failed: "失败", cancelled: "已取消",
   queued: "排队中", running: "运行中", blocked: "受阻",
+};
+
+const ISSUE_STATUS_LABELS: Record<string, string> = {
+  open: "待处理", in_progress: "处理中", resolved: "已解决", closed: "已关闭",
 };
 
 function statusChip(status: string): string {
@@ -100,6 +105,7 @@ export function DashboardPage({
 }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [activity, setActivity] = useState<ActivityItem[] | null>(null);
+  const [issues, setIssues] = useState<IssueRow[] | null>(null);
   const [error, setError] = useState("");
 
   const reload = useCallback(() => {
@@ -111,6 +117,9 @@ export function DashboardPage({
     void api<{ items: ActivityItem[] }>("/activity", { query: { teamId: project.teamId, limit: "8" } })
       .then((r) => setActivity(r.items))
       .catch(() => setActivity([]));
+    void api<IssueRow[]>(`/projects/${project.projectId}/issues`, { query: { teamId: project.teamId } })
+      .then(setIssues)
+      .catch(() => setIssues([]));
   }, [project]);
 
   useEffect(reload, [reload]);
@@ -168,6 +177,25 @@ export function DashboardPage({
             </section>
           </div>
           <div className="page-columns">
+            <section className="card">
+              <h3>最近问题</h3>
+              {issues === null ? (
+                <div className="state">加载中…</div>
+              ) : issues.length === 0 ? (
+                <Empty icon="🗒" title="还没有问题工单" hint="在对话区让 Agent 建 Issue，或在 ⌘K 里说「报告问题：<标题>」。" />
+              ) : (
+                <ul className="issue-list">
+                  {issues.slice(0, 5).map((i) => (
+                    <li key={i.id} className="issue-row">
+                      <span className={`chip chip-${i.status === "open" ? "warn" : "dim"}`}>{ISSUE_STATUS_LABELS[i.status] ?? i.status}</span>
+                      <span className="issue-title">{i.title}</span>
+                      {i.asset_name && <span className="issue-asset">· {i.asset_name}</span>}
+                      <span className="issue-time">{fmtTime(i.created_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
             <section className="card">
               <h3>快捷入口</h3>
               <div className="btn-row">

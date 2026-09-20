@@ -519,9 +519,137 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   // 吸收 semantica 的版本化 IRI / OWL-Shapes 思想：把类型注册表 + 关系注册表
   // 派生成稳定结构的本体文档（类 = 资产类型含层次；对象属性 = 关系类型含 domain/range），
   // 附整体摘要（stableStringify + sha256），供外部工具与归档消费。
-  app.get("/ontology/export", async (req) => {
+  // format=turtle 时序列化为 RDF 1.1 Turtle（确定性输出，时间戳不入正文，
+  // digest 以 owl:versionInfo 关联 JSON 文档）；IRI 约定 <urn:taw:{teamId}:...>。
+
+  interface TurtleDoc {
+    teamId: string;
+    ontologyDigest: string;
+    classes: {
+      iri: string; key: string; version: string; title: string; status: string;
+      subClassOf: { key: string; version: string } | null;
+      required: string[];
+      properties: Record<string, { type: string; enum?: string[] }>;
+      additionalProperties: boolean;
+      vocabularies: unknown;
+    }[];
+    objectProperties: {
+      iri: string; key: string; version: string; title: string;
+      domain: { kinds: string[]; typeKeys: string[] };
+      range: { kinds: string[]; typeKeys: string[] };
+      cyclic: boolean; isSymmetric: boolean; requiresRevision: boolean;
+    }[];
+  }
+
+  /** JSON 字符串转义与 Turtle STRING_LITERAL 转义兼容（引号/反斜杠/控制字符均合法转出）。 */
+  const tl = (s: string): string => JSON.stringify(s);
+  const tIri = (iri: string): string => {
+    if (!iri.startsWith("taw:")) throw new Error(`非 taw IRI：${iri}`);
+    return `<urn:${iri}>`;
+  };
+
+  function toTurtle(doc: TurtleDoc): string {
+    const team = doc.teamId;
+    // 类 key → 全部版本 IRI（domain/range 的 typeKeys 引用的是 key，不含版本）
+    const irisByKey = new Map<string, string[]>();
+    for (const c of doc.classes) {
+      const list = irisByKey.get(c.key) ?? [];
+      list.push(c.iri);
+      irisByKey.set(c.key, list);
+    }
+    for (const [k, list] of irisByKey) irisByKey.set(k, [...list].sort());
+    // kind 层伪类：domain/range 只限定 kind 未限定 typeKey 时使用
+    const kindsUsed = new Set<string>();
+    const sideNodes = (side: { kinds: string[]; typeKeys: string[] }): string[] => {
+      if (side.typeKeys.length > 0) {
+        const iris = side.typeKeys.flatMap((k) => irisByKey.get(k) ?? []).sort();
+        if (iris.length > 0) return iris;
+      }
+      for (const k of side.kinds) kindsUsed.add(k);
+      return side.kinds.map((k) => `taw:${team}:kind:${k}`).sort();
+    };
+
+    const out: string[] = [];
+    out.push(`# 团队资产工作台本体（taw-ontology/1 → RDF 1.1 Turtle，确定性序列化）`);
+    out.push(`# ontologyDigest: ${doc.ontologyDigest}（与 JSON 导出一致；时间戳不入正文）`);
+    out.push(`@prefix owl: <http://www.w3.org/2002/07/owl#> .`);
+    out.push(`@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .`);
+    out.push(`@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .`);
+    out.push(`@prefix tk: <urn:taw:meta:> .`);
+    out.push(``);
+    out.push(`${tIri(`taw:${team}`)} a owl:Ontology ;`);
+    out.push(`    owl:versionInfo ${tl(doc.ontologyDigest)} .`);
+    out.push(``);
+    out.push(`# ---- 类（资产类型版本；subClassOf 仅当父类型存在于注册表） ----`);
+    for (const c of doc.classes) {
+      const lines: string[] = [];
+      lines.push(`${tIri(c.iri)} a owl:Class ;`);
+      lines.push(`    rdfs:label ${tl(c.title)} ;`);
+      lines.push(`    tk:key ${tl(c.key)} ;`);
+      lines.push(`    tk:version ${tl(c.version)} ;`);
+      lines.push(`    tk:status ${tl(c.status)} ;`);
+      if (c.subClassOf) {
+        const parent = doc.classes.find((p) => p.key === c.subClassOf!.key && p.version === c.subClassOf!.version);
+        if (parent) lines.push(`    rdfs:subClassOf ${tIri(parent.iri)} ;`);
+      }
+      if (c.required.length > 0) lines.push(`    tk:required ${c.required.map(tl).join(" , ")} ;`);
+      lines.push(`    tk:additional-properties ${c.additionalProperties} .`);
+      out.push(...lines);
+      for (const name of Object.keys(c.properties).sort()) {
+        const p = c.properties[name]!;
+        const plines: string[] = [];
+        plines.push(`${tIri(`${c.iri}#${name}`)} a owl:DatatypeProperty ;`);
+        plines.push(`    rdfs:label ${tl(name)} ;`);
+        plines.push(`    tk:property-type ${tl(p.type)} ;`);
+        if (p.enum && p.enum.length > 0) plines.push(`    tk:enum ${p.enum.map(tl).join(" , ")} ;`);
+        plines.push(`    rdfs:domain ${tIri(c.iri)} .`);
+        out.push(...plines);
+      }
+    }
+    const kindIrisAt = (): string[] => [...kindsUsed].sort();
+    const relLines: string[] = [];
+    for (const r of doc.objectProperties) {
+      const emitSide = (pred: string, side: { kinds: string[]; typeKeys: string[] }): string[] => {
+        const nodes = sideNodes(side);
+        if (nodes.length === 0) return [];
+        if (nodes.length === 1) return [`    ${pred} ${tIri(nodes[0]!)} ;`];
+        return [
+          `    ${pred} [`,
+          `        a owl:Class ;`,
+          `        owl:unionOf ( ${nodes.map(tIri).join(" ")} )`,
+          `    ] ;`,
+        ];
+      };
+      relLines.push(`${tIri(r.iri)} a owl:ObjectProperty ;`);
+      relLines.push(`    rdfs:label ${tl(r.title)} ;`);
+      relLines.push(`    tk:key ${tl(r.key)} ;`);
+      relLines.push(`    tk:version ${tl(r.version)} ;`);
+      relLines.push(...emitSide("rdfs:domain", r.domain));
+      relLines.push(...emitSide("rdfs:range", r.range));
+      relLines.push(`    tk:cyclic ${r.cyclic} ;`);
+      relLines.push(`    tk:symmetric ${r.isSymmetric} ;`);
+      relLines.push(`    tk:requires-revision ${r.requiresRevision} .`);
+    }
+    // kind 段在对象属性遍历后渲染（kindsUsed 由 domain/range 解析填充）
+    const kindIris = kindIrisAt();
+    if (kindIris.length > 0) {
+      out.push(``);
+      out.push(`# ---- kind 层伪类（关系 domain/range 只限定实体 kind、未限定类型时使用） ----`);
+      for (const k of kindIris) {
+        out.push(`${tIri(`taw:${team}:kind:${k}`)} a owl:Class ;`);
+        out.push(`    rdfs:label ${tl(`kind:${k}（kind 层，未限定类型）`)} .`);
+      }
+    }
+    out.push(``);
+    out.push(`# ---- 对象属性（关系类型；domain/range 多值用 owl:unionOf） ----`);
+    out.push(...relLines);
+    return out.join("\n") + "\n";
+  }
+
+  app.get("/ontology/export", async (req, reply) => {
     const auth = requireAuth(req);
-    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    const query = (req.query ?? {}) as { teamId?: string; format?: string };
+    const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     return withTeam(teamId, async (client) => {
@@ -591,6 +719,15 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       }));
 
       const digest = createHash("sha256").update(stableStringify({ classes, objectProperties })).digest("hex");
+      if (query.format === "turtle") {
+        const body = toTurtle({
+          teamId,
+          ontologyDigest: digest,
+          classes: classes as unknown as TurtleDoc["classes"],
+          objectProperties: objectProperties as unknown as TurtleDoc["objectProperties"],
+        });
+        return reply.code(200).header("content-type", "text/turtle; charset=utf-8").send(body);
+      }
       return {
         format: "taw-ontology/1",
         teamId,

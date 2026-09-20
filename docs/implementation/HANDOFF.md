@@ -42,8 +42,11 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 92 项基线仍绿
+4. `npx vitest run` 确认 105 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
-   下一步候选：本体导出加 Turtle 序列化、关系图 UI 可视化、worker 多播订阅、
-   活动流按项目过滤与 SSE 推送、NL 意图扩展（写类动作需带预览确认）
+   M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
+   关系图谱页（本地力导向布局，g+m）、本体导出 Turtle 序列化（确定性）、
+   总览「最近问题」卡片（EV-032）。
+   下一步候选：活动流按项目过滤与 SSE 推送、worker 多播订阅、NL 意图再扩展
+   （如登记资产草稿直通）、图谱按项目/类型子图聚焦、Turtle 导出接入界面下载按钮。

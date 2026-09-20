@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, uploadFile } from "../api";
 import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
+import { RelationGraph } from "../components/RelationGraph";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
@@ -11,6 +12,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: string }[] = [
   { key: "workbench", label: "工作台", icon: "▤" },
   { key: "activity", label: "动态", icon: "≡" },
   { key: "approvals", label: "审批", icon: "✓" },
+  { key: "graph", label: "图谱", icon: "⚭" },
 ];
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
@@ -41,6 +43,14 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [helpOpen, setHelpOpen] = useState(false);
   const [cmdSeed, setCmdSeed] = useState<{ query: string; nonce: number }>({ query: "", nonce: 0 });
   const [registerHint, setRegisterHint] = useState<{ name?: string; typeKeyHint?: string; nonce: number }>({ nonce: 0 });
+  // 轻量操作反馈（NL 建工单等异步结果）；6 秒自动消失
+  const [flash, setFlash] = useState<{ text: string; tone: "ok" | "error"; nonce: number } | null>(null);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [flash]);
 
   useEffect(() => {
     void api<ProjectInfo[]>("/projects")
@@ -101,7 +111,9 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
     setMobileView("workspace");
   }, []);
 
-  // NL 意图执行：只映射到既有界面动作（跳转 / 命令栏搜索 / 预填登记表单）。
+  // NL 意图执行：只读意图映射到既有界面动作（跳转 / 命令栏搜索 / 预填登记表单）。
+  // 写类意图（create_issue）在此执行 = 用户在命令栏卡片上点击"执行"的显式确认：
+  // 解析端点本身零副作用，这里才调用既有 POST /issues（真实落库），结果以 flash 反馈。
   // 解析来自 POST /nl/parse（规则 L1 或真实 DeepSeek L2），此处不做二次解释。
   const executeNlIntent = useCallback((payload: NlIntentPayload): boolean => {
     if (payload.intent === "navigate" && payload.params.page) {
@@ -126,8 +138,40 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
       setMobileView("workspace");
       return true;
     }
+    if (payload.intent === "create_issue") {
+      const title = (payload.params.title ?? "").trim();
+      if (!project) {
+        setFlash({ text: "未创建工单：请先选择项目", tone: "error", nonce: Date.now() });
+        return true;
+      }
+      if (!title) {
+        setFlash({ text: "未创建工单：草稿缺少标题", tone: "error", nonce: Date.now() });
+        return true;
+      }
+      const p = project;
+      void (async () => {
+        try {
+          const res = await api<{ issueId: string }>("/issues", {
+            method: "POST",
+            body: { teamId: p.teamId, projectId: p.projectId, title, body: payload.params.body ?? "" },
+          });
+          setFlash({
+            text: `问题工单已创建（${res.issueId.slice(0, 8)}…），见总览「最近问题」`,
+            tone: "ok",
+            nonce: Date.now(),
+          });
+        } catch (err) {
+          setFlash({
+            text: `创建工单失败：${err instanceof ApiError ? err.message : "网络错误"}`,
+            tone: "error",
+            nonce: Date.now(),
+          });
+        }
+      })();
+      return true;
+    }
     return true;
-  }, []);
+  }, [project]);
 
   async function logout() {
     try {
@@ -202,6 +246,10 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         ) : page === "approvals" ? (
           <main className="page-main" aria-label="审批队列">
             <ApprovalsPage project={project} onOpenRelease={() => { setPage("workbench"); setWsView("release"); setAssetId(""); }} />
+          </main>
+        ) : page === "graph" ? (
+          <main className="page-main" aria-label="关系图谱">
+            <RelationGraph project={project} onOpenAsset={openAssetFromSearch} />
           </main>
         ) : (
         <>
@@ -356,6 +404,11 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         )}
       </div>
 
+      {flash && (
+        <div className={`flash flash-${flash.tone}`} role="status">
+          {flash.text}
+        </div>
+      )}
       <CommandBar
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}

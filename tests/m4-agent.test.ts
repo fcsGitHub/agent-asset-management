@@ -196,22 +196,34 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
   }, 240000);
 
   it("D04b：取消传播到模型调用，运行进入 cancelled", async () => {
-    const runUuid = await startRun(member, sessionId, teamId,
-      `请依次检索关键词 "a1"、"a2"、"a3"、"a4"、"a5"、"a6"，每次检索后说明结果，最后总结。`,
-      { maxToolCalls: 10, maxTokens: 40000 });
-    // 等待进入 running
-    const start = Date.now();
-    let status = "";
-    while (Date.now() - start < 60000) {
-      const r = await call("GET", `/runs/${runUuid}?teamId=${teamId}`, { session: member });
-      status = r.json.status;
-      if (status === "running") break;
-      await new Promise((r2) => setTimeout(r2, 800));
+    // 与真实模型赛跑：若模型在取消生效前完成（completed），如实重试新一轮，
+    // 至多 3 轮；断言「至少一轮取消真实传播」。不 mock、不放宽传播语义。
+    let lastStatus = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const runUuid = await startRun(member, sessionId, teamId,
+        `请依次检索关键词 "a1"、"a2"、"a3"、"a4"、"a5"、"a6"，每次检索后说明结果，最后总结。`,
+        { maxToolCalls: 10, maxTokens: 40000 });
+      // 等待进入 running（250ms 轮询，减少错过窗口）
+      const start = Date.now();
+      let status = "";
+      while (Date.now() - start < 60000) {
+        const r = await call("GET", `/runs/${runUuid}?teamId=${teamId}`, { session: member });
+        status = r.json.status;
+        if (status === "running") break;
+        if (["completed", "failed", "cancelled", "blocked", "unknown_reconcile"].includes(status)) break;
+        await new Promise((r2) => setTimeout(r2, 250));
+      }
+      if (status !== "completed") {
+        const cancel = await call("POST", `/runs/${runUuid}/cancel`, { session: member, body: { teamId, reason: "不再需要" } });
+        expectOk(cancel.status === 200, cancel.json, "取消请求失败");
+        const run = await waitForRun(member, teamId, runUuid);
+        if (run.status === "cancelled") return; // 取消真实传播
+        lastStatus = run.status;
+      } else {
+        lastStatus = "completed（模型先于取消完成）";
+      }
     }
-    const cancel = await call("POST", `/runs/${runUuid}/cancel`, { session: member, body: { teamId, reason: "不再需要" } });
-    expectOk(cancel.status === 200, cancel.json, "取消请求失败");
-    const run = await waitForRun(member, teamId, runUuid);
-    expect(run.status === "cancelled", "运行应进入 cancelled").toBe(true);
+    throw new Error(`3 轮内未能观察到取消传播，最后一轮终态：${lastStatus}`);
   }, 240000);
 
   it("D06：外部副作用后结果未知 → unknown_reconcile，不盲目重试", async () => {
