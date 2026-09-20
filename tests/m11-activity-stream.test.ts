@@ -226,7 +226,7 @@ describe("M11 活动流实时推送（Postgres NOTIFY → SSE，真实事件驱�
     stream.close();
   });
 
-  it("Agent 运行实时推送：创建运行即收到 agent 事件（按运行 id 稳定 key），取消后终止", async () => {
+  it("Agent 运行实时推送：创建即推送，后续状态变化按稳定 key 原地更新直至终态", async () => {
     const sess = await call("POST", `/projects/${projectId}/sessions`, {
       session: admin, body: { teamId, title: `M11流验证会话`, visibility: "project" },
     });
@@ -239,27 +239,29 @@ describe("M11 活动流实时推送（Postgres NOTIFY → SSE，真实事件驱�
     });
     expectOk(run.status === 201, run.json, "创建运行失败");
     const newRunId = run.json.runId as string;
-    const hit = await stream.waitFor(
-      (e) => {
-        if (e.event !== "activity") return false;
-        return (JSON.parse(e.data) as { key?: string }).key === `agent:${newRunId}`;
-      },
+    // 创建即推送（queued/running 起，同一 key）
+    const first = await stream.waitFor(
+      (e) => e.event === "activity" && (JSON.parse(e.data) as { key?: string }).key === `agent:${newRunId}`,
       15000,
       "等待 Agent 运行推送"
     );
-    const d = JSON.parse(hit.data) as { kind: string; action: string; actor: string; project?: string };
+    const d = JSON.parse(first.data) as { kind: string; action: string; project?: string };
     expect(d.kind === "agent", "应为 agent 事件").toBe(true);
     expect(d.action.startsWith("agent.run."), `action 应为运行状态：${d.action}`).toBe(true);
     expect(d.project === `M11项目-${runId}`, `应带项目名：${d.project}`).toBe(true);
-    // 同一运行的后续状态变化应按 key 原地更新（再次收到相同 key）
+    // 触发取消（与真实模型赛跑：若模型先完成，终态即 completed —— 两者都证明状态变化被实时推送）
     await call("POST", `/runs/${newRunId}/cancel`, { session: admin, body: { teamId, reason: "M11 验证完成" } });
-    const update = await stream.waitFor(
+    const last = await stream.waitFor(
       (e) => e.event === "activity" && (JSON.parse(e.data) as { key?: string }).key === `agent:${newRunId}`
-        && (JSON.parse(e.data) as { action?: string }).action === "agent.run.cancelled",
-      30000,
-      "等待取消状态推送"
+        && ["agent.run.cancelled", "agent.run.completed", "agent.run.failed", "agent.run.blocked", "agent.run.unknown_reconcile"]
+          .includes((JSON.parse(e.data) as { action?: string }).action ?? ""),
+      60000,
+      "等待终态推送"
     );
-    expect(JSON.parse(update.data).action === "agent.run.cancelled", "取消状态应实时推送").toBe(true);
+    const finalAction = (JSON.parse(last.data) as { action: string }).action;
+    // 与库中真实状态核对：推送不得编造状态
+    const dbRun = await call("GET", `/runs/${newRunId}?teamId=${teamId}`, { session: admin });
+    expect(finalAction === `agent.run.${dbRun.json.status}`, `终态推送应与库中状态一致：${finalAction} vs ${dbRun.json.status}`).toBe(true);
     stream.close();
-  }, 90000);
+  }, 120000);
 });

@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 109 项基线仍绿
+4. `npx vitest run` 确认 112 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -51,6 +51,8 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    M11 已完成：活动流实时推送（0018 触发器 pg_notify → activityHub 单例 LISTEN
    → SSE /activity/stream，事件与列表同源、Agent 状态原地更新、团队隔离）、
    图谱页本体导出下载按钮（EV-033）。
-   下一步候选：runs SSE 从轮询迁到 LISTEN/NOTIFY 复用同一枢纽、worker 多播订阅、
-   NL 意图再扩展（如登记资产草稿直通）、图谱按项目/类型子图聚焦、
-   活动流按项目过滤。
+   M12 已完成：运行事件流迁移 NOTIFY（0019 + activityHub 双通道，去 400ms 轮询，
+   线格式/续传不变）、runner 终态先事件后状态不变量、取消健壮性修复
+   （cancel_requested 每轮兜底 + 两轮间取消误标修正）、图谱聚焦模式（EV-034）。
+   下一步候选：活动流按项目过滤（审计事件无项目维度，需先定语义）、worker 多播订阅、
+   NL 意图再扩展（如登记资产草稿直通）、图谱子图多跳展开。

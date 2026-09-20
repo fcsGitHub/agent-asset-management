@@ -3,6 +3,8 @@
 // - 每次工具调用经网关（含拒绝记录），消耗预算
 // - 取消传播到模型请求（AbortController）
 // - 未知外部结果 → unknown_reconcile，不盲目重试（D06）
+// - 终态路径先写 run_events 再更新 agent_runs 状态（0019 时序不变量：
+//   状态变更的 NOTIFY 必然晚于该运行全部事件的 NOTIFY，SSE 的 done 不会早到）
 import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
 import { getPool, withTeam, q } from "../db.js";
@@ -89,11 +91,11 @@ async function runLoop(runId: string): Promise<void> {
     try {
       provider = new DeepSeekProvider();
     } catch (err) {
+      await appendEvent(teamId, runId, "failed", { error: (err as Error).message });
       await touchRun(teamId, runId, {
         status: "failed",
         error: err instanceof Error ? err.message : "LLM 配置错误",
       });
-      await appendEvent(teamId, runId, "failed", { error: (err as Error).message });
       return;
     }
 
@@ -116,8 +118,23 @@ async function runLoop(runId: string): Promise<void> {
     let usedTokens = 0;
     const budget = meta.budget as { maxToolCalls: number; maxTokens: number };
 
+    // 终态时序不变量的取消侧收尾：先事件后状态（见文件头注释）
+    const finishCancelled = async (): Promise<void> => {
+      await appendEvent(teamId, runId, "cancelled", { reason: "user" });
+      await touchRun(teamId, runId, { status: "cancelled", error: "用户取消" });
+    };
+
     for (let turn = 0; turn < 12; turn++) {
-      if (controller.signal.aborted) break;
+      if (controller.signal.aborted) {
+        await finishCancelled();
+        return;
+      }
+      // cancel_requested 是数据库中的持久取消请求：取消若在进程内 controller
+      // 注册之前到达（慢机/排队积压窗口），abort 会丢失——每轮开始时兜底复查
+      if (await isCancelRequested(teamId, runId)) {
+        await finishCancelled();
+        return;
+      }
       const specs = toolSpecs(tools).map((t) => ({
         ...t,
         function: { ...t.function, name: wireName(t.function.name) },
@@ -130,12 +147,13 @@ async function runLoop(runId: string): Promise<void> {
       }
       const toolCalls = msg.tool_calls ?? [];
       if (!toolCalls.length) {
+        // 终态时序不变量：先事件后状态（见文件头注释）
+        await appendEvent(teamId, runId, "completed", { finalText: msg.content ?? "" });
         await touchRun(teamId, runId, {
           status: "completed",
           result: msg.content ?? "",
           used: { toolCalls: usedToolCalls, tokens: usedTokens },
         });
-        await appendEvent(teamId, runId, "completed", { finalText: msg.content ?? "" });
         return;
       }
       messages.push(msg);
@@ -144,12 +162,12 @@ async function runLoop(runId: string): Promise<void> {
         call.function.name = byWire.get(call.function.name)?.name ?? call.function.name;
         if (controller.signal.aborted) break;
         if (usedToolCalls >= budget.maxToolCalls) {
+          await appendEvent(teamId, runId, "blocked", { reason: "budget_tool_calls", limit: budget.maxToolCalls });
           await touchRun(teamId, runId, {
             status: "blocked",
             error: "预算已用尽：工具调用次数达到上限，等待用户处置",
             used: { toolCalls: usedToolCalls, tokens: usedTokens },
           });
-          await appendEvent(teamId, runId, "blocked", { reason: "budget_tool_calls", limit: budget.maxToolCalls });
           return;
         }
         usedToolCalls++;
@@ -160,12 +178,12 @@ async function runLoop(runId: string): Promise<void> {
           invokeResult = await runToolCall(teamId, toolCtx, tools, call.id, call.function.name, call.function.arguments);
         } catch (err) {
           if (err instanceof UnknownOutcomeError) {
+            await appendEvent(teamId, runId, "unknown_reconcile", { tool: call.function.name, detail: err.detail });
             await touchRun(teamId, runId, {
               status: "unknown_reconcile",
               error: `工具 ${call.function.name} 外部结果未知：${err.detail}`,
               used: { toolCalls: usedToolCalls, tokens: usedTokens },
             });
-            await appendEvent(teamId, runId, "unknown_reconcile", { tool: call.function.name, detail: err.detail });
             return;
           }
           throw err;
@@ -184,27 +202,27 @@ async function runLoop(runId: string): Promise<void> {
         });
       }
       if (usedTokens >= budget.maxTokens) {
+        await appendEvent(teamId, runId, "blocked", { reason: "budget_tokens", limit: budget.maxTokens });
         await touchRun(teamId, runId, {
           status: "blocked",
           error: "预算已用尽：token 达到上限",
           used: { toolCalls: usedToolCalls, tokens: usedTokens },
         });
-        await appendEvent(teamId, runId, "blocked", { reason: "budget_tokens", limit: budget.maxTokens });
         return;
       }
     }
     // 轮数上限
-    await touchRun(teamId, runId, { status: "blocked", error: "运行轮数达到上限" });
     await appendEvent(teamId, runId, "blocked", { reason: "max_turns" });
+    await touchRun(teamId, runId, { status: "blocked", error: "运行轮数达到上限" });
   } catch (err) {
     if (controller.signal.aborted || (err instanceof LlmError && err.code === "LLM_CANCELLED")) {
-      await touchRun(teamId, runId, { status: "cancelled", error: "用户取消" });
       await appendEvent(teamId, runId, "cancelled", { reason: "user" });
+      await touchRun(teamId, runId, { status: "cancelled", error: "用户取消" });
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    await touchRun(teamId, runId, { status: "failed", error: message });
     await appendEvent(teamId, runId, "failed", { error: message });
+    await touchRun(teamId, runId, { status: "failed", error: message });
   } finally {
     cancelControllers.delete(runId);
   }
@@ -231,8 +249,18 @@ interface RunMeta {
   budget: unknown;
 }
 
-async function loadRunMeta(teamId: string, runId: string): Promise<RunMeta> {
-  return withTeam(teamId, async (client: PoolClient) => {
+/** 持久取消标记：cancel 请求可能早于执行器注册 AbortController，每轮开始兜底复查。 */
+async function isCancelRequested(teamId: string, runId: string): Promise<boolean> {
+  return withTeam(teamId, async (client) => {
+    const { rows } = await client.query<{ cancel_requested: boolean }>(
+      `SELECT cancel_requested FROM agent_runs WHERE id = $1::uuid`,
+      [runId]
+    );
+    return rows[0]?.cancel_requested === true;
+  });
+}
+
+async function loadRunMeta(teamId: string, runId: string): Promise<RunMeta> {  return withTeam(teamId, async (client: PoolClient) => {
     const { rows } = await client.query<{
       prompt: string;
       context_refs: string[];

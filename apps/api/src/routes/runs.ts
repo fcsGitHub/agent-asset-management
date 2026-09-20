@@ -7,6 +7,7 @@ import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { executeRun, requestCancel } from "../agent/runner.js";
+import { subscribeRunEvents } from "../activityHub.js";
 import { DeepSeekProvider, LlmError } from "@taw/agent-adapter/deepseek";
 
 async function teamRole(userId: string, teamId: string): Promise<string> {
@@ -135,7 +136,9 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  // SSE 可续接：Last-Event-ID 之后继续，事件已落库；断线重连不重触发任务
+  // SSE 可续接：Last-Event-ID 之后继续，事件已落库；断线重连不重触发任务。
+  // 推送为事件驱动（0019）：run_events 插入与状态变更提交时 NOTIFY，hub 按运行扇出；
+  // runner 的终态时序不变量（先事件后状态）保证 done 不会早于任何事件。
   app.get("/runs/:runId/events", async (req, reply) => {
     const auth = requireAuth(req);
     const { runId } = req.params as { runId: string };
@@ -155,14 +158,48 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     });
     reply.raw.write(`retry: 1000\n\n`);
     let cursor = Number(lastEventId) || 0;
-    const open = { closed: false };
-    req.raw.on("close", () => { open.closed = true; });
+    let closed = false;
+    let finished = false;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    req.raw.on("close", () => { closed = true; });
     const push = (seq: number, type: string, payload: unknown) => {
       reply.raw.write(`id: ${seq}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
     };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      unsubscribe();
+      reply.raw.end();
+    };
 
-    // 先重放历史
-    let history = await withTeam(teamId, async (client) =>
+    // 补取 cursor 之后的事件，运行已终态则发 done（由调用方收尾）
+    const drainAndCheck = async (): Promise<boolean> => {
+      if (closed || finished) return false;
+      const ev = await withTeam(teamId, async (client) =>
+        client.query<{ seq: string; type: string; payload: unknown }>(
+          `SELECT seq, type, payload FROM run_events WHERE team_id = $1 AND run_id = $2 AND seq > $3 ORDER BY seq`,
+          [teamId, runId, cursor]
+        )
+      );
+      for (const row of ev.rows) {
+        push(Number(row.seq), row.type, row.payload);
+        cursor = Number(row.seq);
+      }
+      const { rows: runRows } = await withTeam(teamId, async (client) =>
+        client.query<{ status: string }>(`SELECT status FROM agent_runs WHERE team_id = $1 AND id = $2`, [teamId, runId])
+      );
+      if (runRows.length === 0) return true; // 运行不存在：静默结束（不发 done）
+      const status = runRows[0]!.status;
+      if (closed) return TERMINAL.has(status);
+      if (!TERMINAL.has(status)) return false;
+      reply.raw.write(`event: done\ndata: {"status":"${status}"}\n\n`);
+      return true;
+    };
+
+    // 先重放历史（Last-Event-ID 续传语义不变）
+    const history = await withTeam(teamId, async (client) =>
       client.query<{ seq: string; type: string; payload: unknown }>(
         `SELECT seq, type, payload FROM run_events WHERE team_id = $1 AND run_id = $2 AND seq > $3 ORDER BY seq`,
         [teamId, runId, cursor]
@@ -173,32 +210,33 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       cursor = Number(row.seq);
     }
 
-    // 轮询新事件直至运行结束且事件取尽
-    while (!open.closed) {
-      const state = await withTeam(teamId, async (client) => {
-        const ev = await client.query<{ seq: string; type: string; payload: unknown }>(
-          `SELECT seq, type, payload FROM run_events WHERE team_id = $1 AND run_id = $2 AND seq > $3 ORDER BY seq`,
-          [teamId, runId, cursor]
-        );
-        const { rows: runRows } = await client.query<{ status: string }>(
-          `SELECT status FROM agent_runs WHERE team_id = $1 AND id = $2`,
-          [teamId, runId]
-        );
-        return { events: ev.rows, status: runRows[0]?.status ?? "unknown" };
-      });
-      for (const row of state.events) {
-        push(Number(row.seq), row.type, row.payload);
-        cursor = Number(row.seq);
-      }
-      if (state.events.length === 0 && TERMINAL.has(state.status)) {
-        reply.raw.write(`event: done\ndata: {"status":"${state.status}"}\n\n`);
-        break;
-      }
-      if (state.events.length === 0) {
-        await new Promise((r) => setTimeout(r, 400));
-      }
+    // 通知回调串行化：NOTIFY 可能连续到达，并发 drain 会以同一游标重复取事件
+    let draining: Promise<void> = Promise.resolve();
+    const enqueueDrain = () => {
+      draining = draining
+        .then(async () => {
+          if (await drainAndCheck()) finish();
+        })
+        .catch(() => undefined);
+    };
+
+    const unsubscribe = await subscribeRunEvents(teamId, runId, (n) => {
+      if (closed || finished) return;
+      enqueueDrain();
+    });
+    heartbeat = setInterval(() => {
+      if (!closed && !finished) reply.raw.write(`: ping ${Date.now()}\n\n`);
+    }, 25000);
+
+    if (await drainAndCheck()) {
+      finish();
+      return;
     }
-    reply.raw.end();
+    await new Promise<void>((resolve) => {
+      req.raw.on("close", () => resolve());
+      req.raw.on("error", () => resolve());
+    });
+    finish();
   });
 
   app.post("/runs/:runId/cancel", async (req, reply) => {

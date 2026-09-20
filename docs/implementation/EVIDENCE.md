@@ -351,3 +351,27 @@
   「归档资产 asset.archive」条目（截图 m11-ui-activity-live.png）；图谱页点击
   「导出 Turtle / 导出 JSON」真实下载，TTL 头部与 owl:versionInfo digest 与 JSON
   文档一致（8f67d617…，7 类）。
+
+### EV-034 ｜ 2026-09-21 ｜ M12 迭代轮：运行事件流迁移 NOTIFY（去轮询）+ 取消健壮性修复 + 图谱聚焦
+- 迁移 0019：run_events 插入与 agent_runs 状态变化在提交时 pg_notify('taw_run')；
+  activityHub 扩展为单例 LISTEN 双通道（taw_activity + taw_run），按 team_id:run_id 扇出。
+- /runs/:id/events 重写：Last-Event-ID 重放语义不变（线格式 id/event/data + done 完全兼容，
+  前端零改动），400ms 轮询循环删除——事件经 NOTIFY 即时推送，每个连接不再反复查库；
+  通知回调串行化（修复并发 drain 以同一游标重复取事件的竞态，全量回归中实测暴露）；
+  不存在的运行现在静默关闭而非无限等待。终态时序不变量：runner 全部终态路径改为
+  先写 run_events 再更新 agent_runs 状态——状态 NOTIFY 必然晚于该运行全部事件 NOTIFY，
+  done 不会早到。
+- **真产品缺陷修复（取消健壮性）**：cancel 请求若在执行器注册 AbortController 之前到达
+  （慢机/排队积压窗口），进程内 abort 丢失且数据库里的 cancel_requested 从未被读取——
+  取消被静默吞掉，运行照跑到完成。现在 runner 每轮开始复查 cancel_requested 兜底；
+  同时修复取消恰好落在两轮之间会被误标为 blocked「运行轮数达到上限」的边界
+  （改为正确的 cancelled 终态）。
+- 图谱聚焦模式：按资产聚焦一跳邻域（节点虚线高亮环 + 计数提示），孤立资产也可聚焦。
+- 测试 tests/m12（3 项，真实 NOTIFY + 真实 DeepSeek 运行 + 流式帧解析）：真实运行
+  run_started→completed→done 全程送达且 seq 严格递增；Last-Event-ID 部分续传只补其后
+  事件且与全量尾部逐帧一致；匿名/非成员/不存在的运行边界。m11 运行推送用例同步加固：
+  等任意终态推送并与库中真实状态核对（与模型速度解耦，不编造状态）。
+- 全量：`npx vitest run` **19 套件 112 项全部通过**（57s）。
+  连续全量压测中暴露的偶发失败均已溯源修复（上述两处产品缺陷），非环境问题。
+- 浏览器实测：对话区真实运行「检索资产清单」工具事件即时流式呈现、完成态与总结正常
+  （截图 m12-ui-run-stream.png）；图谱聚焦切换 2 节点↔1 节点（虚线环+提示）验证通过。

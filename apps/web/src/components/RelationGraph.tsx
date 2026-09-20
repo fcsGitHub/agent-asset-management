@@ -33,6 +33,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
   const [error, setError] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [focusId, setFocusId] = useState("");
   const [tick, setTick] = useState(0); // 模拟帧驱动
   const nodesRef = useRef<SimNode[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -58,20 +59,25 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
 
   useEffect(reload, [reload]);
 
-  // 过滤后的边与参与节点（只显示有关系连接的资产；数量在页头如实说明）
+  // 过滤后的边与参与节点。聚焦模式：只看聚焦资产及其一跳邻域；
+  // 无关系连接的资产默认隐藏（数量如实提示）。
   const { simEdges, simNodes, hiddenAssets } = useMemo(() => {
     const byId = new Map(assets.map((a) => [a.id, a]));
-    const kept = (edges ?? []).filter(
+    const base = (edges ?? []).filter(
       (e) =>
         byId.has(e.source_asset_id) && byId.has(e.target_asset_id) &&
         (!typeFilter || e.type_key === typeFilter) &&
         (!statusFilter || e.status === statusFilter)
     );
+    const kept = focusId
+      ? base.filter((e) => e.source_asset_id === focusId || e.target_asset_id === focusId)
+      : base;
     const degree = new Map<string, number>();
     for (const e of kept) {
       degree.set(e.source_asset_id, (degree.get(e.source_asset_id) ?? 0) + 1);
       degree.set(e.target_asset_id, (degree.get(e.target_asset_id) ?? 0) + 1);
     }
+    if (focusId && byId.has(focusId) && !degree.has(focusId)) degree.set(focusId, 0);
     const nodeList: SimNode[] = [];
     const index = new Map<string, number>();
     for (const id of [...degree.keys()].sort()) {
@@ -91,7 +97,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
       label: e.type_key,
     }));
     return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size };
-  }, [edges, assets, typeFilter, statusFilter]);
+  }, [edges, assets, typeFilter, statusFilter, focusId]);
 
   nodesRef.current = simNodes;
 
@@ -227,6 +233,12 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
           <option value="confirmed">已确认</option>
           <option value="proposed">待定</option>
         </select>
+        <select aria-label="聚焦资产" value={focusId} onChange={(e) => setFocusId(e.target.value)}>
+          <option value="">全部资产</option>
+          {[...assets].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")).map((a) => (
+            <option key={a.id} value={a.id}>{a.name}</option>
+          ))}
+        </select>
         <button onClick={() => void downloadOntology("turtle")} title="下载本体（RDF Turtle，确定性序列化）">导出 Turtle</button>
         <button onClick={() => void downloadOntology("json")} title="下载本体（taw-ontology/1 JSON）">导出 JSON</button>
         <button onClick={reload}>刷新</button>
@@ -240,6 +252,11 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
       )}
       {simNodes.length > 0 && (
         <>
+          {focusId && simNodes.length > 0 && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              聚焦模式：仅显示聚焦资产与其一跳邻域（{simNodes.length} 节点 / {simEdges.length} 关系）。
+            </p>
+          )}
           {hiddenAssets > 0 && (
             <p className="hint" style={{ marginTop: 0 }}>
               已隐藏 {hiddenAssets} 个无关系连接的资产；图谱只展示有关系的资产。拖拽节点可重排，点击节点打开资产详情。
@@ -272,6 +289,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
               {simNodes.map((n, i) => {
                 const r = 13 + Math.min(n.degree, 8);
                 const color = colorOf.get(n.typeKey) ?? "#666";
+                const isFocus = n.id === focusId;
                 return (
                   <g
                     key={n.id}
@@ -290,7 +308,8 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
                       onOpenAsset(n.id);
                     }}
                   >
-                    <circle r={r} fill={color} stroke={n.lifecycle === "archived" ? "var(--muted)" : "#fff"} strokeDasharray={n.lifecycle === "archived" ? "4 3" : undefined} strokeWidth={2} opacity={0.92} />
+                    {isFocus && <circle r={r + 6} fill="none" stroke="var(--accent)" strokeWidth={2} strokeDasharray="5 4" />}
+                    <circle r={r} fill={color} stroke={isFocus ? "var(--accent)" : n.lifecycle === "archived" ? "var(--muted)" : "#fff"} strokeDasharray={n.lifecycle === "archived" ? "4 3" : undefined} strokeWidth={isFocus ? 3 : 2} opacity={0.92} />
                     <text y={r + 13} className="node-label">{n.name.length > 14 ? `${n.name.slice(0, 13)}…` : n.name}</text>
                     <title>{`${n.name}（${n.typeKey}）${n.lifecycle === "archived" ? "· 已归档" : ""} · 度 ${n.degree}`}</title>
                   </g>
