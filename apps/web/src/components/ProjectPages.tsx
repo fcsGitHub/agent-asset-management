@@ -1,7 +1,7 @@
 // 项目域页面：总览仪表盘 / 团队动态 / 审批队列。
 // 数据全部来自真实端点（/projects/:id/overview、/activity、/projects/:id/change-requests），
 // 布局范式吸收 AgentPM：统计卡行 → 待办 → 人机混排活动流。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Me } from "../App";
 import { Empty } from "./Empty";
@@ -23,6 +23,7 @@ interface Overview {
 }
 
 interface ActivityItem {
+  key?: string;
   ts: string;
   kind: "audit" | "agent";
   action: string;
@@ -213,26 +214,65 @@ export function DashboardPage({
   );
 }
 
-/** 团队动态：人的治理动作 + Agent 运行（人机混排时间线）。 */
+/** 团队动态：人的治理动作 + Agent 运行（人机混排时间线）。
+ *  实时推送：SSE 订阅 /activity/stream（Postgres NOTIFY 触发，非轮询），
+ *  事件按 key 去重覆盖（Agent 运行状态变化原地更新），断线重连后整体重取对齐。 */
 export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; onOpenAsset: (assetId: string) => void }) {
   const [items, setItems] = useState<ActivityItem[] | null>(null);
   const [error, setError] = useState("");
   const [limit, setLimit] = useState(50);
+  const [live, setLive] = useState(false);
+  const limitRef = useRef(limit);
+  limitRef.current = limit;
 
   const reload = useCallback(() => {
     if (!project) return;
-    void api<{ items: ActivityItem[] }>("/activity", { query: { teamId: project.teamId, limit: String(limit) } })
+    void api<{ items: ActivityItem[] }>("/activity", { query: { teamId: project.teamId, limit: String(limitRef.current) } })
       .then((r) => setItems(r.items))
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载动态失败"));
-  }, [project, limit]);
+  }, [project]);
 
   useEffect(reload, [reload]);
+
+  // 实时流：连接期间新事件由服务端推送；断线重连成功后整体刷新对齐（流本身只推实时事件）
+  useEffect(() => {
+    setLive(false);
+    if (!project) return;
+    const es = new EventSource(`/api/v1/activity/stream?teamId=${project.teamId}`);
+    es.addEventListener("activity", (e) => {
+      const item = JSON.parse((e as MessageEvent).data) as ActivityItem;
+      if (!item.key) return;
+      setItems((prev) => {
+        const list = prev ?? [];
+        const idx = list.findIndex((x) => x.key === item.key);
+        if (idx >= 0) {
+          const next = [...list];
+          next[idx] = { ...next[idx]!, ...item };
+          return next;
+        }
+        return [item, ...list].slice(0, limitRef.current);
+      });
+    });
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false);
+    return () => es.close();
+  }, [project]);
+
+  // 重连成功（live 由 false→true 且已有历史）时重取一次对齐
+  const firstLive = useRef(true);
+  useEffect(() => {
+    if (live && !firstLive.current) reload();
+    if (live) firstLive.current = false;
+  }, [live, reload]);
 
   if (!project) return <Empty icon="🗂" title="选择一个项目" hint="动态按团队展示，选择项目后加载。" />;
   return (
     <div className="page">
       <div className="page-head">
         <h2>团队动态</h2>
+        <span className={`chip ${live ? "chip-live" : "chip-dim"}`} title={live ? "Postgres 触发器实时推送" : "实时流未连接，显示历史"}>
+          {live ? "● 实时" : "○ 未连接"}
+        </span>
         <select aria-label="条数" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
           <option value={20}>最近 20 条</option>
           <option value={50}>最近 50 条</option>
@@ -243,7 +283,7 @@ export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; 
       {error && <div className="error-text">{error}</div>}
       {items && <ActivityList items={items} />}
       {!items && !error && <div className="state">正在加载…</div>}
-      <p className="hint">点击动态中的资产类条目可在工作台打开资产。👤 为人的治理动作（审计），🤖 为 Agent 运行。</p>
+      <p className="hint">点击动态中的资产类条目可在工作台打开资产。👤 为人的治理动作（审计），🤖 为 Agent 运行；流式更新由数据库触发器推送。</p>
     </div>
   );
 }

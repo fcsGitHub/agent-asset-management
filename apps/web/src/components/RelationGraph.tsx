@@ -162,6 +162,29 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
     };
   };
 
+  // 本体导出下载：与图谱同源的本体工件（类型注册表 + 关系注册表），浏览器端触发下载
+  async function downloadOntology(format: "turtle" | "json") {
+    if (!project) return;
+    setError("");
+    try {
+      const qs = new URLSearchParams({ teamId: project.teamId });
+      if (format === "turtle") qs.set("format", "turtle");
+      const res = await fetch(`/api/v1/ontology/export?${qs}`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ontology-${project.code}.${format === "turtle" ? "ttl" : "json"}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导出失败");
+    }
+  }
+
   useEffect(() => {
     const move = (ev: PointerEvent) => {
       const drag = dragRef.current;
@@ -204,8 +227,11 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
           <option value="confirmed">已确认</option>
           <option value="proposed">待定</option>
         </select>
+        <button onClick={() => void downloadOntology("turtle")} title="下载本体（RDF Turtle，确定性序列化）">导出 Turtle</button>
+        <button onClick={() => void downloadOntology("json")} title="下载本体（taw-ontology/1 JSON）">导出 JSON</button>
         <button onClick={reload}>刷新</button>
       </div>
+      {error && <div className="error-text">{error}</div>}
       {edges !== null && edges.length === 0 && (
         <Empty icon="⚭" title="团队还没有已登记的关系" hint="在资产详情页断言关系（或由语义候选确认）后，这里会展示关系网络。" />
       )}

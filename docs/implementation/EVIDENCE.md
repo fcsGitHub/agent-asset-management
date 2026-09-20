@@ -326,3 +326,28 @@
   点击节点打开资产详情、拖拽不误触；⌘K「打开图谱」导航直达。
   截图 m10-ui-nl-issue-preview.png、m10-ui-nl-issue-llm.png、m10-ui-issue-flash.png、
   m10-ui-graph.png。
+
+### EV-033 ｜ 2026-09-21 ｜ M11 迭代轮：活动流实时推送（Postgres NOTIFY → SSE）+ 本体导出下载
+- 数据链路完全事件驱动、零轮询：迁移 0018 在 audit_events / agent_runs 上建 AFTER
+  INSERT（运行含 UPDATE OF status）触发器，事务提交时 pg_notify('taw_activity')
+  ——NOTIFY 提交后才投递，回滚不产生幻影事件；通知只携带 kind/team_id/id
+  （id 统一转 text 防 JS 大数失真）。
+- apps/api/src/activityHub.ts：单例 LISTEN 连接（只收通知不查表，断线自动重连并
+  重 LISTEN），按 team_id 扇出订阅者回调；GET /activity/stream（SSE）：鉴权同列表
+  接口（成员校验），事件正文按 id 实时取（与 GET /activity 同一标签语义、同源），
+  25s 心跳注释，断开时取消订阅并清理。
+- Agent 运行的 INSERT 与每次 status 变化都推送；事件带稳定 key（audit:<id> /
+  agent:<runId>），GET /activity 同步补 key —— 界面按 key 原地覆盖运行状态、新事件
+  头插并按 limit 截断；断线重连成功后整体重取对齐。动态页头部加「● 实时 / ○ 未连接」
+  真实连接状态徽标。
+- 图谱页新增本体导出下载按钮（Turtle / JSON，文件名带项目代号）——M10 的确定性
+  Turtle 序列化从 API 工件变为界面可取的交付物，实测下载文件 digest 与 JSON 一致。
+- 测试 tests/m11（4 项，真实 NOTIFY + 真实 SSE 流式解析，非轮询模拟）：审计事件
+  推送（归档落库即达，summary/actor/key 与列表同源）、团队隔离（外团队动作有界窗口
+  内零泄漏）、Agent 运行推送（创建即达 + 取消状态按 key 原地更新）、鉴权（匿名
+  401/403、非成员 404）。
+- 全量：`npx vitest run` **18 套件 109 项全部通过**。
+- 浏览器实测：动态页显示「● 实时」；curl 归档资产后约 1.5s 内列表未刷新即出现
+  「归档资产 asset.archive」条目（截图 m11-ui-activity-live.png）；图谱页点击
+  「导出 Turtle / 导出 JSON」真实下载，TTL 头部与 owl:versionInfo digest 与 JSON
+  文档一致（8f67d617…，7 类）。

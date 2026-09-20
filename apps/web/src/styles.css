@@ -354,3 +354,6 @@ kbd {
 .issue-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .issue-asset { color: var(--muted); font-size: 12.5px; }
 .issue-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+/* ---------- M11：活动流实时徽标 ---------- */
+.chip-live { background: #e5f3ea; color: #1e5c3c; border: 1px solid #b5d9c2; }
