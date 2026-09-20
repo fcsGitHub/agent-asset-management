@@ -27,7 +27,12 @@ const H = 620;
 // 类型着色：按 type_key 排序后取调色板（确定性，同类型同色）
 const PALETTE = ["#3b6ea5", "#2e6b4f", "#8a5a9e", "#b0703c", "#4f7d9e", "#7d6a3b", "#a54a6f", "#4a8a7a", "#6b6b9e", "#8a7a4a"];
 
-export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo; onOpenAsset: (assetId: string) => void }) {
+export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
+  project?: ProjectInfo;
+  onOpenAsset: (assetId: string) => void;
+  /** NL「聚焦 X 的图谱」等入口预置的聚焦资产（M21）；仅注入状态，用户仍可自由改选 */
+  initialFocusId?: string;
+}) {
   const [edges, setEdges] = useState<RelEdge[] | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [error, setError] = useState("");
@@ -40,6 +45,10 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{ index: number; moved: boolean } | null>(null);
   const dragMovedRef = useRef(false);
+
+  useEffect(() => {
+    if (initialFocusId) setFocusId(initialFocusId);
+  }, [initialFocusId]);
 
   const reload = useCallback(() => {
     if (!project) return;

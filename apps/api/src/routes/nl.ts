@@ -22,6 +22,8 @@ export const NlIntent = z
       query: z.string().max(120).optional(),
       typeKeyHint: z.string().max(64).optional(),
       name: z.string().max(120).optional(),
+      // 图谱聚焦目标（M21）：page=graph 时可选，界面解析为资产后进入聚焦模式
+      assetName: z.string().max(120).optional(),
       title: z.string().max(200).optional(),
       body: z.string().max(4000).optional(),
     }).default({}),
@@ -53,6 +55,14 @@ export function ruleParse(text: string): NlIntent | null {
       "本体": "ontology", "本体治理": "ontology",
     };
     return { intent: "navigate", params: { page: map[p] ?? "dashboard" } };
+  }
+  // 图谱聚焦（M21）：「聚焦 X 的图谱」「打开 X 的关系图谱」「图谱聚焦 X」；
+  // 纯「打开图谱」已在上面命中（无 assetName），不冲突
+  const focus =
+    t.match(/^(?:聚焦|打开|查看)\s*[“「]?([^”」]{1,60}?)」?”?\s*(?:资产)?的(?:关系)?(?:图谱|关系图)$/) ??
+    t.match(/^(?:关系)?图谱\s*聚焦[:：]?\s*[“「]?([^”」]{1,60}?)」?”?$/);
+  if (focus && focus[1]!.trim()) {
+    return { intent: "navigate", params: { page: "graph", assetName: focus[1]!.trim().slice(0, 120) } };
   }
   const search = t.match(/^(?:搜索|查找|找一下?|查一下?)(?:资产|相关资产)?[：:\s]*(.+)$/);
   if (search && search[1]!.trim()) {
@@ -93,7 +103,7 @@ function buildLlmMessages(text: string, page: string) {
       content:
         "你是团队资产工作台的界面命令解析器。把用户的中文指令解析为一个 JSON 对象，只输出 JSON，不要输出任何解释。" +
         `可选意图（白名单，四选一）：\n` +
-        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals"}} —— 跳转页面（proposals 是 Agent 提案审核页）\n` +
+        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals","assetName":"<仅 page=graph 且用户想聚焦某资产时填写资产名>"}} —— 跳转页面（proposals 是 Agent 提案审核页；graph+assetName 进入聚焦模式）\n` +
         `2) {"intent":"search_assets","params":{"query":"<搜索关键词>"}} —— 搜索资产\n` +
         `3) {"intent":"fill_register_form","params":{"typeKeyHint":"<类型键，可选：${TYPE_KEYS_HINT}>","name":"<资产名，可选>"}} —— 预填登记表单\n` +
         `4) {"intent":"create_issue","params":{"title":"<问题标题，必填>","body":"<问题详情，可选>"}} —— 起草问题工单（界面会先预览，用户确认后才创建）\n` +

@@ -49,6 +49,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [registerHint, setRegisterHint] = useState<{ name?: string; typeKeyHint?: string; nonce: number }>({ nonce: 0 });
   // 轻量操作反馈（NL 建工单等异步结果）；6 秒自动消失
   const [flash, setFlash] = useState<{ text: string; tone: "ok" | "error"; nonce: number } | null>(null);
+  // NL「聚焦 X 的图谱」解析出的聚焦资产（已聚焦同一资产时无需重复注入）
+  const [graphFocus, setGraphFocus] = useState<{ id: string; nonce: number } | null>(null);
 
   useEffect(() => {
     if (!flash) return;
@@ -126,6 +128,29 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         setPage("workbench");
         setWsView("proposals");
         setMobileView("workspace");
+        return true;
+      }
+      // 图谱聚焦：资产名解析为 id 后进入聚焦模式；解析失败如实 flash，不静默装作聚焦
+      if (payload.params.page === "graph" && payload.params.assetName) {
+        const p = project;
+        const name = payload.params.assetName;
+        if (!p) return true;
+        void (async () => {
+          let hit: AssetRow | undefined;
+          try {
+            const hits = await api<AssetRow[]>("/assets/search", {
+              query: { teamId: p.teamId, q: name, lifecycle: "all", limit: "10" },
+            });
+            hit = hits.find((a) => a.name === name) ?? hits[0];
+          } catch { /* 解析失败按未找到处理 */ }
+          if (hit) {
+            setGraphFocus({ id: hit.id, nonce: Date.now() });
+          } else {
+            setFlash({ text: `未找到资产「${name}」，已打开未聚焦的图谱`, tone: "error", nonce: Date.now() });
+          }
+          setPage("graph");
+          setMobileView("workspace");
+        })();
         return true;
       }
       setPage(payload.params.page);
@@ -260,7 +285,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           </main>
         ) : page === "graph" ? (
           <main className="page-main" aria-label="关系图谱">
-            <RelationGraph project={project} onOpenAsset={openAssetFromSearch} />
+            <RelationGraph project={project} onOpenAsset={openAssetFromSearch} initialFocusId={graphFocus?.id} />
           </main>
         ) : page === "ontology" ? (
           <main className="page-main" aria-label="本体治理">

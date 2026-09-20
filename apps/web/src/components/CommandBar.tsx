@@ -17,7 +17,7 @@ interface Command {
 
 export interface NlIntentPayload {
   intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue";
-  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; title?: string; body?: string };
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; title?: string; body?: string };
   parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
 }
 
@@ -27,6 +27,9 @@ export function describeIntent(i: NlIntentPayload): string {
       dashboard: "总览", workbench: "工作台", activity: "团队动态", approvals: "审批队列", graph: "关系图谱",
       ontology: "本体治理", proposals: "Agent 提案",
     };
+    if (i.params.page === "graph" && i.params.assetName) {
+      return `聚焦「${i.params.assetName}」的关系图谱`;
+    }
     return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
   }
   if (i.intent === "search_assets") return `搜索资产：${i.params.query ?? ""}`;

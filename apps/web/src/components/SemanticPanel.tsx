@@ -95,6 +95,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qMapping, setQMapping] = useState<Record<string, { source: string; target: string }>>({});
   const [qErrors, setQErrors] = useState<Record<string, string>>({});
   const [importCount, setImportCount] = useState<number | null>(null);
+  const [importSkipped, setImportSkipped] = useState<number | null>(null);
   // 批审（M18）：勾选 + 批量确认/忽略；详情展开按需拉取
   const [qSel, setQSel] = useState<Record<string, boolean>>({});
   const [qBusy, setQBusy] = useState(false);
@@ -200,12 +201,13 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     }
   }
 
-  // 把本次抽取的全部候选存入团队审核队列（跨会话，其他成员可见可审）
+  // 把本次抽取的全部候选存入团队审核队列（跨会话，其他成员可见可审）；
+  // 同（类型+端点）已有待审/已确认候选时服务端跳过，跳过数如实展示
   async function importToQueue() {
     if (!project || !result || !assetId) return;
     setError("");
     try {
-      const r = await api<{ imported: number }>("/semantic/candidates/import", {
+      const r = await api<{ imported: number; skipped: number }>("/semantic/candidates/import", {
         method: "POST",
         body: {
           teamId: project.teamId, assetId, revisionId: headRevision || undefined,
@@ -221,6 +223,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
         },
       });
       setImportCount(r.imported);
+      setImportSkipped(r.skipped);
       loadQueue();
     } catch (err) {
       setError(errorText(err));
@@ -388,7 +391,12 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
               存入审核队列（{candList.length}）
             </button>
           )}
-          {importCount !== null && <span className="ok-text" style={{ marginLeft: 8 }}>已入队 {importCount} 条，团队成员均可审核</span>}
+          {importCount !== null && (
+            <span className="ok-text" style={{ marginLeft: 8 }}>
+              已入队 {importCount} 条，团队成员均可审核
+              {(importSkipped ?? 0) > 0 && `；跳过重复 ${importSkipped} 条（队列中已有同类型同端点的候选）`}
+            </span>
+          )}
         </div>
       )}
       {candList.map((c, i) => {

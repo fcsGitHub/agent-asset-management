@@ -126,12 +126,27 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
     const body = parseBody(candidateImportSchema, req.body);
     await teamRole(auth.userId, body.teamId);
     const ids: string[] = [];
+    const duplicateIndexes: number[] = [];
     await withTeam(body.teamId, async (client) => {
       const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
         body.teamId, body.assetId,
       ]);
       if (!asset[0]) throw ERR.INVALID("来源资产不存在于本团队");
-      for (const c of body.candidates) {
+      for (let i = 0; i < body.candidates.length; i++) {
+        const c = body.candidates[i]!;
+        // 队列卫生（M21）：同（类型 + 端点文本）已有 pending/confirmed 候选时跳过。
+        // dismissed 不算——被否决过的候选允许重新入队重审。
+        const { rows: dup } = await client.query(
+          `SELECT 1 FROM semantic_candidates
+            WHERE team_id = $1 AND relation_type = $2 AND source_text = $3 AND target_text = $4
+              AND status IN ('pending','confirmed')
+            LIMIT 1`,
+          [body.teamId, c.relationType, c.sourceText, c.targetText]
+        );
+        if (dup[0]) {
+          duplicateIndexes.push(i);
+          continue;
+        }
         const id = newId();
         await client.query(
           `INSERT INTO semantic_candidates (team_id, id, asset_id, revision_id, relation_type,
@@ -145,7 +160,13 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
         ids.push(id);
       }
     });
-    return reply.code(201).send({ teamId: body.teamId, imported: ids.length, candidateIds: ids });
+    return reply.code(201).send({
+      teamId: body.teamId,
+      imported: ids.length,
+      skipped: duplicateIndexes.length,
+      candidateIds: ids,
+      duplicateIndexes,
+    });
   });
 
   app.get("/semantic/candidates", async (req) => {
