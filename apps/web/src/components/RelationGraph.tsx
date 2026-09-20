@@ -34,6 +34,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [focusId, setFocusId] = useState("");
+  const [focusHops, setFocusHops] = useState(1);
   const [tick, setTick] = useState(0); // 模拟帧驱动
   const nodesRef = useRef<SimNode[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -59,7 +60,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
 
   useEffect(reload, [reload]);
 
-  // 过滤后的边与参与节点。聚焦模式：只看聚焦资产及其一跳邻域；
+  // 过滤后的边与参与节点。聚焦模式：BFS 展开聚焦资产 N 跳邻域（1/2/3 跳）；
   // 无关系连接的资产默认隐藏（数量如实提示）。
   const { simEdges, simNodes, hiddenAssets } = useMemo(() => {
     const byId = new Map(assets.map((a) => [a.id, a]));
@@ -69,9 +70,30 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
         (!typeFilter || e.type_key === typeFilter) &&
         (!statusFilter || e.status === statusFilter)
     );
-    const kept = focusId
-      ? base.filter((e) => e.source_asset_id === focusId || e.target_asset_id === focusId)
-      : base;
+    let kept = base;
+    if (focusId && byId.has(focusId)) {
+      // 邻域集合：从聚焦资产沿边 BFS focusHops 跳
+      const adjacency = new Map<string, string[]>();
+      for (const e of base) {
+        adjacency.set(e.source_asset_id, [...(adjacency.get(e.source_asset_id) ?? []), e.target_asset_id]);
+        adjacency.set(e.target_asset_id, [...(adjacency.get(e.target_asset_id) ?? []), e.source_asset_id]);
+      }
+      const inSet = new Set<string>([focusId]);
+      let frontier = [focusId];
+      for (let hop = 0; hop < focusHops; hop++) {
+        const next: string[] = [];
+        for (const node of frontier) {
+          for (const nb of adjacency.get(node) ?? []) {
+            if (!inSet.has(nb)) {
+              inSet.add(nb);
+              next.push(nb);
+            }
+          }
+        }
+        frontier = next;
+      }
+      kept = base.filter((e) => inSet.has(e.source_asset_id) && inSet.has(e.target_asset_id));
+    }
     const degree = new Map<string, number>();
     for (const e of kept) {
       degree.set(e.source_asset_id, (degree.get(e.source_asset_id) ?? 0) + 1);
@@ -97,7 +119,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
       label: e.type_key,
     }));
     return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size };
-  }, [edges, assets, typeFilter, statusFilter, focusId]);
+  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops]);
 
   nodesRef.current = simNodes;
 
@@ -168,29 +190,6 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
     };
   };
 
-  // 本体导出下载：与图谱同源的本体工件（类型注册表 + 关系注册表），浏览器端触发下载
-  async function downloadOntology(format: "turtle" | "json") {
-    if (!project) return;
-    setError("");
-    try {
-      const qs = new URLSearchParams({ teamId: project.teamId });
-      if (format === "turtle") qs.set("format", "turtle");
-      const res = await fetch(`/api/v1/ontology/export?${qs}`, { credentials: "same-origin" });
-      if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `ontology-${project.code}.${format === "turtle" ? "ttl" : "json"}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "导出失败");
-    }
-  }
-
   useEffect(() => {
     const move = (ev: PointerEvent) => {
       const drag = dragRef.current;
@@ -239,8 +238,13 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
             <option key={a.id} value={a.id}>{a.name}</option>
           ))}
         </select>
-        <button onClick={() => void downloadOntology("turtle")} title="下载本体（RDF Turtle，确定性序列化）">导出 Turtle</button>
-        <button onClick={() => void downloadOntology("json")} title="下载本体（taw-ontology/1 JSON）">导出 JSON</button>
+        {focusId && (
+          <select aria-label="聚焦跳数" value={focusHops} onChange={(e) => setFocusHops(Number(e.target.value))}>
+            <option value={1}>1 跳邻域</option>
+            <option value={2}>2 跳邻域</option>
+            <option value={3}>3 跳邻域</option>
+          </select>
+        )}
         <button onClick={reload}>刷新</button>
       </div>
       {error && <div className="error-text">{error}</div>}
@@ -254,7 +258,7 @@ export function RelationGraph({ project, onOpenAsset }: { project?: ProjectInfo;
         <>
           {focusId && simNodes.length > 0 && (
             <p className="hint" style={{ marginTop: 0 }}>
-              聚焦模式：仅显示聚焦资产与其一跳邻域（{simNodes.length} 节点 / {simEdges.length} 关系）。
+              聚焦模式：显示聚焦资产 {focusHops} 跳邻域（{simNodes.length} 节点 / {simEdges.length} 关系）。
             </p>
           )}
           {hiddenAssets > 0 && (

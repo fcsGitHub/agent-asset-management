@@ -357,3 +357,35 @@ kbd {
 
 /* ---------- M11：活动流实时徽标 ---------- */
 .chip-live { background: #e5f3ea; color: #1e5c3c; border: 1px solid #b5d9c2; }
+
+/* ---------- M13：本体治理台 ---------- */
+.onto-tree { list-style: none; margin: 0; padding: 0; }
+.onto-node { margin: 2px 0; }
+.onto-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 6px; }
+.onto-row:hover { background: var(--soft); }
+.onto-toggle { border: none; background: none; padding: 0 4px; color: var(--muted); }
+.onto-title { font-weight: 600; }
+.onto-version { color: var(--muted); font-size: 12.5px; }
+.onto-parent { color: var(--muted); font-size: 12.5px; }
+.onto-props { margin: 4px 0 8px 26px; max-width: 720px; }
+.onto-constraints { white-space: nowrap; }
+.onto-constraints .chip { margin-right: 4px; }
+.onto-form summary { cursor: pointer; }
+.onto-form summary h3 { display: inline; margin: 0; }
+.onto-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; margin-bottom: 10px; }
+.onto-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
+.onto-kinds { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; }
+.onto-kinds fieldset { border: 1px solid var(--line); border-radius: 8px; display: flex; gap: 10px; flex-wrap: wrap; padding: 6px 10px; }
+.onto-kinds legend { font-size: 12.5px; color: var(--muted); padding: 0 4px; }
+.onto-kind { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.onto-preview { margin-top: 8px; border-radius: 8px; padding: 10px 12px; }
+.preview-ok { background: #eaf6ee; border: 1px solid #b5d9c2; }
+.preview-warn { background: #fdf3e7; border: 1px solid #e5c9a1; }
+.onto-preview-head { font-weight: 650; margin-bottom: 6px; }
+.onto-preview-list { margin: 0; padding-left: 18px; font-size: 13px; }
+
+/* M13 修复：.btn-row button（0,1,1）会覆盖 .primary（0,1,0），导致主按钮白底白字；
+   用同为 0,1,1 的后置规则恢复主按钮的可视样式 */
+button.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 8px; padding: 6px 16px; }
+button.primary:disabled { opacity: 0.55; cursor: default; }
+button.primary:hover:not(:disabled) { background: #1e5946; }

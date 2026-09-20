@@ -3,6 +3,7 @@ import { api, ApiError, uploadFile } from "../api";
 import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
 import { RelationGraph } from "../components/RelationGraph";
+import { OntologyPage } from "../components/OntologyPage";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
@@ -13,6 +14,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: string }[] = [
   { key: "activity", label: "动态", icon: "≡" },
   { key: "approvals", label: "审批", icon: "✓" },
   { key: "graph", label: "图谱", icon: "⚭" },
+  { key: "ontology", label: "本体", icon: "⌗" },
 ];
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
@@ -250,6 +252,10 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         ) : page === "graph" ? (
           <main className="page-main" aria-label="关系图谱">
             <RelationGraph project={project} onOpenAsset={openAssetFromSearch} />
+          </main>
+        ) : page === "ontology" ? (
+          <main className="page-main" aria-label="本体治理">
+            <OntologyPage project={project} me={me} />
           </main>
         ) : (
         <>

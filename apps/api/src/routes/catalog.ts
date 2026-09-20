@@ -360,9 +360,15 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     await seedDefaultTypes(teamId, auth.userId);
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
-        `SELECT id, type_key, version, title, source_kinds, target_kinds, source_type_keys, target_type_keys,
-                cyclic, is_symmetric, requires_revision, created_at
-           FROM relation_type_versions WHERE team_id = $1 ORDER BY type_key, version`,
+        `SELECT rt.id, rt.type_key, rt.version, rt.title, rt.source_kinds, rt.target_kinds, rt.source_type_keys, rt.target_type_keys,
+                rt.cyclic, rt.is_symmetric, rt.requires_revision, rt.created_at,
+                COALESCE(cnt.n, 0)::int AS assertion_count
+           FROM relation_type_versions rt
+           LEFT JOIN LATERAL (
+             SELECT count(*) AS n FROM relation_assertions ra
+              WHERE ra.team_id = rt.team_id AND ra.relation_type_version_id = rt.id AND ra.status <> 'withdrawn'
+           ) cnt ON true
+          WHERE rt.team_id = $1 ORDER BY rt.type_key, rt.version`,
         [teamId]
       )
     );
