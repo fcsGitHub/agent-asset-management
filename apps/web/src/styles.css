@@ -408,3 +408,8 @@ button.primary:hover:not(:disabled) { background: #1e5946; }
 }
 .sem-map { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .sem-map select { flex: 1; min-width: 160px; }
+
+/* ---------- M15：候选审核队列 ---------- */
+.sem-queue { margin-top: 16px; }
+.sem-queue summary { cursor: pointer; }
+.sem-queue summary h3 { display: inline; margin: 0; }

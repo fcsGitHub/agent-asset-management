@@ -88,6 +88,121 @@ function firstInheritanceViolation(chain: TypeDefRow[]): string | null {
   return null;
 }
 
+/** 关系断言核心（共享）：HTTP 端点与语义候选确认走同一条路径——
+ * kind 级与类级 domain/range、成环禁止、修订绑定校验全部在此强制执行。
+ * 传入 existingClient 时在调用方事务内执行（候选确认要求原子性），否则自开事务。 */
+export async function createRelationAssertion(
+  teamId: string,
+  userId: string,
+  body: {
+    relationTypeVersionId: string;
+    sourceAssetId: string;
+    sourceRevisionId?: string;
+    targetAssetId: string;
+    targetRevisionId?: string;
+    conditions?: Record<string, unknown>;
+    evidenceNote?: string;
+    confirm: boolean;
+  },
+  existingClient?: PoolClient
+): Promise<{ relationId: string; status: string }> {
+  const id = newId();
+  const status = body.confirm ? "confirmed" : "proposed";
+  const run = async (client: PoolClient): Promise<void> => {
+    const { rows: rt } = await client.query<{
+      type_key: string;
+      source_kinds: string[];
+      target_kinds: string[];
+      source_type_keys: string[];
+      target_type_keys: string[];
+      cyclic: boolean;
+    }>(
+      `SELECT type_key, source_kinds, target_kinds, source_type_keys, target_type_keys, cyclic
+         FROM relation_type_versions WHERE team_id = $1 AND id = $2`,
+      [teamId, body.relationTypeVersionId]
+    );
+    const relType = rt[0];
+    if (!relType) throw ERR.INVALID("relationTypeVersionId 不存在");
+    const endpointType = async (assetId: string): Promise<{ kind: string; type_key: string } | null> => {
+      const { rows } = await client.query<{ kind: string; type_key: string }>(
+        `SELECT e.kind, tv.type_key FROM assets a
+           JOIN entities e ON e.team_id = a.team_id AND e.id = a.id
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [teamId, assetId]
+      );
+      return rows[0] ?? null;
+    };
+    const srcInfo = await endpointType(body.sourceAssetId);
+    const tgtInfo = await endpointType(body.targetAssetId);
+    if (!srcInfo || !tgtInfo) throw ERR.INVALID("源或目标资产不存在于本团队");
+    const domainRangeErrors: string[] = [];
+    if (!relType.source_kinds.includes(srcInfo.kind)) {
+      domainRangeErrors.push(`源端点 kind=${srcInfo.kind} 不在关系类型的 source_kinds [${relType.source_kinds.join(", ")}] 内`);
+    }
+    if (!relType.target_kinds.includes(tgtInfo.kind)) {
+      domainRangeErrors.push(`目标端点 kind=${tgtInfo.kind} 不在关系类型的 target_kinds [${relType.target_kinds.join(", ")}] 内`);
+    }
+    if (relType.source_type_keys.length > 0 && !relType.source_type_keys.includes(srcInfo.type_key)) {
+      domainRangeErrors.push(`源资产类型 ${srcInfo.type_key} 不在 source_type_keys [${relType.source_type_keys.join(", ")}] 内`);
+    }
+    if (relType.target_type_keys.length > 0 && !relType.target_type_keys.includes(tgtInfo.type_key)) {
+      domainRangeErrors.push(`目标资产类型 ${tgtInfo.type_key} 不在 target_type_keys [${relType.target_type_keys.join(", ")}] 内`);
+    }
+    if (domainRangeErrors.length > 0) {
+      throw ERR.CONFLICT("DOMAIN_RANGE_VIOLATION", `断言违反关系类型 ${relType.type_key} 的 domain/range`, domainRangeErrors);
+    }
+    if (!relType.cyclic) {
+      // 成环禁止：新边 S→T 成环 ⟺ 既有图中存在 T→…→S 的路径。
+      // 实现：从 S 沿"入边"反向走（前驱），若能到达 T 即成环。
+      const { rows: cyc } = await client.query(
+        `WITH RECURSIVE walk AS (
+           SELECT ra.source_asset_id AS node FROM relation_assertions ra
+            WHERE ra.team_id = $1 AND ra.relation_type_version_id = $2 AND ra.status <> 'withdrawn'
+              AND ra.target_asset_id = $4
+           UNION
+           SELECT ra.source_asset_id FROM relation_assertions ra
+            JOIN walk w ON ra.target_asset_id = w.node
+            WHERE ra.team_id = $1 AND ra.relation_type_version_id = $2 AND ra.status <> 'withdrawn'
+         ) SELECT 1 FROM walk WHERE node = $3 LIMIT 1`,
+        [teamId, body.relationTypeVersionId, body.targetAssetId, body.sourceAssetId]
+      );
+      if (cyc[0]) {
+        throw ERR.CONFLICT("CYCLE_FORBIDDEN", `关系类型 ${relType.type_key} 不允许成环：该断言将与既有断言构成环`);
+      }
+    }
+    if (body.sourceRevisionId) {
+      const { rows: sr } = await client.query(
+        `SELECT 1 FROM asset_revisions WHERE team_id = $1 AND id = $2 AND asset_id = $3`,
+        [teamId, body.sourceRevisionId, body.sourceAssetId]
+      );
+      if (!sr[0]) throw ERR.INVALID("源修订与资产不匹配");
+    }
+    if (body.targetRevisionId) {
+      const { rows: tr } = await client.query(
+        `SELECT 1 FROM asset_revisions WHERE team_id = $1 AND id = $2 AND asset_id = $3`,
+        [teamId, body.targetRevisionId, body.targetAssetId]
+      );
+      if (!tr[0]) throw ERR.INVALID("目标修订与资产不匹配");
+    }
+    await client.query(
+      `INSERT INTO relation_assertions (team_id, id, relation_type_version_id, source_asset_id, source_revision_id,
+        target_asset_id, target_revision_id, conditions, evidence_note, status, proposed_by, confirmed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        teamId, id, body.relationTypeVersionId,
+        body.sourceAssetId, body.sourceRevisionId ?? null,
+        body.targetAssetId, body.targetRevisionId ?? null,
+        JSON.stringify(body.conditions ?? {}), body.evidenceNote ?? null,
+        status, userId, body.confirm ? userId : null,
+      ]
+    );
+  };
+  if (existingClient) await run(existingClient);
+  else await withTeam(teamId, run);
+  return { relationId: id, status };
+}
+
 export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   const store = blobStoreFromEnv();
 
@@ -1066,100 +1181,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       req.body
     );
     await teamRole(auth.userId, body.teamId);
-    const id = newId();
-    const status = body.confirm ? "confirmed" : "proposed";
-    await withTeam(body.teamId, async (client) => {
-      // 关系类型的 domain/range：kind 级 + 类级（type_key 集合，空数组 = 不限）
-      const { rows: rt } = await client.query<{
-        type_key: string;
-        source_kinds: string[];
-        target_kinds: string[];
-        source_type_keys: string[];
-        target_type_keys: string[];
-        cyclic: boolean;
-      }>(
-        `SELECT type_key, source_kinds, target_kinds, source_type_keys, target_type_keys, cyclic
-           FROM relation_type_versions WHERE team_id = $1 AND id = $2`,
-        [body.teamId, body.relationTypeVersionId]
-      );
-      const relType = rt[0];
-      if (!relType) throw ERR.INVALID("relationTypeVersionId 不存在");
-      const endpointType = async (assetId: string): Promise<{ kind: string; type_key: string } | null> => {
-        const { rows } = await client.query<{ kind: string; type_key: string }>(
-          `SELECT e.kind, tv.type_key FROM assets a
-             JOIN entities e ON e.team_id = a.team_id AND e.id = a.id
-             JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
-            WHERE a.team_id = $1 AND a.id = $2`,
-          [body.teamId, assetId]
-        );
-        return rows[0] ?? null;
-      };
-      const srcInfo = await endpointType(body.sourceAssetId);
-      const tgtInfo = await endpointType(body.targetAssetId);
-      if (!srcInfo || !tgtInfo) throw ERR.INVALID("源或目标资产不存在于本团队");
-      const domainRangeErrors: string[] = [];
-      if (!relType.source_kinds.includes(srcInfo.kind)) {
-        domainRangeErrors.push(`源端点 kind=${srcInfo.kind} 不在关系类型的 source_kinds [${relType.source_kinds.join(", ")}] 内`);
-      }
-      if (!relType.target_kinds.includes(tgtInfo.kind)) {
-        domainRangeErrors.push(`目标端点 kind=${tgtInfo.kind} 不在关系类型的 target_kinds [${relType.target_kinds.join(", ")}] 内`);
-      }
-      if (relType.source_type_keys.length > 0 && !relType.source_type_keys.includes(srcInfo.type_key)) {
-        domainRangeErrors.push(`源资产类型 ${srcInfo.type_key} 不在 source_type_keys [${relType.source_type_keys.join(", ")}] 内`);
-      }
-      if (relType.target_type_keys.length > 0 && !relType.target_type_keys.includes(tgtInfo.type_key)) {
-        domainRangeErrors.push(`目标资产类型 ${tgtInfo.type_key} 不在 target_type_keys [${relType.target_type_keys.join(", ")}] 内`);
-      }
-      if (domainRangeErrors.length > 0) {
-        throw ERR.CONFLICT("DOMAIN_RANGE_VIOLATION", `断言违反关系类型 ${relType.type_key} 的 domain/range`, domainRangeErrors);
-      }
-      if (!relType.cyclic) {
-        // 成环禁止：新边 S→T 成环 ⟺ 既有图中存在 T→…→S 的路径。
-        // 实现：从 S 沿"入边"反向走（前驱），若能到达 T 即成环。
-        const { rows: cyc } = await client.query(
-          `WITH RECURSIVE walk AS (
-             SELECT ra.source_asset_id AS node FROM relation_assertions ra
-              WHERE ra.team_id = $1 AND ra.relation_type_version_id = $2 AND ra.status <> 'withdrawn'
-                AND ra.target_asset_id = $4
-             UNION
-             SELECT ra.source_asset_id FROM relation_assertions ra
-              JOIN walk w ON ra.target_asset_id = w.node
-              WHERE ra.team_id = $1 AND ra.relation_type_version_id = $2 AND ra.status <> 'withdrawn'
-           ) SELECT 1 FROM walk WHERE node = $3 LIMIT 1`,
-          [body.teamId, body.relationTypeVersionId, body.targetAssetId, body.sourceAssetId]
-        );
-        if (cyc[0]) {
-          throw ERR.CONFLICT("CYCLE_FORBIDDEN", `关系类型 ${relType.type_key} 不允许成环：该断言将与既有断言构成环`);
-        }
-      }
-      if (body.sourceRevisionId) {
-        const { rows: sr } = await client.query(
-          `SELECT 1 FROM asset_revisions WHERE team_id = $1 AND id = $2 AND asset_id = $3`,
-          [body.teamId, body.sourceRevisionId, body.sourceAssetId]
-        );
-        if (!sr[0]) throw ERR.INVALID("源修订与资产不匹配");
-      }
-      if (body.targetRevisionId) {
-        const { rows: tr } = await client.query(
-          `SELECT 1 FROM asset_revisions WHERE team_id = $1 AND id = $2 AND asset_id = $3`,
-          [body.teamId, body.targetRevisionId, body.targetAssetId]
-        );
-        if (!tr[0]) throw ERR.INVALID("目标修订与资产不匹配");
-      }
-      await client.query(
-        `INSERT INTO relation_assertions (team_id, id, relation_type_version_id, source_asset_id, source_revision_id,
-          target_asset_id, target_revision_id, conditions, evidence_note, status, proposed_by, confirmed_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-        [
-          body.teamId, id, body.relationTypeVersionId,
-          body.sourceAssetId, body.sourceRevisionId ?? null,
-          body.targetAssetId, body.targetRevisionId ?? null,
-          JSON.stringify(body.conditions), body.evidenceNote ?? null,
-          status, auth.userId, body.confirm ? auth.userId : null,
-        ]
-      );
-    });
-    return reply.code(201).send({ teamId: body.teamId, relationId: id, status });
+    const result = await createRelationAssertion(body.teamId, auth.userId, body);
+    return reply.code(201).send({ teamId: body.teamId, relationId: result.relationId, status: result.status });
   });
 
   app.get("/relations", async (req) => {

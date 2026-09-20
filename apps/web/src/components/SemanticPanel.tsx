@@ -25,6 +25,27 @@ interface ExtractResult {
   warnings: string[];
   extractor_version: string;
 }
+interface QueueItem {
+  id: string;
+  relation_type: string;
+  source_text: string;
+  target_text: string;
+  evidence_segment: string;
+  confidence: number;
+  llm_proposed: boolean;
+  extractor_version: string;
+  status: string;
+  created_at: string;
+  created_by_name: string | null;
+  asset_name: string | null;
+}
+
+function errorText(err: unknown): string {
+  if (err instanceof ApiError) {
+    return `${err.message}${err.details ? `：${JSON.stringify(err.details).slice(0, 200)}` : ""}`;
+  }
+  return err instanceof Error ? err.message : "操作失败";
+}
 
 /** 候选端点文本 → 团队资产名精确匹配（自动预选）；否则留空由人工选择。 */
 function matchAsset(assets: AssetRow[], text: string): string {
@@ -47,6 +68,34 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [asserted, setAsserted] = useState<Record<number, string>>({});
   const [dismissed, setDismissed] = useState<Record<number, boolean>>({});
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+  // 团队审核队列（跨会话持久化，0020）
+  const [queue, setQueue] = useState<QueueItem[] | null>(null);
+  const [qMapping, setQMapping] = useState<Record<string, { source: string; target: string }>>({});
+  const [qErrors, setQErrors] = useState<Record<string, string>>({});
+  const [importCount, setImportCount] = useState<number | null>(null);
+
+  const loadQueue = useCallback(() => {
+    if (!project) return;
+    void api<QueueItem[]>("/semantic/candidates", { query: { teamId: project.teamId, status: "pending" } })
+      .then((rows) => {
+        setQueue(rows);
+        // 按资产名自动预映射（可改选）
+        setQMapping((prev) => {
+          const next = { ...prev };
+          for (const item of rows) {
+            if (next[item.id]?.source && next[item.id]?.target) continue;
+            next[item.id] = {
+              source: next[item.id]?.source || matchAsset(assets, item.source_text),
+              target: next[item.id]?.target || matchAsset(assets, item.target_text),
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => setQueue([]));
+  }, [project, assets]);
+
+  useEffect(loadQueue, [loadQueue]);
 
   useEffect(() => {
     if (!project) return;
@@ -117,7 +166,61 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
       });
       setAsserted((prev) => ({ ...prev, [i]: res.relationId }));
     } catch (err) {
-      setRowErrors((prev) => ({ ...prev, [i]: err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details).slice(0, 200)}` : ""}` : "断言失败" }));
+      setRowErrors((prev) => ({ ...prev, [i]: errorText(err) }));
+    }
+  }
+
+  // 把本次抽取的全部候选存入团队审核队列（跨会话，其他成员可见可审）
+  async function importToQueue() {
+    if (!project || !result || !assetId) return;
+    setError("");
+    try {
+      const r = await api<{ imported: number }>("/semantic/candidates/import", {
+        method: "POST",
+        body: {
+          teamId: project.teamId, assetId, revisionId: headRevision || undefined,
+          candidates: result.candidate_relations.map((c) => ({
+            relationType: c.type,
+            sourceText: c.source.text, sourceStart: c.source.start ?? 0, sourceEnd: c.source.end ?? 0,
+            targetText: c.target.text, targetStart: c.target.start ?? 0, targetEnd: c.target.end ?? 0,
+            evidenceSegment: c.evidence?.segment ?? "",
+            confidence: c.confidence ?? 0,
+            llmProposed: !!c.llm_proposed,
+            extractorVersion: result.extractor_version,
+          })),
+        },
+      });
+      setImportCount(r.imported);
+      loadQueue();
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+
+  async function confirmQueue(item: QueueItem) {
+    if (!project) return;
+    const m = qMapping[item.id];
+    if (!m?.source || !m?.target) return;
+    setQErrors((prev) => ({ ...prev, [item.id]: "" }));
+    try {
+      await api(`/semantic/candidates/${item.id}/confirm`, {
+        method: "POST",
+        body: { teamId: project.teamId, sourceAssetId: m.source, targetAssetId: m.target },
+      });
+      loadQueue();
+    } catch (err) {
+      // 违规（domain/range、成环、未注册类型等）如实回显，候选保持待审
+      setQErrors((prev) => ({ ...prev, [item.id]: errorText(err) }));
+    }
+  }
+
+  async function dismissQueue(item: QueueItem) {
+    if (!project) return;
+    try {
+      await api(`/semantic/candidates/${item.id}/dismiss`, { method: "POST", body: { teamId: project.teamId } });
+      loadQueue();
+    } catch (err) {
+      setQErrors((prev) => ({ ...prev, [item.id]: errorText(err) }));
     }
   }
 
@@ -168,6 +271,12 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
       {result && (
         <div className="sem-meta">
           抽取器 <code>{result.extractor_version}</code> · 候选关系 {candList.length} 条 · 证据锚点 {result.evidence_anchors.length} 个
+          {candList.length > 0 && (
+            <button style={{ marginLeft: 10 }} disabled={busy || !assetId} onClick={() => void importToQueue()}>
+              存入审核队列（{candList.length}）
+            </button>
+          )}
+          {importCount !== null && <span className="ok-text" style={{ marginLeft: 8 }}>已入队 {importCount} 条，团队成员均可审核</span>}
         </div>
       )}
       {candList.map((c, i) => {
@@ -218,6 +327,61 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
       {result && candList.length === 0 && (
         <Empty icon="⛓" title="没有抽出候选关系" hint="文本中需要出现至少两个实体提示（或已知实体名）以及可识别的关系模式。" />
       )}
+
+      {/* ---------- 团队待审核队列（持久化，跨会话/跨成员） ---------- */}
+      <details className="sem-queue" open>
+        <summary><h3>待审核队列{queue !== null ? `（${queue.length}）` : ""}</h3></summary>
+        <p className="hint" style={{ padding: 0 }}>
+          入队的候选持久保存，团队任何成员都可映射端点并确认；确认走与服务端关系断言完全相同的校验（domain/range、成环禁止），违规时候选保持待审。
+        </p>
+        {queue === null && <div className="state">加载中…</div>}
+        {queue !== null && queue.length === 0 && (
+          <Empty icon="📥" title="队列是空的" hint="抽取候选后点「存入审核队列」，或等待其他成员入队。" />
+        )}
+        {queue !== null && queue.map((item) => {
+          const m = qMapping[item.id];
+          const canConfirm = !!m?.source && !!m?.target;
+          return (
+            <div key={item.id} className="sem-cand">
+              <div className="sem-cand-head">
+                <span className="badge">{item.relation_type}</span>
+                <span className="chip chip-dim">{item.llm_proposed ? "LLM 提议" : "规则"}</span>
+                <span className="sem-conf">{Math.round((item.confidence ?? 0) * 100)}%</span>
+                <span className="sem-conf">
+                  入队 {item.created_by_name ?? "成员"} · 证据来源 {item.asset_name ?? "—"}
+                </span>
+              </div>
+              <div className="sem-cand-endpoints">
+                <span>{item.source_text}</span>
+                <span className="sem-arrow">— {item.relation_type} →</span>
+                <span>{item.target_text}</span>
+              </div>
+              {item.evidence_segment && <blockquote className="sem-evidence">…{item.evidence_segment}…</blockquote>}
+              <div className="sem-map">
+                <select
+                  aria-label={`队列 source 映射 ${item.id}`}
+                  value={m?.source ?? ""}
+                  onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: e.target.value, target: prev[item.id]?.target ?? "" } }))}
+                >
+                  <option value="">source 映射到资产…</option>
+                  {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                <select
+                  aria-label={`队列 target 映射 ${item.id}`}
+                  value={m?.target ?? ""}
+                  onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: prev[item.id]?.source ?? "", target: e.target.value } }))}
+                >
+                  <option value="">target 映射到资产…</option>
+                  {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                <button className="primary" disabled={!canConfirm} onClick={() => void confirmQueue(item)}>确认断言</button>
+                <button onClick={() => void dismissQueue(item)}>忽略</button>
+              </div>
+              {qErrors[item.id] && <div className="error-text">{qErrors[item.id]}</div>}
+            </div>
+          );
+        })}
+      </details>
     </div>
   );
 }

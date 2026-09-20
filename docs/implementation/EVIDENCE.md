@@ -418,3 +418,26 @@
   转"✓ 已断言（a2c08e02…）"；图谱页随之显示 2 节点 2 关系（新 dependsOn 边）。
   无 key worker 场景的降级警告（"LLM 增强失败，已降级为规则候选: DEEPSEEK_API_KEY
   未配置"）同样实测确认。截图 m14-ui-semantic.png。
+
+### EV-037 ｜ 2026-09-21 ｜ M15 迭代轮：候选审核队列（持久化 + 跨成员 + 原子确认）
+- 迁移 0020 semantic_candidates：候选持久化（RLS 租户隔离），状态机
+  pending → confirmed/dismissed（decided_by/decided_at/resolved_relation_id 全留痕）。
+- 重构：关系断言核心从 POST /relations 抽出为共享函数 createRelationAssertion
+  （kind/类级 domain/range、成环禁止、修订绑定校验唯一入口；可选传入事务 client），
+  HTTP 端点与候选确认走同一条校验路径。修复随重构暴露的隐患：conditions 缺省时
+  JSON.stringify(undefined) → NULL 违反非空约束（HTTP 层 schema 默认值掩盖了它）。
+- 端点四则：POST /semantic/candidates/import（入队，≤50 条，created_by 留痕）、
+  GET /semantic/candidates?status=（队列，含入队人/来源资产）、
+  POST .../confirm（FOR UPDATE 锁候选 + 共享断言 + 状态更新同一事务——断言违规时候选
+  保持 pending 可修正重试；类型未注册 / 已处理分别 409 如实区分）、
+  POST .../dismiss。
+- UI：SemanticPanel 新增「存入审核队列」按钮与「待审核队列」区（跨会话/跨成员持久；
+  按资产名自动预映射可改选；确认/忽略即时刷新队列）。
+- 测试 tests/m15（5 项）：入队 → 成员队列可见（如实标注入队人与来源资产）；
+  成员经确认端点断言成功且 relation 目录可见 confirmed、重复确认 409；
+  DOMAIN_RANGE_VIOLATION 时候选保持 pending；忽略后移出待审且重复忽略 409；
+  非成员 404。全量：`npx vitest run` **22 套件 124 项全部通过**（58s）。
+- 浏览器实测：抽取（+llm/deepseek，2 条）→ 存入审核队列 → 队列（2）→ 确认一条
+  （documentedBy LLM 提议 75%）→ 队列（1）；DB 复核状态机
+  （documentedBy confirmed t 0.75 / dependsOn pending f 0.5）。
+  截图 m15-ui-candidate-queue.png。
