@@ -91,14 +91,21 @@
 | Session 分享 | visibility 过滤（C08 进行中，见上） |
 | 检索权限 | tests/m5-semantic D08 |
 
-## 遗留问题（不阻塞上述状态，但如实列出）
+## 遗留问题（M6 补强后更新）
 
-1. A01：资产归档独立 API 端点（lifecycle 字段已存在）。
-2. A06：本体迁移影响预演报告工具。
-3. B07：preview 通道的完整 UI 流程（API/数据层已支持）。
-4. D05：kill -9 级进程崩溃注入演练（recover 语义已测）。
-5. E01：全新宿主机冷启动重放。
-6. E05：并发用户压测（当前为单用户延迟口径）。
+M6 补强轮（2026-09-20，"拒绝所有 mock，持续迭代优化"指令）已将此前 6 项补强遗留全部完成：
+归档端点、迁移预览工具、preview 通道 UI、kill -9 崩溃注入、冷启动引导、并发压测——
+证据见 EV-019～EV-023。当前无未完成的补强项；仅存的明确不适用项仍为
+E06 的离线/ARM64 部分（外部环境限制，非代码缺陷）。
+
+补充说明（M6 新增守卫语义，均为真实实现）：
+- 资产归档/恢复：POST /assets/:id/archive | /restore（创建者或管理员；写 audit_events）；
+  有未合并草稿时拒绝归档（OPEN_DRAFTS）；归档后拒绝新草稿与新 CR（ASSET_ARCHIVED）；
+  目录默认视图隐藏，`?lifecycle=archived|all` 可查。
+- 本体迁移影响预览：POST /types/migration-preview（管理员；只读）——逐资产头修订真实校验、
+  结构变更识别（required-added / property-removed / property-type-changed / enum-narrowed /
+  additional-properties-closed）、被移除属性使用面统计。
+- 团队管理员可见全团队项目（此前仅项目成员可见，UI 流程发现的缺口）。
 
 ## 历史记录
 
@@ -108,3 +115,7 @@
 - 2026-09-20（补强）：C07/C08 完成真实实现与测试（tests/m5-c7c8，3 项）——**40 项通过、0 进行中、
   1 明确不适用（E06 离线/ARM64 部分，环境外部限制）**、1 部分（E06 的另一半已由 E01/E04 证据覆盖）。
   全量测试 8 套件 62 项通过。遗留清单缩减为 8 项中的 6 项补强（去掉 C07/C08）。
+- 2026-09-20（M6 补强轮）：6 项补强遗留全部完成（归档/迁移预览/preview UI/kill -9/冷启动/并发压测）；
+  新增 3 套件 15 项测试（m6-hardening 7、m6-concurrency 4、m6-extensibility 4），全量 **11 套件 77 项通过**；
+  全仓 mock 审计干净（apps/packages/services/tests/scripts 无任何 mock 库引用）；
+  发布竞态真实并发验证（B05 强化）；kill -9 中段事务崩溃注入 + 冷启动引导演练 16 步全绿。

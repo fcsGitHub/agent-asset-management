@@ -77,13 +77,24 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     );
     const all: { teamId: string; projectId: string; name: string; code: string; status: string }[] = [];
     for (const t of teams) {
+      // 团队管理员有团队级视野：可见团队全部项目（与发布权一致）；
+      // 普通成员仅可见自己参与的项目。
+      const { rows: roleRows } = await q<{ role: string }>(
+        `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+        [t.team_id, auth.userId]
+      );
+      const isAdmin = roleRows[0]?.role === "admin";
       const rows = await withTeam(t.team_id, async (client) =>
         client.query<{ id: string; name: string; code: string; status: string }>(
           `SELECT p.id, p.name, p.code, p.status
              FROM projects p
-             JOIN project_members pm ON pm.team_id = p.team_id AND pm.project_id = p.id AND pm.user_id = $1
+            WHERE EXISTS (
+                    SELECT 1 FROM project_members pm
+                     WHERE pm.team_id = p.team_id AND pm.project_id = p.id AND pm.user_id = $1
+                  )
+               OR $2::boolean
             ORDER BY p.created_at DESC`,
-          [auth.userId]
+          [auth.userId, isAdmin]
         )
       );
       for (const r of rows.rows) {

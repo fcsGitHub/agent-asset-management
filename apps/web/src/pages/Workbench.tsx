@@ -23,7 +23,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [sessionId, setSessionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  const [wsView, setWsView] = useState<"overview" | "assets" | "register">("overview");
+  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "release">("overview");
   const [assetId, setAssetId] = useState("");
 
   useEffect(() => {
@@ -186,6 +186,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                   ["overview", "项目概况"],
                   ["assets", "资产目录"],
                   ["register", "登记资产"],
+                  ["release", "发布与通道"],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -206,7 +207,12 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               )}
             </div>
             {assetId && project ? (
-              <AssetDetailPanel teamId={project.teamId} assetId={assetId} />
+              <AssetDetailPanel
+                teamId={project.teamId}
+                projectId={project.projectId}
+                assetId={assetId}
+                role={me.teams.find((t) => t.teamId === project.teamId)?.role ?? "member"}
+              />
             ) : wsView === "overview" ? (
               <ProjectOverview project={project} me={me} />
             ) : wsView === "assets" ? (
@@ -218,6 +224,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 }}
                 onRegister={() => setWsView("register")}
               />
+            ) : wsView === "release" ? (
+              <ReleasePanel project={project} me={me} />
             ) : (
               <AssetRegister
                 project={project}
@@ -330,14 +338,15 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   const [assets, setAssets] = useState<AssetRow[] | null>(null);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [lifecycle, setLifecycle] = useState("active");
 
   useEffect(() => {
     setAssets(null);
     if (!project) return;
-    void api<AssetRow[]>("/assets/search", { query: { teamId: project.teamId, q: keyword } })
+    void api<AssetRow[]>("/assets/search", { query: { teamId: project.teamId, q: keyword, lifecycle } })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
-  }, [project, keyword]);
+  }, [project, keyword, lifecycle]);
 
   if (!project) return <div className="state">先选择项目。</div>;
   if (error) return <div className="state error">{error}</div>;
@@ -349,13 +358,20 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           登记新资产
         </button>
       </h3>
-      <div className="field">
-        <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+      <div className="field" style={{ display: "flex", gap: 8 }}>
+        <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} style={{ flex: 1 }} />
+        <select aria-label="生命周期过滤" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
+          <option value="active">进行中</option>
+          <option value="archived">已归档</option>
+          <option value="all">全部</option>
+        </select>
       </div>
       {assets === null ? (
         <div className="state">加载中…</div>
       ) : assets.length === 0 ? (
-        <div className="state">暂无资产。上传文件并登记后出现在这里。</div>
+        <div className="state">
+          {lifecycle === "archived" ? "没有已归档资产。" : "暂无资产。上传文件并登记后出现在这里。"}
+        </div>
       ) : (
         <table className="list">
           <thead>
@@ -363,6 +379,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
               <th>名称</th>
               <th>类型</th>
               <th>类型版本</th>
+              <th>状态</th>
               <th>修订摘要</th>
             </tr>
           </thead>
@@ -372,6 +389,13 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
                 <td>{a.name}</td>
                 <td><span className="badge">{a.type_key}</span></td>
                 <td>{a.type_version}</td>
+                <td>
+                  {a.lifecycle === "archived"
+                    ? <span className="badge" style={{ background: "#6b5b3e", color: "#fff" }}>已归档</span>
+                    : a.lifecycle === "deprecated"
+                      ? <span className="badge" style={{ background: "#5a5a66", color: "#fff" }}>已弃用</span>
+                      : <span className="badge" style={{ background: "#2e6b4f", color: "#fff" }}>进行中</span>}
+                </td>
                 <td><code>{a.content_digest.slice(0, 12)}…</code></td>
               </tr>
             ))}
@@ -382,32 +406,72 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   );
 }
 
-function AssetDetailPanel({ teamId, assetId }: { teamId: string; assetId: string }) {
+interface BranchRow { id: string; name: string; status: string; created_at: string; created_by_name: string; changed_assets: number }
+interface CRRow { id: string; title: string; status: string; created_at: string; created_by_name: string; branch_name: string; item_count: number }
+interface CRSnap { id: string; candidate_digest: string; review_digest: string; channel: string; superseded: boolean; created_at: string }
+interface CRDetail {
+  id: string; title: string; status: string; branch_name: string; created_by_name: string;
+  motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number }[];
+  snapshots: CRSnap[];
+}
+interface ChannelHead { asset_id: string; asset_name: string; revision_id: string; revision_seq: number; version_label: string | null; updated_at: string }
+
+function AssetDetailPanel({ teamId, projectId, assetId, role }: { teamId: string; projectId: string; assetId: string; role: string }) {
   const [detail, setDetail] = useState<AssetDetail | null>(null);
   const [rels, setRels] = useState<Relations | null>(null);
   const [error, setError] = useState("");
+  const [lifecycleMsg, setLifecycleMsg] = useState("");
+
+  async function reload() {
+    try {
+      setDetail(await api<AssetDetail>(`/assets/${assetId}`, { query: { teamId } }));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "加载失败");
+    }
+  }
 
   useEffect(() => {
     setDetail(null);
     setError("");
-    void api<AssetDetail>(`/assets/${assetId}`, { query: { teamId } })
-      .then(setDetail)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
+    setLifecycleMsg("");
+    void reload();
     void api<Relations>("/relations", { query: { teamId, assetId } })
       .then(setRels)
       .catch(() => setRels(undefined as unknown as Relations));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, assetId]);
+
+  async function changeLifecycle(action: "archive" | "restore") {
+    const reason = window.prompt(action === "archive" ? "归档原因（必填，将写入审计日志）：" : "恢复原因（必填，将写入审计日志）：");
+    if (!reason || reason.trim().length < 4) {
+      if (reason !== null) window.alert("原因至少 4 个字符。");
+      return;
+    }
+    try {
+      await api(`/assets/${assetId}/${action}`, { method: "POST", body: { teamId, reason: reason.trim() } });
+      setLifecycleMsg(action === "archive" ? "已归档（可随时恢复）。" : "已恢复为进行中。");
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "操作失败");
+    }
+  }
 
   if (error) return <div className="state error">{error}</div>;
   if (!detail) return <div className="state">加载中…</div>;
   const head = detail.revisions[0];
+  const archived = detail.lifecycle === "archived";
   return (
     <>
       <div className="card">
-        <h3>{detail.name}</h3>
+        <h3>
+          {detail.name}
+          {archived && (
+            <span className="badge" style={{ background: "#6b5b3e", color: "#fff", marginLeft: 8 }}>已归档</span>
+          )}
+        </h3>
         <div className="kv">
           <span className="k">类型</span><span><span className="badge">{detail.type_key}</span>v{detail.type_version}</span>
-          <span className="k">生命周期</span><span>{detail.lifecycle}</span>
+          <span className="k">生命周期</span><span>{archived ? "已归档（目录默认视图隐藏，禁止新草稿）" : detail.lifecycle === "deprecated" ? "已弃用" : "进行中"}</span>
           <span className="k">分类</span><span>{detail.categories.map((c) => c.category_path).join(" · ") || "—"}</span>
           <span className="k">标签</span><span>{detail.labels.join(" · ") || "—"}</span>
           {head && (
@@ -416,7 +480,16 @@ function AssetDetailPanel({ teamId, assetId }: { teamId: string; assetId: string
             </>
           )}
         </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          {archived ? (
+            <button onClick={() => void changeLifecycle("restore")}>恢复资产</button>
+          ) : (
+            <button onClick={() => void changeLifecycle("archive")}>归档资产…</button>
+          )}
+          {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
+        </div>
       </div>
+      {!archived && <DraftPanel teamId={teamId} projectId={projectId} asset={detail} role={role} onSaved={reload} />}
       <div className="card">
         <h3>修订历史（不可变）</h3>
         <table className="list">
@@ -443,6 +516,341 @@ function AssetDetailPanel({ teamId, assetId }: { teamId: string; assetId: string
             <span className="k">被指向（{rels.incoming.length}）</span>
             <span>{rels.incoming.map((r) => `${r.source_name} —${r.type_key}→ 本资产`).join("；") || "无"}</span>
           </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 工作分支草稿：选/建分支 → 修改属性（可选附文件）→ 保存候选修订 → 创建 CR。 */
+function DraftPanel({
+  teamId, projectId, asset, role, onSaved,
+}: { teamId: string; projectId: string; asset: AssetDetail; role: string; onSaved: () => void }) {
+  const [branches, setBranches] = useState<BranchRow[]>([]);
+  const [branchId, setBranchId] = useState("");
+  const [propsJson, setPropsJson] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void api<BranchRow[]>(`/projects/${projectId}/branches`, { query: { teamId } })
+      .then((rows) => {
+        const open = rows.filter((b) => b.status === "open" && b.name !== "main");
+        setBranches(open);
+        setBranchId((prev) => (open.some((b) => b.id === prev) ? prev : open[0]?.id ?? ""));
+      })
+      .catch(() => setBranches([]));
+  }, [teamId, projectId]);
+
+  useEffect(() => {
+    const head = asset.revisions[0];
+    setPropsJson(head ? JSON.stringify(head.properties, null, 2) : "{}");
+  }, [asset]);
+
+  async function createBranch() {
+    const name = window.prompt("新分支名（小写字母/数字/连字符，如 fix-orbit-v2）：");
+    if (!name) return;
+    try {
+      const created = await api<{ branchId: string }>(`/projects/${projectId}/branches`, {
+        method: "POST", body: { teamId, name },
+      });
+      const rows = await api<BranchRow[]>(`/projects/${projectId}/branches`, { query: { teamId } });
+      setBranches(rows.filter((b) => b.status === "open" && b.name !== "main"));
+      setBranchId(created.branchId);
+      setMsg(`分支 ${name} 已创建。`);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.message : "创建分支失败");
+    }
+  }
+
+  async function saveDraft() {
+    if (!branchId) { window.alert("先选择或创建工作分支。"); return; }
+    let properties: unknown;
+    try { properties = JSON.parse(propsJson || "{}"); } catch {
+      window.alert("属性 JSON 无法解析。"); return;
+    }
+    setBusy(true); setError(""); setMsg("");
+    try {
+      let artifacts: unknown[] = [];
+      if (file) {
+        const up = await uploadFile(teamId, file);
+        artifacts = [{ digest: up.digest, role: "implementation", originalName: up.originalName, mediaType: up.mediaType || "application/octet-stream", size: up.size }];
+      }
+      const res = await api<{ revisionId: string; seq: number }>(`/branches/${branchId}/revisions`, {
+        method: "POST", body: { teamId, assetId: asset.id, properties, artifacts },
+      });
+      setMsg(`草稿已保存：r${res.seq}（${res.revisionId.slice(0, 8)}…）。可用该分支创建 CR。`);
+      setFile(null);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "保存失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createCR() {
+    const title = window.prompt("CR 标题：");
+    if (!title) return;
+    const motivation = window.prompt("变更动机（为什么改）：");
+    if (!motivation) return;
+    try {
+      const res = await api<{ changeRequestId: string }>("/change-requests", {
+        method: "POST",
+        body: { teamId, branchId, title, motivation, changeSummary: "", compatibility: "", testPlan: "", rollbackNotes: "" },
+      });
+      setMsg(`CR 已创建（${res.changeRequestId.slice(0, 8)}…）。请到「发布与通道」标签准备审核并发布。`);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "创建 CR 失败");
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3>修改资产（工作分支草稿）</h3>
+      <div className="field" style={{ display: "flex", gap: 8 }}>
+        <label style={{ alignSelf: "center" }}>工作分支</label>
+        <select value={branchId} onChange={(e) => setBranchId(e.target.value)} style={{ flex: 1 }}>
+          {branches.length === 0 && <option value="">（无开放分支）</option>}
+          {branches.map((b) => (
+            <option key={b.id} value={b.id}>{b.name}</option>
+          ))}
+        </select>
+        <button onClick={() => void createBranch()}>新建分支…</button>
+      </div>
+      <div className="field">
+        <label>属性（完整 JSON，保存为新的不可变候选修订）</label>
+        <textarea rows={6} value={propsJson} onChange={(e) => setPropsJson(e.target.value)}
+          style={{ fontFamily: "monospace", width: "100%" }} />
+      </div>
+      <div className="field">
+        <label>替换制品文件（可选）</label>
+        <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+      </div>
+      {msg && <div className="ok-text">{msg}</div>}
+      {error && <div className="error-text">{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="primary" disabled={busy || !branchId} onClick={() => void saveDraft()}>{busy ? "保存中…" : "保存草稿修订"}</button>
+        <button disabled={!branchId} onClick={() => void createCR()}>用当前分支创建 CR…</button>
+      </div>
+      <div className="hint" style={{ padding: 0 }}>main 为受保护分支：草稿只进工作分支，发布事务才会更新 main 与通道。</div>
+    </div>
+  );
+}
+
+/** 发布与通道：CR 列表 → prepare-review（stable/preview）→ 审核并发布；双通道当前头视图。 */
+function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
+  const [crs, setCrs] = useState<CRRow[] | null>(null);
+  const [selected, setSelected] = useState<CRDetail | null>(null);
+  const [channel, setChannel] = useState<"stable" | "preview">("stable");
+  const [prepResult, setPrepResult] = useState<{ reviewDigest: string; channel: string } | null>(null);
+  const [stableHeads, setStableHeads] = useState<ChannelHead[] | null>(null);
+  const [previewHeads, setPreviewHeads] = useState<ChannelHead[] | null>(null);
+  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
+
+  const isAdmin = me.teams.find((t) => t.teamId === project?.teamId)?.role === "admin";
+
+  const reloadChannels = useCallback(() => {
+    if (!project) return;
+    void api<ChannelHead[]>(`/projects/${project.projectId}/channel`, { query: { teamId: project.teamId, channel: "stable" } })
+      .then(setStableHeads).catch(() => setStableHeads([]));
+    void api<ChannelHead[]>(`/projects/${project.projectId}/channel`, { query: { teamId: project.teamId, channel: "preview" } })
+      .then(setPreviewHeads).catch(() => setPreviewHeads([]));
+  }, [project]);
+
+  const reloadCrs = useCallback(() => {
+    if (!project) return;
+    void api<CRRow[]>(`/projects/${project.projectId}/change-requests`, { query: { teamId: project.teamId } })
+      .then(setCrs).catch(() => setCrs([]));
+  }, [project]);
+
+  useEffect(() => {
+    setSelected(null);
+    setPrepResult(null);
+    setMsg("");
+    setError("");
+    reloadCrs();
+    reloadChannels();
+  }, [project, reloadCrs, reloadChannels]);
+
+  async function openCr(cr: CRRow) {
+    setMsg(""); setError(""); setPrepResult(null);
+    try {
+      const detail = await api<CRDetail>(`/change-requests/${cr.id}`, { query: { teamId: project!.teamId } });
+      setSelected(detail);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "加载 CR 失败");
+    }
+  }
+
+  async function prepare() {
+    if (!project || !selected) return;
+    setError(""); setMsg("");
+    try {
+      const res = await api<{ snapshotId: string; reviewDigest: string; channel: string }>(
+        `/change-requests/${selected.id}/prepare-review`,
+        { method: "POST", body: { teamId: project.teamId, channel, audience: "team" } }
+      );
+      setPrepResult({ reviewDigest: res.reviewDigest, channel: res.channel });
+      setMsg(`审核快照已生成（${res.channel} 通道）。摘要与内容绑定：内容一变即失效。`);
+      const fresh = await api<CRDetail>(`/change-requests/${selected.id}`, { query: { teamId: project.teamId } });
+      setSelected(fresh);
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "准备审核失败");
+    }
+  }
+
+  async function publish() {
+    if (!project || !selected || !prepResult) return;
+    setError(""); setMsg("");
+    try {
+      await api(`/change-requests/${selected.id}/review-and-publish`, {
+        method: "POST", body: { teamId: project.teamId, expectedReviewDigest: prepResult.reviewDigest, note: "界面发布" },
+      });
+      setMsg("已发布：批准、发布集、通道头与审计在同一事务写入。");
+      setSelected(null);
+      setPrepResult(null);
+      reloadCrs();
+      reloadChannels();
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "发布失败");
+    }
+  }
+
+  async function reject() {
+    if (!project || !selected) return;
+    const comment = window.prompt("退回原因（将记录为 CR 评论）：");
+    if (!comment) return;
+    setError(""); setMsg("");
+    try {
+      await api(`/change-requests/${selected.id}/changes-requested`, {
+        method: "POST", body: { teamId: project.teamId, comment },
+      });
+      setMsg("已退回修改。修改后可重新准备审核。");
+      const fresh = await api<CRDetail>(`/change-requests/${selected.id}`, { query: { teamId: project.teamId } });
+      setSelected(fresh);
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "退回失败");
+    }
+  }
+
+  if (!project) return <div className="state">先选择项目。</div>;
+  const statusLabel: Record<string, string> = {
+    draft: "草稿", open: "待提交", awaiting_review: "待审核", changes_requested: "已退回",
+    merged: "已发布", withdrawn: "已撤回",
+  };
+  const activeSnap = selected?.snapshots.find((s) => !s.superseded) ?? null;
+  const publishTarget = prepResult ?? (activeSnap ? { reviewDigest: activeSnap.review_digest, channel: activeSnap.channel } : null);
+  return (
+    <>
+      <div className="card">
+        <h3>通道当前视图（审批绑定内容摘要，不绑定分支名）</h3>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <div className="kv" style={{ marginBottom: 6 }}><span className="k"><strong>stable 稳定通道</strong></span><span>{stableHeads === null ? "…" : `${stableHeads.length} 项`}</span></div>
+            {stableHeads?.length === 0 && <div className="state">尚无发布。</div>}
+            {stableHeads?.map((h) => (
+              <div key={h.asset_id} className="kv" style={{ fontSize: 13 }}>
+                <span className="k">{h.asset_name}</span>
+                <span>r{h.revision_seq} · {h.version_label ?? "—"} · <code>{h.revision_id.slice(0, 8)}…</code></span>
+              </div>
+            ))}
+          </div>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <div className="kv" style={{ marginBottom: 6 }}><span className="k"><strong>preview 预览通道</strong></span><span>{previewHeads === null ? "…" : `${previewHeads.length} 项`}</span></div>
+            {previewHeads?.length === 0 && <div className="state">预览通道为空。发布时选择 preview 可先验证再上稳定通道。</div>}
+            {previewHeads?.map((h) => (
+              <div key={h.asset_id} className="kv" style={{ fontSize: 13 }}>
+                <span className="k">{h.asset_name}</span>
+                <span>r{h.revision_seq} · {h.version_label ?? "—"} · <code>{h.revision_id.slice(0, 8)}…</code></span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="card">
+        <h3>变更请求（CR）</h3>
+        {crs === null ? (
+          <div className="state">加载中…</div>
+        ) : crs.length === 0 ? (
+          <div className="state">还没有 CR。在「资产目录」打开资产 → 修改草稿 → 创建 CR。</div>
+        ) : (
+          <table className="list">
+            <thead>
+              <tr><th>标题</th><th>分支</th><th>变更项</th><th>状态</th><th></th></tr>
+            </thead>
+            <tbody>
+              {crs.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.title}</td>
+                  <td><code>{c.branch_name}</code></td>
+                  <td>{c.item_count}</td>
+                  <td><span className="badge">{statusLabel[c.status] ?? c.status}</span></td>
+                  <td><button onClick={() => void openCr(c)}>打开</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {selected && (
+        <div className="card">
+          <h3>{selected.title}</h3>
+          <div className="kv">
+            <span className="k">状态</span><span>{statusLabel[selected.status] ?? selected.status}</span>
+            <span className="k">分支</span><span><code>{selected.branch_name}</code> · 作者 {selected.created_by_name}</span>
+            <span className="k">动机</span><span>{selected.motivation}</span>
+          </div>
+          <table className="list" style={{ marginTop: 8 }}>
+            <thead><tr><th>资产</th><th>基线</th><th>候选</th></tr></thead>
+            <tbody>
+              {selected.items.map((i) => (
+                <tr key={i.asset_id}>
+                  <td>{i.asset_name}</td>
+                  <td>r{i.base_seq}</td>
+                  <td>r{i.candidate_seq}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {selected.snapshots.length > 0 && (
+            <div className="kv" style={{ marginTop: 8 }}>
+              <span className="k">审核快照</span>
+              <span>
+                {selected.snapshots.map((s) => (
+                  <div key={s.id} style={{ fontSize: 12.5 }}>
+                    {s.channel} · <code>{s.review_digest.slice(0, 16)}…</code> · {s.superseded ? "已失效" : "有效"}
+                  </div>
+                ))}
+              </span>
+            </div>
+          )}
+          {msg && <div className="ok-text">{msg}</div>}
+          {error && <div className="error-text">{error}</div>}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            {selected.status === "open" || selected.status === "changes_requested" ? (
+              <>
+                <select aria-label="发布目标通道" value={channel} onChange={(e) => setChannel(e.target.value as "stable" | "preview")}>
+                  <option value="stable">stable 稳定通道</option>
+                  <option value="preview">preview 预览通道</option>
+                </select>
+                <button className="primary" onClick={() => void prepare()}>准备审核快照</button>
+              </>
+            ) : null}
+            {publishTarget && selected.status === "awaiting_review" && (
+              <>
+                <button className="primary" disabled={!isAdmin} title={isAdmin ? "" : "需要团队管理员身份；Agent 也不能代为确认"} onClick={() => void publish()}>
+                  审核并发布到 {publishTarget.channel}
+                </button>
+                <button onClick={() => void reject()}>退回修改</button>
+                <code style={{ fontSize: 11 }}>{publishTarget.reviewDigest.slice(0, 24)}…</code>
+              </>
+            )}
+          </div>
+          {!isAdmin && <div className="hint">普通成员不能发布；发布前服务端会再次校验身份、作者分离与摘要一致性。</div>}
         </div>
       )}
     </>

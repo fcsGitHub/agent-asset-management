@@ -68,6 +68,8 @@ npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 t
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）
 npx tsx scripts/perf.ts           # E05 性能测量（生成 5k/50k/100k 夹具）
+npx tsx scripts/perf-concurrent.ts # M6 并发负载（读/写/混合三阶段，真实并发）
+npx tsx scripts/e2e-m6-crash.ts   # M6 韧性演练（kill -9 中段事务崩溃注入 + 冷启动引导）
 ```
 
 > tests/m4-agent.test.ts 会发起真实 DeepSeek 调用（8 次运行 × 数次工具调用），

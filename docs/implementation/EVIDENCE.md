@@ -153,3 +153,44 @@
   过期 409 STALE_HEAD（返回当前 ETag）、成功后版本前移。
 - C08：POST /sessions/:id/share-check + /share——secret/restricted 引用与 [private]
   消息阻断；检查摘要比对防 TOCTOU；分享后项目成员可见；阻断态保持私有。
+
+### EV-019 ｜ 2026-09-20 ｜ M6 生命周期加固与迁移预览（tests/m6-hardening，7 项）
+- 归档权限负例（无关成员 403、未登录 401）、创建者归档 → 默认目录隐藏 +
+  `lifecycle=archived` 过滤可见 + audit_events 落库（含原因）、重复归档 409、
+  恢复权限与 NOT_ARCHIVED 负例、OPEN_DRAFTS 守卫（有未合并草稿拒绝归档）、
+  归档后草稿写入与新 CR 均被 ASSET_ARCHIVED 拦截、
+  POST /types/migration-preview（管理员专属；affected/failing/结构变更/被移除属性使用面/
+  safe 判定，兼容迁移 safe=true 验证）。
+
+### EV-020 ｜ 2026-09-20 ｜ M6 并发竞态（tests/m6-concurrency，4 项，真并发）
+- ① 两个 CR 并发发布同一资产（Promise.allSettled 真并发）→ 恰好一个 200；
+  败者 409 且 CR 保留 awaiting_review；退回 → 重新 prepare（expected 头已移动）→ 发布成功。
+- ② 同一 CR 并发双发布 → 一次 200 一次 409 CR_STATE；release_set/approval 恰好各一条。
+- ③ 并发草稿保存同期望头 → 一次 201 两次 STALE_HEAD，无孤儿修订，分支头=胜者。
+
+### EV-021 ｜ 2026-09-20 ｜ M6 并发负载（scripts/perf-concurrent.ts）
+- 命令：`npx tsx scripts/perf-concurrent.ts`；报告：docs/evidence/m6-concurrent-perf.json
+- 夹具：2,000 资产 × 5 修订；阶段 R（16 读 worker × 40 op）P50/P95 = 21/42ms、687 op/s、0 错误；
+  阶段 W（8 写 worker × 15 草稿）P50/P95 = 16/24ms、404 op/s、0 错误；
+  阶段 X 混合：读 P95 = 45ms（写负载下仅 +3ms），写 P95 = 83ms，全程 0 错误。
+
+### EV-022 ｜ 2026-09-20 ｜ M6 韧性演练（scripts/e2e-m6-crash.ts，16 步全绿）
+- kill -9 写入突发窗口：崩溃前已确认写入（含 content_digest）重启后全部持久；
+  崩溃前登录会话重启后仍有效。
+- kill -9 发布事务窗口（确定性注入：独立连接持 CR 行锁 → 发布事务开启后停在锁上 → SIGKILL，
+  响应"无（进行中被切断）"）：重启后发布事务完整回滚——无 release_set/approval/通道头/
+  main 视图/outbox（全有或全无）；outbox 无重复事件。
+- 冷启动引导：全新空容器（5439/新卷）→ 预创建角色 → 从零迁移全部 schema →
+  注册→资产→分支→CR→发布→通道视图 全链路成功。
+- 报告：docs/evidence/m6-crash-drill.json
+
+### EV-023 ｜ 2026-09-20 ｜ M6 UI 流程浏览器验证 + 扩展包（tests/m6-extensibility，4 项）
+- 浏览器（Playwright MCP，真实 API）：登记资产 → 资产详情草稿面板（新建分支/保存草稿 r2/
+  创建 CR）→ 发布与通道双通道视图 → 作者身份发布被作者分离拦截（错误提示正确显示）→
+  管理员退回 → preview 通道重新准备 → 发布成功（preview 通道头 r2 · REL-…，stable 保持空）→
+  归档/恢复（原因入审计、过滤切换、徽章展示）。截图 docs/evidence/m6-ui-preview-channel.png。
+- 发现并修复真实缺口：GET /projects 原先只按 project_members 过滤，团队管理员看不到团队项目
+  （与发布权不一致）；已改为管理员可见全团队项目。
+- 扩展包：运行时注册 custom.sensor-grid（含 Hz/kHz 词表）零代码改动 → 词表外单位 422、
+  缺必填 422 → 跨类型关系（自定义类型 → 内置 document）→ 草稿/CR/preview 发布/通道视图全链路。
+- 回归：`npx vitest run` 11 套件 77 项全部通过。
