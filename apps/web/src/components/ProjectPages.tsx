@@ -216,21 +216,34 @@ export function DashboardPage({
 
 /** 团队动态：人的治理动作 + Agent 运行（人机混排时间线）。
  *  实时推送：SSE 订阅 /activity/stream（Postgres NOTIFY 触发，非轮询），
- *  事件按 key 去重覆盖（Agent 运行状态变化原地更新），断线重连后整体重取对齐。 */
-export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; onOpenAsset: (assetId: string) => void }) {
+ *  事件按 key 去重覆盖（Agent 运行状态变化原地更新），断线重连后整体重取对齐。
+ *  项目过滤：项目级动作（审核准备/发布/回滚/Agent 运行）按项目显示；
+ *  团队级动作（资产归档/恢复等）仅在"全部项目"视图出现。 */
+export function ActivityPage({
+  project,
+  projects,
+  onOpenAsset,
+}: {
+  project?: ProjectInfo;
+  projects?: ProjectInfo[];
+  onOpenAsset: (assetId: string) => void;
+}) {
   const [items, setItems] = useState<ActivityItem[] | null>(null);
   const [error, setError] = useState("");
   const [limit, setLimit] = useState(50);
+  const [filterProjectId, setFilterProjectId] = useState("");
   const [live, setLive] = useState(false);
   const limitRef = useRef(limit);
   limitRef.current = limit;
 
   const reload = useCallback(() => {
     if (!project) return;
-    void api<{ items: ActivityItem[] }>("/activity", { query: { teamId: project.teamId, limit: String(limitRef.current) } })
+    const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
+    if (filterProjectId) query.projectId = filterProjectId;
+    void api<{ items: ActivityItem[] }>("/activity", { query })
       .then((r) => setItems(r.items))
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载动态失败"));
-  }, [project]);
+  }, [project, filterProjectId]);
 
   useEffect(reload, [reload]);
 
@@ -238,7 +251,9 @@ export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; 
   useEffect(() => {
     setLive(false);
     if (!project) return;
-    const es = new EventSource(`/api/v1/activity/stream?teamId=${project.teamId}`);
+    const qs = new URLSearchParams({ teamId: project.teamId });
+    if (filterProjectId) qs.set("projectId", filterProjectId);
+    const es = new EventSource(`/api/v1/activity/stream?${qs}`);
     es.addEventListener("activity", (e) => {
       const item = JSON.parse((e as MessageEvent).data) as ActivityItem;
       if (!item.key) return;
@@ -256,7 +271,7 @@ export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; 
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [project]);
+  }, [project, filterProjectId]);
 
   // 重连成功（live 由 false→true 且已有历史）时重取一次对齐
   const firstLive = useRef(true);
@@ -273,6 +288,17 @@ export function ActivityPage({ project, onOpenAsset }: { project?: ProjectInfo; 
         <span className={`chip ${live ? "chip-live" : "chip-dim"}`} title={live ? "Postgres 触发器实时推送" : "实时流未连接，显示历史"}>
           {live ? "● 实时" : "○ 未连接"}
         </span>
+        <select
+          aria-label="按项目过滤"
+          value={filterProjectId}
+          onChange={(e) => setFilterProjectId(e.target.value)}
+          title="项目级动作按项目显示；团队级动作仅在全部视图出现"
+        >
+          <option value="">全部项目（团队视图）</option>
+          {(projects ?? []).filter((p) => p.teamId === project?.teamId).map((p) => (
+            <option key={p.projectId} value={p.projectId}>{p.name}</option>
+          ))}
+        </select>
         <select aria-label="条数" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
           <option value={20}>最近 20 条</option>
           <option value={50}>最近 50 条</option>

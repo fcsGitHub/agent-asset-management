@@ -292,9 +292,9 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         [body.teamId, crId]
       );
       await client.query(
-        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
-         VALUES ($1,$2,'review_prepared','change_request',$3,$4,$5)`,
-        [body.teamId, auth.userId, crId, req.id, JSON.stringify({ candidateDigest, reviewDigest: rdigest })]
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, project_id, request_id, detail)
+         VALUES ($1,$2,'review_prepared','change_request',$3,$4,$5,$6)`,
+        [body.teamId, auth.userId, crId, cr.project_id, req.id, JSON.stringify({ candidateDigest, reviewDigest: rdigest })]
       );
       return { snapshotId: snapId, candidateDigest, reviewDigest: rdigest, channel: body.channel };
     });
@@ -566,9 +566,9 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
           [body.teamId, eventId, releaseSetId, channelId, auth.userId, JSON.stringify({ crId, versionLabel })]
         );
         await client.query(
-          `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
-           VALUES ($1,$2,'release_published','release_set',$3,$4,$5)`,
-          [body.teamId, auth.userId, releaseSetId, req.id, JSON.stringify({ crId, channel: snap.channel })]
+          `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, project_id, request_id, detail)
+           VALUES ($1,$2,'release_published','release_set',$3,$4,$5,$6)`,
+          [body.teamId, auth.userId, releaseSetId, cr.project_id, req.id, JSON.stringify({ crId, channel: snap.channel })]
         );
         await client.query(
           `INSERT INTO outbox (team_id, event_id, event_type, aggregate, payload)
@@ -616,10 +616,11 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         [body.teamId, body.toReleaseSetId]
       );
       if (!items[0]) throw ERR.INVALID("目标发布集没有条目");
-      await client.query(
-        `SELECT 1 FROM asset_channels WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+      const { rows: chan } = await client.query<{ project_id: string }>(
+        `SELECT project_id FROM asset_channels WHERE team_id = $1 AND id = $2 FOR UPDATE`,
         [body.teamId, channelId]
       );
+      if (!chan[0]) throw ERR.NOT_FOUND();
       const rollbackSetId = newId();
       await client.query(
         `INSERT INTO release_sets (team_id, id, change_request_id, review_snapshot_id, version_label, notes, created_by)
@@ -651,9 +652,9 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
          JSON.stringify({ reason: body.reason, externalSideEffects: body.externalSideEffects })]
       );
       await client.query(
-        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
-         VALUES ($1,$2,'release_rollback','release_set',$3,$4,$5)`,
-        [body.teamId, auth.userId, rollbackSetId, req.id, JSON.stringify({ toReleaseSetId: body.toReleaseSetId })]
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, project_id, request_id, detail)
+         VALUES ($1,$2,'release_rollback','release_set',$3,$4,$5,$6)`,
+        [body.teamId, auth.userId, rollbackSetId, chan[0]!.project_id, req.id, JSON.stringify({ toReleaseSetId: body.toReleaseSetId })]
       );
       await client.query(
         `INSERT INTO outbox (team_id, event_id, event_type, aggregate, payload)

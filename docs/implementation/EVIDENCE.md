@@ -441,3 +441,22 @@
   （documentedBy LLM 提议 75%）→ 队列（1）；DB 复核状态机
   （documentedBy confirmed t 0.75 / dependsOn pending f 0.5）。
   截图 m15-ui-candidate-queue.png。
+
+### EV-038 ｜ 2026-09-21 ｜ M16 迭代轮：活动流按项目过滤（审计补项目维度）
+- 迁移 0021：audit_events 增加 project_id（可空）+ (team_id, project_id, created_at) 索引。
+  过滤语义明确定义：**项目级动作**（review_prepared / release_published / release_rollback、
+  Agent 运行）携带 project_id，按项目过滤时显示；**团队级动作**（资产归档/恢复等，
+  project_id 为 NULL）仅在"全部项目（团队视图）"出现——不虚构归属。
+- releases.ts 三处审计写入真实盖章：prepare-review、review-and-publish、rollback
+  （rollback 的通道 FOR UPDATE 查询顺带补 SELECT project_id 与存在性检查）。
+- GET /activity 与 GET /activity/stream 支持可选 projectId：列表 SQL 过滤；
+  SSE 流在事件回查时按项目比对（团队级事件不进入项目过滤流）。
+- ActivityPage 新增项目过滤选择器（当前团队项目列表），切换即重取历史并重订阅
+  实时流；「● 实时」状态保持。
+- 测试 tests/m16（3 项）：真实 prepare-review 流程产生的审计带 P1 盖章并进入 P1
+  过滤视图；过滤语义（团队级审计仅在全部视图、P1/P2 互不可见对方运行、全部视图
+  皆有）；SSE 项目隔离（P2 插入的运行 3 秒有界窗口零泄漏，P1 插入即时到达）。
+  全量：`npx vitest run` **23 套件 127 项全部通过**（57s）。
+- 浏览器实测：动态页过滤下拉（全部项目/M10实测项目）；选 M10实测项目后仅显示
+  项目级 Agent 运行，团队级「归档资产」审计隐藏；「● 实时」保持。
+  截图 m16-ui-activity-filter.png。

@@ -247,11 +247,14 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   };
   app.get("/activity", async (req) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string; limit?: string };
+    const query = (req.query ?? {}) as { teamId?: string; limit?: string; projectId?: string };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertTeamMember(auth.userId, teamId);
     const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
+    // 项目过滤语义：项目级动作（审核准备/发布/回滚、Agent 运行）带 project_id；
+    // 团队级动作（资产归档/恢复等）为 NULL——按项目过滤时仅显示该项目内的动作。
+    const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
     return withTeam(teamId, async (client) => {
       const { rows: audits } = await client.query<{
         id: string;
@@ -264,9 +267,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       }>(
         `SELECT a.id::text AS id, a.created_at AS ts, a.action, a.object_kind, a.object_id, u.display_name AS actor, a.detail
            FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id
-          WHERE a.team_id = $1
+          WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
           ORDER BY a.created_at DESC LIMIT $2`,
-        [teamId, limit]
+        [teamId, limit, filterProjectId]
       );
       const { rows: agentRuns } = await client.query<{
         id: string;
@@ -283,9 +286,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN users u ON u.id = r.created_by
            LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
            LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
-          WHERE r.team_id = $1
+          WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
           ORDER BY r.created_at DESC LIMIT $2`,
-        [teamId, limit]
+        [teamId, limit, filterProjectId]
       );
       interface ActivityItem {
         key?: string;
@@ -331,29 +334,32 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   const streamItem = async (
     teamId: string,
     kind: "audit" | "agent",
-    id: string
+    id: string,
+    filterProjectId: string | null
   ): Promise<Record<string, unknown> | null> =>
     withTeam(teamId, async (client) => {
       if (kind === "audit") {
         const { rows } = await client.query<{
-          ts: string; action: string; object_id: string | null; actor: string | null;
+          ts: string; action: string; object_id: string | null; actor: string | null; project_id: string | null;
         }>(
-          `SELECT a.created_at AS ts, a.action, a.object_id, u.display_name AS actor
+          `SELECT a.created_at AS ts, a.action, a.object_id, a.project_id, u.display_name AS actor
              FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id
             WHERE a.id = $1 AND a.team_id = $2`,
           [id, teamId]
         );
         const a = rows[0];
         if (!a) return null;
+        // 项目过滤：团队级动作（无 project_id）不进入项目过滤视图
+        if (filterProjectId && a.project_id !== filterProjectId) return null;
         return {
           key: `audit:${id}`, ts: a.ts, kind: "audit", action: a.action,
           summary: ACTION_LABELS[a.action] ?? a.action, actor: a.actor ?? "系统", objectId: a.object_id,
         };
       }
       const { rows } = await client.query<{
-        ts: string; prompt: string; status: string; actor: string | null; project_name: string | null;
+        ts: string; prompt: string; status: string; actor: string | null; project_id: string; project_name: string | null;
       }>(
-        `SELECT r.created_at AS ts, r.prompt, r.status, u.display_name AS actor,
+        `SELECT r.created_at AS ts, r.prompt, r.status, r.project_id, u.display_name AS actor,
                 p.name AS project_name
            FROM agent_runs r
            LEFT JOIN users u ON u.id = r.created_by
@@ -363,6 +369,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       );
       const r = rows[0];
       if (!r) return null;
+      if (filterProjectId && r.project_id !== filterProjectId) return null;
       return {
         key: `agent:${id}`, ts: r.ts, kind: "agent", action: `agent.run.${r.status}`,
         summary: r.prompt.length > 80 ? `${r.prompt.slice(0, 80)}…` : r.prompt,
@@ -372,10 +379,11 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/activity/stream", async (req, reply) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string };
+    const query = (req.query ?? {}) as { teamId?: string; projectId?: string };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertTeamMember(auth.userId, teamId);
+    const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
 
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
@@ -389,7 +397,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }, 25000);
     const unsubscribe = await subscribeActivity(teamId, (n) => {
       if (closed) return;
-      void streamItem(teamId, n.kind, n.id)
+      void streamItem(teamId, n.kind, n.id, filterProjectId)
         .then((item) => {
           if (!item || closed) return;
           reply.raw.write(`event: activity\ndata: ${JSON.stringify(item)}\n\n`);

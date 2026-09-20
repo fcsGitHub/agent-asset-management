@@ -244,7 +244,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           </main>
         ) : page === "activity" ? (
           <main className="page-main" aria-label="团队动态">
-            <ActivityPage project={project} onOpenAsset={openAssetFromSearch} />
+            <ActivityPage project={project} projects={projects ?? []} onOpenAsset={openAssetFromSearch} />
           </main>
         ) : page === "approvals" ? (
           <main className="page-main" aria-label="审批队列">
