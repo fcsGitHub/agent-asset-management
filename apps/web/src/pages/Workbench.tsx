@@ -5,6 +5,7 @@ import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/Projec
 import { RelationGraph } from "../components/RelationGraph";
 import { OntologyPage } from "../components/OntologyPage";
 import { SemanticPanel } from "../components/SemanticPanel";
+import { AgentProposals } from "../components/AgentProposals";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
@@ -39,7 +40,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [sessionId, setSessionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "release">("overview");
+  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "proposals" | "release">("overview");
   const [assetId, setAssetId] = useState("");
   const [page, setPage] = useState<PageKey>("dashboard");
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -356,6 +357,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                   ["assets", "资产目录"],
                   ["register", "登记资产"],
                   ["semantic", "语义候选"],
+                  ["proposals", "Agent 提案"],
                   ["release", "发布与通道"],
                 ] as const
               ).map(([key, label]) => (
@@ -396,6 +398,15 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               />
             ) : wsView === "semantic" ? (
               <SemanticPanel project={project} onOpenAsset={openAssetFromSearch} />
+            ) : wsView === "proposals" ? (
+              <AgentProposals
+                project={project}
+                onPrefillRegister={(hint) => {
+                  setRegisterHint({ ...hint, nonce: Date.now() });
+                  setWsView("register");
+                  setMobileView("workspace");
+                }}
+              />
             ) : wsView === "release" ? (
               <ReleasePanel project={project} me={me} />
             ) : (

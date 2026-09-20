@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 127 项基线仍绿
+4. `npx vitest run` 确认 130 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -65,5 +65,8 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    M16 已完成：活动流按项目过滤（0021 审计补 project_id，发布类动作真实盖章、
    团队级动作 NULL 的明确语义；/activity 与 SSE 支持 projectId 过滤；动态页项目
    过滤选择器）（EV-038）。
-   下一步候选：候选队列批审与详情页、worker 多播订阅、NL 意图再扩展、
-   本体页接入单位词表管理。
+   M17 已完成：Agent 提案审核闭环（GET /projects/:id/proposals + POST /proposals/:id/review
+   状态机与 jsonb 审核回执；工作区「Agent 提案」标签：结构化展示/筛选/接受与忽略/
+   登记类提案预填登记表单）（EV-039）。
+   下一步候选：候选队列批审与详情页、本体页单位词表展示、worker 多播订阅、
+   NL 意图再扩展（如打开提案页）。

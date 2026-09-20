@@ -413,3 +413,15 @@ button.primary:hover:not(:disabled) { background: #1e5946; }
 .sem-queue { margin-top: 16px; }
 .sem-queue summary { cursor: pointer; }
 .sem-queue summary h3 { display: inline; margin: 0; }
+
+/* ---------- M17：Agent 提案审核 ---------- */
+.proposal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.proposal-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--paper); }
+.proposal-done { opacity: 0.78; background: var(--wash); }
+.proposal-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proposal-meta { font-size: 12.5px; color: var(--muted); }
+.proposal-name { margin: 6px 0 2px; font-size: 14px; }
+.proposal-note { font-size: 13px; color: var(--ink); margin: 4px 0; }
+.proposal-raw { margin: 4px 0; }
+.proposal-raw summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.proposal-payload { font-size: 12px; background: var(--wash); border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 260px; }

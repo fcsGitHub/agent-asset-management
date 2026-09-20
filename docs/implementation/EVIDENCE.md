@@ -460,3 +460,24 @@
 - 浏览器实测：动态页过滤下拉（全部项目/M10实测项目）；选 M10实测项目后仅显示
   项目级 Agent 运行，团队级「归档资产」审计隐藏；「● 实时」保持。
   截图 m16-ui-activity-filter.png。
+
+### EV-039 ｜ 2026-09-21 ｜ M17 迭代轮：Agent 提案审核闭环（proposal.create 首次开放给人类）
+- 排查发现又一处断头闭环：Agent 的 proposal.create 工具（M4）一直把整理提案写入
+  agent_proposals，但没有任何读取端点与界面——人永远看不到 Agent 建议了什么。
+- 新端点：GET /projects/:id/proposals?status=（列表：kind 排除 issue_triage 回执、
+  状态筛选、关联来源运行的指令与发起人、审核人）；POST /proposals/:id/review
+  （FOR UPDATE + pending 校验，decision accepted/rejected，可选备注以 jsonb 合并进
+  payload.review，审核人/时间如实留痕；重复审核 409 PROPOSAL_NOT_PENDING）。
+  无需迁移——0011 建表时已内置状态机。
+- UI：工作区新标签「Agent 提案」（状态筛选 + 结构化卡片：kind 徽章、从自由 payload
+  兼容提取建议名称/类型提示、审核备注、来源运行指令、JSON 原文可展开）；
+  asset_registration 提案提供「按提案预填登记…」——跳登记表单预填名称与类型
+  （人工完成真实登记，接受不自动写库）。逐条错误如实回显。
+- 测试 tests/m17（3 项）：真实 DeepSeek 运行调用 proposal.create → 提案在待审列表
+  可见（kind/发起人/来源运行如实）；成员接受带备注（payload 合并审核回执、
+  reviewed_by 如实、重复审核 409 PROPOSAL_NOT_PENDING、issue_triage 回执被列表排除）；
+  非成员 404。全量：`npx vitest run` **24 套件 130 项全部通过**（61s）。
+- 浏览器实测（真实 DeepSeek）：对话区派任务 → Agent 调用 proposal.create（提案
+  b37d1116…）→「Agent 提案」待审列表出现（建议名称"轨道仿真数据集 2026 · 类型
+  提示 document"自动提取）→ 点接受 → 待审清空、已接受视图显示审核人。
+  截图 m17-ui-proposals.png。

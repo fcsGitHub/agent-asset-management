@@ -413,4 +413,69 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     unsubscribe();
     reply.raw.end();
   });
+
+  // ---------- Agent 提案审核（proposal.create 落库内容首次开放给人类） ----------
+  // issue_triage 是 external.notify 的回执而非提案，列表一律排除。
+  app.get("/projects/:projectId/proposals", async (req) => {
+    const auth = requireAuth(req);
+    const { projectId } = req.params as { projectId: string };
+    const query = (req.query ?? {}) as { teamId?: string; status?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await assertProjectAccess(auth.userId, teamId, projectId);
+    const statusFilter = ["pending", "accepted", "rejected"].includes(String(query.status ?? ""))
+      ? String(query.status)
+      : null;
+    return withTeam(teamId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT p.id, p.kind, p.payload, p.status, p.created_at,
+                r.prompt AS run_prompt, u.display_name AS initiated_by_name,
+                ru.display_name AS reviewed_by_name
+           FROM agent_proposals p
+           JOIN agent_runs r ON r.team_id = p.team_id AND r.id = p.run_id
+           LEFT JOIN users u ON u.id = r.created_by
+           LEFT JOIN users ru ON ru.id = p.reviewed_by
+          WHERE p.team_id = $1 AND p.project_id = $2
+            AND p.kind <> 'issue_triage'
+            AND ($3::text IS NULL OR p.status = $3)
+          ORDER BY p.created_at DESC LIMIT 100`,
+        [teamId, projectId, statusFilter]
+      );
+      return rows;
+    });
+  });
+
+  app.post("/proposals/:proposalId/review", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { proposalId } = req.params as { proposalId: string };
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        decision: z.enum(["accepted", "rejected"]),
+        note: z.string().max(2000).optional(),
+      }),
+      req.body
+    );
+    await assertTeamMember(auth.userId, body.teamId);
+    return withTeam(body.teamId, async (client) => {
+      const { rows } = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM agent_proposals WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+        [body.teamId, proposalId]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      if (rows[0].status !== "pending") {
+        throw ERR.CONFLICT("PROPOSAL_NOT_PENDING", `提案已处于 ${rows[0].status} 状态`);
+      }
+      await client.query(
+        `UPDATE agent_proposals SET status = $3, reviewed_by = $4,
+           payload = payload || jsonb_build_object('review', jsonb_build_object(
+             'note', CASE WHEN $5::text IS NULL OR $5::text = '' THEN NULL ELSE $5::text END,
+             'reviewed_at', to_jsonb(now()::text)))
+         WHERE team_id = $1 AND id = $2`,
+        [body.teamId, proposalId, body.decision, auth.userId, body.note ?? null]
+      );
+      return { teamId: body.teamId, proposalId, status: body.decision };
+    });
+  });
 }
