@@ -25,6 +25,7 @@ export function describeIntent(i: NlIntentPayload): string {
   if (i.intent === "navigate") {
     const names: Record<string, string> = {
       dashboard: "总览", workbench: "工作台", activity: "团队动态", approvals: "审批队列", graph: "关系图谱",
+      ontology: "本体治理", proposals: "Agent 提案",
     };
     return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
   }

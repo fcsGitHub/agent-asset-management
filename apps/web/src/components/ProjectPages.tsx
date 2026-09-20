@@ -268,10 +268,12 @@ export function ActivityPage({
         return [item, ...list].slice(0, limitRef.current);
       });
     });
+    // 服务端 LISTEN 断链重连后的补齐信号：断窗内的事件不会补推，整体重取对齐
+    es.addEventListener("resync", () => { reload(); });
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [project, filterProjectId]);
+  }, [project, filterProjectId, reload]);
 
   // 重连成功（live 由 false→true 且已有历史）时重取一次对齐
   const firstLive = useRef(true);

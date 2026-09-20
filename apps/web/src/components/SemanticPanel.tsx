@@ -100,12 +100,15 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qBusy, setQBusy] = useState(false);
   const [qDetailOpen, setQDetailOpen] = useState<Record<string, boolean>>({});
   const [qDetail, setQDetail] = useState<Record<string, CandidateDetail | null>>({});
+  // 队列视图（M19）：待审（可批审）/ 已确认 / 已忽略
+  const [qStatus, setQStatus] = useState<"pending" | "confirmed" | "dismissed">("pending");
 
   const loadQueue = useCallback(() => {
     if (!project) return;
-    void api<QueueItem[]>("/semantic/candidates", { query: { teamId: project.teamId, status: "pending" } })
+    void api<QueueItem[]>("/semantic/candidates", { query: { teamId: project.teamId, status: qStatus } })
       .then((rows) => {
         setQueue(rows);
+        if (qStatus !== "pending") return;
         // 按资产名自动预映射（可改选）
         setQMapping((prev) => {
           const next = { ...prev };
@@ -120,7 +123,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
         });
       })
       .catch(() => setQueue([]));
-  }, [project, assets]);
+  }, [project, assets, qStatus]);
 
   useEffect(loadQueue, [loadQueue]);
 
@@ -443,11 +446,31 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
         <p className="hint" style={{ padding: 0 }}>
           入队的候选持久保存，团队任何成员都可映射端点并确认；确认走与服务端关系断言完全相同的校验（domain/range、成环禁止），违规时候选保持待审。
         </p>
+        <div className="sem-batchbar" style={{ padding: "6px 10px" }}>
+          <label className="sem-check">
+            视图
+            <select
+              aria-label="队列状态筛选"
+              value={qStatus}
+              onChange={(e) => { setQStatus(e.target.value as typeof qStatus); setQSel({}); }}
+              style={{ marginLeft: 6 }}
+            >
+              <option value="pending">待审核</option>
+              <option value="confirmed">已确认</option>
+              <option value="dismissed">已忽略</option>
+            </select>
+          </label>
+          {qStatus !== "pending" && <span className="sem-conf">历史视图只读；「详情」可查看决策留痕与断言去向</span>}
+        </div>
         {queue === null && <div className="state">加载中…</div>}
         {queue !== null && queue.length === 0 && (
-          <Empty icon="📥" title="队列是空的" hint="抽取候选后点「存入审核队列」，或等待其他成员入队。" />
+          <Empty
+            icon="📥"
+            title="这里没有候选"
+            hint={qStatus === "pending" ? "抽取候选后点「存入审核队列」，或等待其他成员入队。" : "该状态下暂无历史候选。"}
+          />
         )}
-        {queue !== null && queue.length > 0 && (
+        {queue !== null && queue.length > 0 && qStatus === "pending" && (
           <div className="sem-batchbar">
             <label className="sem-check">
               <input
@@ -473,15 +496,18 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
           const canConfirm = !!m?.source && !!m?.target;
           const detail = qDetail[item.id];
           const detailOpen = !!qDetailOpen[item.id];
+          const pendingView = qStatus === "pending";
           return (
             <div key={item.id} className="sem-cand">
               <div className="sem-cand-head">
-                <input
-                  type="checkbox"
-                  aria-label={`批选 ${item.source_text}`}
-                  checked={!!qSel[item.id]}
-                  onChange={(e) => setQSel((prev) => ({ ...prev, [item.id]: e.target.checked }))}
-                />
+                {pendingView && (
+                  <input
+                    type="checkbox"
+                    aria-label={`批选 ${item.source_text}`}
+                    checked={!!qSel[item.id]}
+                    onChange={(e) => setQSel((prev) => ({ ...prev, [item.id]: e.target.checked }))}
+                  />
+                )}
                 <span className="badge">{item.relation_type}</span>
                 <span className="chip chip-dim">{item.llm_proposed ? "LLM 提议" : "规则"}</span>
                 <span className="sem-conf">{Math.round((item.confidence ?? 0) * 100)}%</span>
@@ -496,24 +522,28 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
               </div>
               {item.evidence_segment && <blockquote className="sem-evidence">…{item.evidence_segment}…</blockquote>}
               <div className="sem-map">
-                <select
-                  aria-label={`队列 source 映射 ${item.id}`}
-                  value={m?.source ?? ""}
-                  onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: e.target.value, target: prev[item.id]?.target ?? "" } }))}
-                >
-                  <option value="">source 映射到资产…</option>
-                  {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-                <select
-                  aria-label={`队列 target 映射 ${item.id}`}
-                  value={m?.target ?? ""}
-                  onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: prev[item.id]?.source ?? "", target: e.target.value } }))}
-                >
-                  <option value="">target 映射到资产…</option>
-                  {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-                <button className="primary" disabled={!canConfirm} onClick={() => void confirmQueue(item)}>确认断言</button>
-                <button onClick={() => void dismissQueue(item)}>忽略</button>
+                {pendingView && (
+                  <>
+                    <select
+                      aria-label={`队列 source 映射 ${item.id}`}
+                      value={m?.source ?? ""}
+                      onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: e.target.value, target: prev[item.id]?.target ?? "" } }))}
+                    >
+                      <option value="">source 映射到资产…</option>
+                      {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                    <select
+                      aria-label={`队列 target 映射 ${item.id}`}
+                      value={m?.target ?? ""}
+                      onChange={(e) => setQMapping((prev) => ({ ...prev, [item.id]: { source: prev[item.id]?.source ?? "", target: e.target.value } }))}
+                    >
+                      <option value="">target 映射到资产…</option>
+                      {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                    <button className="primary" disabled={!canConfirm} onClick={() => void confirmQueue(item)}>确认断言</button>
+                    <button onClick={() => void dismissQueue(item)}>忽略</button>
+                  </>
+                )}
                 <button onClick={() => void toggleDetail(item.id)}>{detailOpen ? "收起详情" : "详情"}</button>
               </div>
               {detailOpen && (

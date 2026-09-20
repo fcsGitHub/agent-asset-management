@@ -121,6 +121,13 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   // 解析来自 POST /nl/parse（规则 L1 或真实 DeepSeek L2），此处不做二次解释。
   const executeNlIntent = useCallback((payload: NlIntentPayload): boolean => {
     if (payload.intent === "navigate" && payload.params.page) {
+      // proposals 没有独立 rail 页：它是工作台内的「Agent 提案」标签
+      if (payload.params.page === "proposals") {
+        setPage("workbench");
+        setWsView("proposals");
+        setMobileView("workspace");
+        return true;
+      }
       setPage(payload.params.page);
       return true;
     }

@@ -12,7 +12,7 @@ import { checkCsrf, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { DeepSeekProvider, LlmError } from "@taw/agent-adapter/deepseek";
 
-const PAGES = ["dashboard", "workbench", "activity", "approvals", "graph", "ontology"] as const;
+const PAGES = ["dashboard", "workbench", "activity", "approvals", "graph", "ontology", "proposals"] as const;
 
 export const NlIntent = z
   .object({
@@ -42,12 +42,13 @@ export interface NlParseResult {
 /** L1 规则解析：覆盖高确定性的短命令；命中即返回（零模型成本、完全确定）。 */
 export function ruleParse(text: string): NlIntent | null {
   const t = text.trim();
-  const page = t.match(/(?:^打开|^跳到|^跳转|^去|^go to)\s*(总览|仪表盘|工作台|动态|审批|审批队列|图谱|关系图谱|关系图|本体|本体治理)/);
+  const page = t.match(/(?:^打开|^跳到|^跳转|^去|^go to)\s*(总览|仪表盘|工作台|动态|审批|审批队列|提案|提案页|图谱|关系图谱|关系图|本体|本体治理)/);
   if (page) {
     const p = page[1]!;
     const map: Record<string, (typeof PAGES)[number]> = {
       "总览": "dashboard", "仪表盘": "dashboard", "工作台": "workbench",
       "动态": "activity", "审批": "approvals", "审批队列": "approvals",
+      "提案": "proposals", "提案页": "proposals",
       "图谱": "graph", "关系图谱": "graph", "关系图": "graph",
       "本体": "ontology", "本体治理": "ontology",
     };
@@ -92,7 +93,7 @@ function buildLlmMessages(text: string, page: string) {
       content:
         "你是团队资产工作台的界面命令解析器。把用户的中文指令解析为一个 JSON 对象，只输出 JSON，不要输出任何解释。" +
         `可选意图（白名单，四选一）：\n` +
-        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology"}} —— 跳转页面\n` +
+        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals"}} —— 跳转页面（proposals 是 Agent 提案审核页）\n` +
         `2) {"intent":"search_assets","params":{"query":"<搜索关键词>"}} —— 搜索资产\n` +
         `3) {"intent":"fill_register_form","params":{"typeKeyHint":"<类型键，可选：${TYPE_KEYS_HINT}>","name":"<资产名，可选>"}} —— 预填登记表单\n` +
         `4) {"intent":"create_issue","params":{"title":"<问题标题，必填>","body":"<问题详情，可选>"}} —— 起草问题工单（界面会先预览，用户确认后才创建）\n` +

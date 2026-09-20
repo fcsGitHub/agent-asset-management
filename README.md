@@ -39,8 +39,9 @@ M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 | M16 活动流项目过滤 | 审计事件补 project_id（发布类动作真实盖章、团队级动作 NULL 的明确语义）、/activity 与 SSE 流 projectId 过滤、动态页项目过滤选择器 | EV-038，tests/m16-* |
 | M17 Agent 提案审核 | GET /projects/:id/proposals + POST /proposals/:id/review（状态机+jsonb 审核回执）、工作区「Agent 提案」标签（结构化展示/筛选/接受与忽略/登记类提案预填登记表单） | EV-039，tests/m17-* |
 | M18 候选队列批审与详情 | 批量确认/忽略（SAVEPOINT 逐条隔离、逐条如实回执）、候选详情（决策留痕+断言去向）、队列批选与详情展开 UI、本体页受控单位词表（worker 同源暴露） | EV-040，tests/m18-* |
+| M19 实时层自愈 | activityHub 健康探测+退避重连+resync（运行流游标精确回填、活动流客户端重取）、LISTEN 连接可观测（application_name）、队列状态筛选视图、NL 打开提案页 | EV-041，tests/m19-* |
 
-当前测试基线：25 套件 136 项全部通过。
+当前测试基线：26 套件 139 项全部通过。
 
 ## 环境要求
 

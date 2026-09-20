@@ -24,7 +24,8 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable === true;
 }
 
-export type PageKey = "dashboard" | "workbench" | "activity" | "approvals" | "graph" | "ontology";
+// proposals 不是独立 rail 页（是工作台内的「Agent 提案」标签），仅作为 NL 导航目标出现
+export type PageKey = "dashboard" | "workbench" | "activity" | "approvals" | "graph" | "ontology" | "proposals";
 
 /** g-前缀两级跳转：记录第一次按下的 g，500ms 内的第二个键完成跳转。 */
 export function createGoPrefixHandler(navigate: (page: PageKey) => void) {

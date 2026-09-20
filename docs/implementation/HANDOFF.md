@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 136 项基线仍绿
+4. `npx vitest run` 确认 139 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -72,5 +72,10 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    逐条 SAVEPOINT 隔离、逐条如实回执；候选详情端点含决策留痕与断言去向；队列批选
    与详情展开 UI；本体页「受控单位词表」卡片——UNIT_VOCAB 模块级唯一定义点 + worker
    GET /units + API 代理 503 如实降级）（EV-040）。
-   下一步候选：worker 多播订阅（activityHub 单客户端的可用性收敛）、NL 意图再扩展
-   （打开提案页/图谱聚焦）、队列视图按状态/来源资产筛选、候选详情页直达关系图谱。
+   M19 已完成：实时层自愈——activityHub 健康探测（15s SELECT 1）+ 指数退避重连
+   （500ms~8s）+ 重连后 resync（运行流 DB 游标精确回填恰好一次、活动流 SSE resync
+   帧客户端重取对齐）；LISTEN 连接 application_name=taw_activity_hub 可观测；
+   修复 connecting 缓存拒绝导致的枢纽永久死亡。队列状态筛选视图 + NL「打开提案页」
+   （EV-041）。
+   下一步候选：NL 意图再扩展（图谱聚焦资产）、批量导入去重（同团队同 type+端点
+   幂等）、活动流历史分页游标、提案批量审核、类型登记时的单位词表在线校验。

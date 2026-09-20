@@ -397,6 +397,12 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }, 25000);
     const unsubscribe = await subscribeActivity(teamId, (n) => {
       if (closed) return;
+      // resync（M19 自愈）：LISTEN 断链重连后通知有缺口，转发信号让客户端重取历史对齐；
+      // 正文无法按 id 补（NOTIFY 只带定位信息，断窗内的通知已丢失），重取是与列表同源的诚实对齐
+      if ("resync" in n) {
+        reply.raw.write(`event: resync\ndata: {}\n\n`);
+        return;
+      }
       void streamItem(teamId, n.kind, n.id, filterProjectId)
         .then((item) => {
           if (!item || closed) return;

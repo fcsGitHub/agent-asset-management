@@ -508,3 +508,35 @@
   全部落地（图谱 2 节点 3 关系可见）→ 补入 verifies 候选 → 「详情」展开六项留痕
   正确 → 勾选批量忽略 → 队列清空；本体页单位词表卡片渲染 positionUnit m/km/AU、
   timeScale TAI/UTC/TT/TDB/GPST 等真实词表。
+
+### EV-041 ｜ 2026-09-21 ｜ M19 迭代轮：实时层自愈（LISTEN 断线检测/退避重连/断窗补齐）
+- 自审发现 M11/M12 实时层的真实可用性缺口：activityHub 的单 LISTEN 连接是单点——
+  静默断链（网络分区/Postgres 重启且 TCP 未报错）不触发 error，SSE 订阅者的通知
+  从此静默丢失且永不恢复（旧重连只在 error 时尝试一次）；HTTP 连接还活着，
+  浏览器侧的重取对齐逻辑根本不会触发。
+- 自愈三件套（activityHub 重写）：① 周期健康探测（15s SELECT 1 带 5s 超时）主动
+  发现死链并拆除；② 指数退避重连链（500ms 起步、8s 封顶，TAW_LISTEN_BACKOFF_MS
+  可调），Postgres 恢复后自动重新 LISTEN；③ 重连成功且有既有订阅者时扇出 resync
+  信号——运行流路由按 DB 游标精确补取断窗事件（seq 单调、恰好一次，终态 done 由
+  DB 状态兜底，两路殊途同归）；活动流路由转发 SSE resync 帧、客户端整体重取
+  （与列表同源的诚实对齐，不虚构补推）。连接期失败的 connecting 缓存拒绝一并修复
+  （旧代码会让枢纽此后永久拿到同一个被拒 promise）。
+- LISTEN 连接加 application_name=taw_activity_hub：pg_stat_activity 精准识别
+  （运维排障与断线注入测试都靠它；健康探测的 SELECT 1 会让 query 列失配，
+  应用名是唯一可靠锚点）。
+- 顺带：候选队列新增状态筛选视图（待审可批审/已确认/已忽略只读历史，详情含决策
+  留痕与断言去向）；NL 规则新增「打开/跳到 提案（页）」→ navigate proposals
+  （工作台「Agent 提案」标签）；修复 CommandBar 意图名映射漏 ontology 的存量小缺陷
+  （「打开本体」预览曾显示「跳转到「undefined」」）。
+- 测试 tests/m19（3 项，真实断线注入非 mock）：pg_terminate_backend 终止 LISTEN
+  后端（application_name 精准定位），断窗内 SQL 落库两条运行事件 + 转终态 → 重连
+  后 resync 补齐：SSE 收到的 seq 序列与 DB 完全一致（无重复、保序）+ done 到达；
+  活动流断窗审计事件 → resync 帧到达、重取可见、恢复后新事件实时到达（通道真正
+  恢复而非一次性补齐）；NL 提案页三条句式 L1 确定性命中。
+  全量：`npx vitest run` **26 套件 139 项全部通过**（64s）。
+- 浏览器实测：动态页 ● 实时 → 终止 dev API 的 hub 后端 + 断窗内落库审计事件
+  （audit id 1225）→ 约 1.5s 重连后条目「归档资产」未经手动刷新自动出现，且
+  ● 实时保持（SSE 未断，证明走服务端 resync 而非浏览器重连）；候选队列「已确认」
+  视图 3 条只读、详情显示 断言 1ad8968f…（dependsOn v1.0.0）+ 决策人/时间；
+  ⌘K 输入「打开提案页」→ 规则解析卡片「跳转到「Agent 提案」」→ 执行后直接落到
+  工作台「Agent 提案」标签。
