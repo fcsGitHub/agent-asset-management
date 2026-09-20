@@ -4,11 +4,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { q, withTeam } from "../db.js";
+import type { PoolClient } from "pg";
 import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
-import { compileTypeSchema, validateProperties } from "@taw/domain/validate";
+import { compileTypeSchema, validateProperties, diffJsonSchemas, countPropertyUsage } from "@taw/domain/validate";
 import {
   DEFAULT_RELATION_TYPES,
   DEFAULT_TYPE_DEFINITIONS,
@@ -85,6 +86,102 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
     });
     return reply.code(201).send({ teamId: body.teamId, typeVersionId: id, typeKey: body.typeKey, version: body.version });
+  });
+
+  // ---------- 本体迁移影响预览（管理员） ----------
+  // 注册新类型版本前，先看：多少资产受影响、哪些头修订会在新定义下失败、结构上动了什么。
+  // 纯只读计算，不做任何写入。
+  app.post("/types/migration-preview", async (req) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        typeKey: z.string().regex(/^[a-z][a-z0-9.\-]{1,63}$/),
+        jsonSchema: z.object({}).passthrough(),
+        unitVocabularies: z.record(z.string(), z.array(z.string())).default({}),
+        sampleLimit: z.number().int().min(1).max(50).default(10),
+      }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    if (role !== "admin") throw ERR.FORBIDDEN();
+    if (!compileTypeSchema(body.jsonSchema)) throw ERR.INVALID("jsonSchema 不是可编译的 JSON Schema");
+
+    return withTeam(body.teamId, async (client) => {
+      const { rows: cur } = await client.query<{
+        id: string;
+        version: string;
+        json_schema: object;
+        unit_vocabularies: Record<string, string[]>;
+      }>(
+        `SELECT id, version, json_schema, unit_vocabularies FROM asset_type_versions
+          WHERE team_id = $1 AND type_key = $2 AND status = 'active'
+          ORDER BY created_at DESC LIMIT 1`,
+        [body.teamId, body.typeKey]
+      );
+      if (!cur[0]) {
+        throw ERR.NOT_FOUND();
+      }
+      const current = cur[0];
+
+      // 受影响资产 = 当前版本下的全部资产；取各自头修订做真实校验
+      const { rows: heads } = await client.query<{
+        asset_id: string;
+        asset_name: string;
+        revision_id: string;
+        properties: Record<string, unknown>;
+      }>(
+        `SELECT a.id AS asset_id, a.name AS asset_name, r.id AS revision_id, r.properties
+           FROM assets a
+           JOIN LATERAL (
+             SELECT id, properties FROM asset_revisions
+              WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
+           ) r ON true
+          WHERE a.team_id = $1 AND a.current_type_version_id = $2`,
+        [body.teamId, current.id]
+      );
+
+      const newDef = { jsonSchema: body.jsonSchema, unitVocabularies: body.unitVocabularies };
+      const sampleFailures: { assetId: string; assetName: string; revisionId: string; errors: string[] }[] = [];
+      let failingCount = 0;
+      for (const head of heads) {
+        const check = validateProperties(newDef, head.properties);
+        if (!check.valid) {
+          failingCount += 1;
+          if (sampleFailures.length < body.sampleLimit) {
+            sampleFailures.push({
+              assetId: head.asset_id,
+              assetName: head.asset_name,
+              revisionId: head.revision_id,
+              errors: check.errors,
+            });
+          }
+        }
+      }
+
+      const structuralChanges = diffJsonSchemas(current.json_schema, body.jsonSchema);
+      // 被移除属性的存量使用面
+      const removedPaths = new Set(
+        structuralChanges.filter((c) => c.kind === "property-removed").map((c) => c.path.slice(1))
+      );
+      const usage = countPropertyUsage(heads);
+      const removedUsage = Object.fromEntries(
+        Object.entries(usage).filter(([k]) => removedPaths.has(k))
+      );
+
+      return {
+        typeKey: body.typeKey,
+        currentVersionId: current.id,
+        currentVersion: current.version,
+        affectedAssets: heads.length,
+        failingAssets: failingCount,
+        safe: failingCount === 0,
+        sampleFailures,
+        structuralChanges,
+        removedPropertyUsage: removedUsage,
+      };
+    });
   });
 
   app.post("/relation-types", async (req, reply) => {
@@ -236,13 +333,17 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------- 查询 ----------
+  // lifecycle 过滤：active（默认，排除归档）/ archived（仅归档）/ all
   app.get("/assets/search", async (req) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string; q?: string; type?: string; label?: string; limit?: string };
+    const query = (req.query ?? {}) as {
+      teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string;
+    };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     const limit = Math.min(Number(query.limit ?? 50), 200);
+    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version,
@@ -256,9 +357,9 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
           WHERE a.team_id = $1
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
             AND ($3 = '' OR tv.type_key = $3)
-            AND a.lifecycle <> 'archived'
+            AND ($5 = 'all' OR a.lifecycle = CASE WHEN $5 = 'archived' THEN 'archived' ELSE 'active' END)
           ORDER BY a.created_at DESC LIMIT $4`,
-        [teamId, query.q ?? "", query.type ?? "", limit]
+        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle]
       )
     );
     return rows;
@@ -319,6 +420,95 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       return { ...rev, artifacts: arts };
     });
+  });
+
+  // ---------- 生命周期：归档 / 恢复 ----------
+  // 归档语义：目录默认视图隐藏 + 禁止新草稿与新 CR；已发布修订与通道历史不受影响（不可变）。
+  // 权限：创建者本人或团队管理员；全程写 audit_events。
+  async function loadAssetForLifecycle(
+    client: PoolClient,
+    teamId: string,
+    assetId: string
+  ): Promise<{ id: string; name: string; lifecycle: string; created_by: string }> {
+    const { rows } = await client.query<{ id: string; name: string; lifecycle: string; created_by: string }>(
+      `SELECT id, name, lifecycle, created_by FROM assets WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+      [teamId, assetId]
+    );
+    const asset = rows[0];
+    if (!asset) throw ERR.NOT_FOUND();
+    return asset;
+  }
+
+  app.post("/assets/:assetId/archive", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), reason: z.string().min(4).max(500) }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const asset = await loadAssetForLifecycle(client, body.teamId, assetId);
+      if (asset.lifecycle === "archived") {
+        throw ERR.CONFLICT("ALREADY_ARCHIVED", "资产已处于归档状态");
+      }
+      if (role !== "admin" && asset.created_by !== auth.userId) {
+        throw ERR.FORBIDDEN();
+      }
+      // 存在未完成工作分支草稿时禁止归档：必须先合并或放弃分支
+      const { rows: drafts } = await client.query(
+        `SELECT 1 FROM branch_entries e
+           JOIN branches b ON b.team_id = e.team_id AND b.id = e.branch_id
+          WHERE e.team_id = $1 AND e.asset_id = $2 AND b.status = 'open' LIMIT 1`,
+        [body.teamId, assetId]
+      );
+      if (drafts[0]) {
+        throw ERR.CONFLICT("OPEN_DRAFTS", "资产存在未完成的工作分支草稿，先合并或放弃对应分支后再归档");
+      }
+      await client.query(`UPDATE assets SET lifecycle = 'archived' WHERE team_id = $1 AND id = $2`, [
+        body.teamId,
+        assetId,
+      ]);
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'asset.archive', 'asset', $3, $4)`,
+        [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
+      );
+    });
+    return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "archived" });
+  });
+
+  app.post("/assets/:assetId/restore", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), reason: z.string().min(4).max(500) }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const asset = await loadAssetForLifecycle(client, body.teamId, assetId);
+      if (asset.lifecycle !== "archived") {
+        throw ERR.CONFLICT("NOT_ARCHIVED", "仅归档状态的资产可恢复");
+      }
+      if (role !== "admin" && asset.created_by !== auth.userId) {
+        throw ERR.FORBIDDEN();
+      }
+      await client.query(`UPDATE assets SET lifecycle = 'active' WHERE team_id = $1 AND id = $2`, [
+        body.teamId,
+        assetId,
+      ]);
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'asset.restore', 'asset', $3, $4)`,
+        [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
+      );
+    });
+    return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "active" });
   });
 
   // ---------- 关系 ----------

@@ -104,12 +104,15 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       if (branch.name === "main") throw ERR.FORBIDDEN();
       if (branch.status !== "open") throw ERR.CONFLICT("BRANCH_CLOSED", "分支已合并或放弃，不能写入");
 
-      const { rows: assetRows } = await client.query<{ id: string; current_type_version_id: string }>(
-        `SELECT id, current_type_version_id FROM assets WHERE team_id = $1 AND id = $2`,
+      const { rows: assetRows } = await client.query<{ id: string; current_type_version_id: string; lifecycle: string }>(
+        `SELECT id, current_type_version_id, lifecycle FROM assets WHERE team_id = $1 AND id = $2`,
         [body.teamId, body.assetId]
       );
       const asset = assetRows[0];
       if (!asset) throw ERR.NOT_FOUND();
+      if (asset.lifecycle === "archived") {
+        throw ERR.CONFLICT("ASSET_ARCHIVED", "资产已归档，不能写入新草稿修订；先恢复资产再操作");
+      }
 
       // 解析当前头：分支已有条目 → 其 head；否则 main/stable 头（最新修订）
       const { rows: entry } = await client.query<{ base_revision_id: string; head_revision_id: string }>(

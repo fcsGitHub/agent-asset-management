@@ -74,6 +74,15 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         [body.teamId, body.branchId]
       );
       if (items.rowCount === 0) throw ERR.INVALID("分支没有任何修改，无可提交内容");
+      // 归档资产不能进入发布流程：已归档即退出候选
+      const { rows: archived } = await client.query<{ name: string }>(
+        `SELECT a.name FROM branch_entries e JOIN assets a ON a.team_id = e.team_id AND a.id = e.asset_id
+          WHERE e.team_id = $1 AND e.branch_id = $2 AND a.lifecycle = 'archived' LIMIT 1`,
+        [body.teamId, body.branchId]
+      );
+      if (archived[0]) {
+        throw ERR.CONFLICT("ASSET_ARCHIVED", `分支包含已归档资产「${archived[0].name}」，先从分支移除或恢复该资产`);
+      }
       await client.query(
         `INSERT INTO change_requests (team_id, id, project_id, branch_id, title, motivation, related_refs,
           change_summary, compatibility, test_plan, migration_notes, rollback_notes, status, created_by)

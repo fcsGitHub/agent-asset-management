@@ -1,0 +1,55 @@
+{
+  "runId": "06dd81",
+  "fixture": {
+    "assets": 2000,
+    "revisionsPerAsset": 5
+  },
+  "concurrency": {
+    "readWorkers": 16,
+    "writeWorkers": 8
+  },
+  "results": {
+    "readConcurrent": {
+      "ops": 640,
+      "errors": 0,
+      "p50Ms": 21,
+      "p95Ms": 42,
+      "maxMs": 78,
+      "throughputOpsPerSec": 687
+    },
+    "writeConcurrent": {
+      "ops": 120,
+      "errors": 0,
+      "p50Ms": 16,
+      "p95Ms": 24,
+      "maxMs": 28,
+      "throughputOpsPerSec": 404
+    },
+    "mixedRead": {
+      "ops": 320,
+      "errors": 0,
+      "p50Ms": 19,
+      "p95Ms": 45,
+      "maxMs": 70,
+      "throughputOpsPerSec": 341
+    },
+    "mixedWrite": {
+      "ops": 120,
+      "errors": 0,
+      "p50Ms": 40,
+      "p95Ms": 83,
+      "maxMs": 86,
+      "throughputOpsPerSec": 128
+    }
+  },
+  "environment": {
+    "node": "v24.11.1",
+    "db": "pgvector/pgvector:pg16 (docker, local)"
+  },
+  "startedAt": "2026-09-20T01:44:38.393Z",
+  "writeImpactOnReadP95": {
+    "readOnlyP95Ms": 42,
+    "mixedP95Ms": 45
+  },
+  "finishedAt": "2026-09-20T01:44:42.028Z"
+}

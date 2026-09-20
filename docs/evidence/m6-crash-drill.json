@@ -1,0 +1,89 @@
+{
+  "runId": "aa136f",
+  "startedAt": "2026-09-20T01:53:30.193Z",
+  "steps": [
+    {
+      "name": "API 启动（子进程，可被 kill -9）",
+      "ok": true,
+      "detail": "{\"port\":4320}"
+    },
+    {
+      "name": "崩溃前基线（用户/项目/资产/分支/已确认草稿）",
+      "ok": true,
+      "detail": "{\"assetId\":\"4f61ffc3-2b7e-4a4f-b29b-be83dee9463b\",\"ackedRevision\":\"d054d99b-80e9-4b8b-a7ac-8969e45fb074\"}"
+    },
+    {
+      "name": "kill -9（写入突发进行中，SIGKILL）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "API 重启（同一数据库）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "已确认写入崩溃后全部持久（含摘要一致）",
+      "ok": true,
+      "detail": "{\"acked\":2,\"lost\":[]}"
+    },
+    {
+      "name": "崩溃前登录会话重启后仍有效",
+      "ok": true,
+      "detail": "{\"status\":200}"
+    },
+    {
+      "name": "发布链准备到 prepare-review",
+      "ok": true,
+      "detail": "{\"crId\":\"d2cc0d75-5a2d-4e6d-9689-86211ad4b8a8\"}"
+    },
+    {
+      "name": "kill -9（发布事务已开启、停在行锁上，SIGKILL）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "API 二次重启",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "发布事务崩溃原子性（全有或全无）",
+      "ok": true,
+      "detail": "{\"published\":false,\"sets\":0,\"crStatus\":\"awaiting_review\",\"head\":null,\"approvals\":0,\"hasMainHead\":false,\"outboxRows\":0}"
+    },
+    {
+      "name": "outbox 无重复事件",
+      "ok": true,
+      "detail": "{\"duplicateGroups\":0}"
+    },
+    {
+      "name": "冷启动容器就绪（空卷，5439）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "角色预创建（角色不在 dump/迁移中）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "从零迁移（空库 → 全部 schema）",
+      "ok": true,
+      "detail": "{}"
+    },
+    {
+      "name": "冷启动全链路（注册→资产→分支→CR→发布→通道视图）",
+      "ok": true,
+      "detail": "{\"publish\":200,\"channel\":200}"
+    },
+    {
+      "name": "冷启动容器清理",
+      "ok": true,
+      "detail": "{}"
+    }
+  ],
+  "publishAtomicityOutcome": "已回滚（崩溃中断事务）",
+  "coldStartMigrations": "0 → 全部迁移应用",
+  "finishedAt": "2026-09-20T01:53:41.647Z"
+}
