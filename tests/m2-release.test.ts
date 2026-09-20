@@ -71,7 +71,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -84,7 +84,7 @@ async function upload(session: Session, teamId: string, content: string, name: s
     body: form,
   });
   const json = (await res.json()) as { digest?: string };
-  expect(res.status === 201 && !!json.digest, json, "上传失败");
+  expect(res.status === 201 && !!json.digest, "上传失败").toBe(true);
   return json.digest!;
 }
 
@@ -158,12 +158,12 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     });
     expectOk(save.status === 201, save.json, "保存草稿失败");
 
-    // STALE_HEAD 负例：带着旧期望头再保存 → 409
+    // STALE_HEAD 负例：带着保存前的旧头作为期望头再保存 → 409（头已移动到本次保存的修订）
     const stale = await call("POST", `/branches/${branchId}/revisions`, {
       session: member,
-      body: { teamId, assetId: modelAssetId, expectedHeadRevisionId: save.json.revisionId, properties: {} },
+      body: { teamId, assetId: modelAssetId, expectedHeadRevisionId: mainHeadR1, properties: {} },
     });
-    expect(stale.status === 409 && stale.json.error.code === "STALE_HEAD", stale.json, "期望 409 STALE_HEAD");
+    expect(stale.status === 409 && stale.json.error.code === "STALE_HEAD", `期望 409 STALE_HEAD，实际 ${stale.status} ${JSON.stringify(stale.json)}`).toBe(true);
   });
 
   it("差异接口：属性逐字段 + 二进制摘要对照（B02）", async () => {
@@ -171,8 +171,8 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const diff = await call("GET", `/branches/${branchId}/diff?teamId=${teamId}`, { session: member });
     expectOk(diff.status === 200, diff.json, "差异获取失败");
     const d = diff.json[0];
-    expect(d.diff.properties.some((p: any) => p.key === "interfaceVersion" && p.kind === "changed"), d.diff, "属性差异缺失");
-    expect(d.diff.artifacts[0].fromDigest !== d.diff.artifacts[0].toDigest, d.diff, "制品摘要差异缺失");
+    expect(d.diff.properties.some((p: any) => p.key === "interfaceVersion" && p.kind === "changed"), "属性差异缺失").toBe(true);
+    expect(d.diff.artifacts[0].fromDigest !== d.diff.artifacts[0].toDigest, "制品摘要差异缺失").toBe(true);
   });
 
   it("成员提交 CR；成员不能审核发布（B03）；默认不能自审自发", async () => {
@@ -196,7 +196,7 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const memberPublish = await call("POST", `/change-requests/${crId}/review-and-publish`, {
       session: member, body: { teamId, expectedReviewDigest: prep.json.reviewDigest },
     });
-    expect(memberPublish.status === 403, memberPublish.json, "成员不应能发布");
+    expect(memberPublish.status === 403, "成员不应能发布").toBe(true);
 
     // 成员（作者）即使挂着 admin cookie 也不行——作者分离按 CR 作者判断：
     // admin 发布自己未参与的 CR 应成功（后面用例）；这里先验证另一管理员可行路径在下一用例。
@@ -214,7 +214,7 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     // 通道头 & main 分支视图
     const channel = await call("GET", `/projects/${projectId}/channel?teamId=${teamId}&channel=stable`, { session: admin });
     expectOk(channel.status === 200 && channel.json.length === 1, channel.json, "通道头异常");
-    expect(channel.json[0].revision_seq === 2, channel.json, "通道应指向 r2");
+    expect(channel.json[0].revision_seq === 2, "通道应指向 r2").toBe(true);
 
     await withTeamDb(teamId, async (c) => {
       const { rows: main } = await c.query<{ head_revision_id: string }>(
@@ -222,12 +222,12 @@ describe("M2 分支、发布与审批（真实集成）", () => {
           WHERE b.name = 'main' AND b.project_id = $1 AND e.asset_id = $2`,
         [projectId, modelAssetId]
       );
-      expect(main[0]?.head_revision_id, main, "main 视图未更新");
+      expect(main[0]?.head_revision_id === channel.json[0].revision_id, `main 视图应指向发布的修订（实际 ${main[0]?.head_revision_id}）`).toBe(true);
       const { rows: rel } = await c.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM release_items WHERE release_set_id = $1`,
         [pub.json.releaseSetId]
       );
-      expect(rel[0]?.n === "1", rel, "发布集条目数异常");
+      expect(rel[0]?.n === "1", "发布集条目数异常").toBe(true);
     });
   });
 
@@ -248,17 +248,18 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const pub = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, {
       session: admin, body: { teamId, expectedReviewDigest: prep.json.reviewDigest },
     });
-    expect(pub.status === 403, pub.json, "自审自发应默认 403");
+    expect(pub.status === 403, "自审自发应默认 403").toBe(true);
 
     // 启用例外（人事先配置，DB 层；Agent/普通 API 无权）后仍需填写留痕说明
     const c = new Client({ connectionString: process.env.DATABASE_URL });
     await c.connect();
-    await c.query(`UPDATE team_settings SET allow_single_admin_self_approval = true, single_admin_exception_note = '单人团队例外，已由负责人确认' WHERE team_id = $1`, [teamId]);
+    await c.query("SELECT set_config('app.team_id', $1, false)", [teamId]); // 会话级：裸连接自动提交，事务级设置随语句失效
+    await c.query(`INSERT INTO team_settings (team_id, allow_single_admin_self_approval, single_admin_exception_note) VALUES ($1, true, '单人团队例外，已由负责人确认') ON CONFLICT (team_id) DO UPDATE SET allow_single_admin_self_approval = true, single_admin_exception_note = EXCLUDED.single_admin_exception_note`, [teamId]);
     await c.end();
     const pub2 = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, {
       session: admin, body: { teamId, expectedReviewDigest: prep.json.reviewDigest },
     });
-    expect(pub2.status === 200, pub2.json, "配置例外并留痕后应可发布");
+    expect(pub2.status === 200, "配置例外并留痕后应可发布").toBe(true);
   });
 
   it("B04：prepare 后分支被改 → 旧摘要发布被拒（审批失效）", async () => {
@@ -281,13 +282,13 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     });
     // 重新 prepare 也会因头移动被拒
     const reprep = await call("POST", `/change-requests/${cr.json.changeRequestId}/prepare-review`, { session: member, body: { teamId } });
-    expect(reprep.status === 409, reprep.json, "头移动后重新 prepare 应 409");
+    expect(reprep.status === 409, "头移动后重新 prepare 应 409").toBe(true);
 
     // 用旧快照直接发布（绕过上面）→ 发布端重算发现不一致
     const pub = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, {
       session: admin, body: { teamId, expectedReviewDigest: prep.json.reviewDigest },
     });
-    expect(pub.status === 409 && pub.json.error.code === "REVIEW_DIGEST_CHANGED", pub.json, "B04 失效应 409");
+    expect(pub.status === 409 && pub.json.error.code === "REVIEW_DIGEST_CHANGED", "B04 失效应 409").toBe(true);
   });
 
   it("B05：并发发布同一资产，后发者因目标头移动被拒，需重新审查", async () => {
@@ -314,7 +315,7 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const pubB = await call("POST", `/change-requests/${crB.crId}/review-and-publish`, {
       session: admin, body: { teamId, expectedReviewDigest: crB.digest },
     });
-    expect(pubB.status === 409 && pubB.json.error.code === "REVIEW_DIGEST_CHANGED", pubB.json, "竞态 B 应失效");
+    expect(pubB.status === 409 && pubB.json.error.code === "REVIEW_DIGEST_CHANGED", "竞态 B 应失效").toBe(true);
   });
 
   it("B06：多资产发布中途制品丢失 → 全部回滚，无部分生效", async () => {
@@ -351,17 +352,17 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const pub = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, {
       session: admin, body: { teamId, expectedReviewDigest: prep.json.reviewDigest },
     });
-    expect(pub.status === 409 && pub.json.error.code === "ARTIFACT_MISSING", pub.json, "应因制品缺失失败");
+    expect(pub.status === 409 && pub.json.error.code === "ARTIFACT_MISSING", "应因制品缺失失败").toBe(true);
 
     // 全部回滚：模型与文档通道头都未移动
     const channel = await call("GET", `/projects/${projectId}/channel?teamId=${teamId}&channel=stable`, { session: admin });
-    expect(!channel.json.some((h: { asset_id: string }) => h.asset_id === docAssetId), channel.json, "文档不应有通道头");
+    expect(!channel.json.some((h: { asset_id: string }) => h.asset_id === docAssetId), "文档不应有通道头").toBe(true);
     await withTeamDb(teamId, async (c) => {
       const { rows } = await c.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM release_sets rs JOIN change_requests cr ON cr.id = rs.change_request_id WHERE cr.id = $1`,
         [cr.json.changeRequestId]
       );
-      expect(rows[0]?.n === "0", rows, "发布集应完全回滚");
+      expect(rows[0]?.n === "0", "发布集应完全回滚").toBe(true);
     });
   });
 
@@ -380,12 +381,12 @@ describe("M2 分支、发布与审批（真实集成）", () => {
     const p1 = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, { session: admin, body, idemKey: `idem-${runId}` });
     const p2 = await call("POST", `/change-requests/${cr.json.changeRequestId}/review-and-publish`, { session: admin, body, idemKey: `idem-${runId}` });
     expectOk(p1.status === 200, p1.json, "首次发布失败");
-    expect(p2.status === 200 && p2.json.idempotentReplay === true && p2.json.releaseSetId === p1.json.releaseSetId, p2.json, "重放应返回首次结果");
+    expect(p2.status === 200 && p2.json.idempotentReplay === true && p2.json.releaseSetId === p1.json.releaseSetId, "重放应返回首次结果").toBe(true);
     await withTeamDb(teamId, async (c) => {
       const { rows } = await c.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM release_sets WHERE change_request_id = $1`, [cr.json.changeRequestId]
       );
-      expect(rows[0]?.n === "1", rows, "发布集应只有一个");
+      expect(rows[0]?.n === "1", "发布集应只有一个").toBe(true);
     });
   });
 
@@ -402,7 +403,7 @@ describe("M2 分支、发布与审批（真实集成）", () => {
       session: member,
       body: { teamId, assetId: modelAssetId, revisionId: "11111111-1111-1111-1111-111111111111", usageKey: "bad" },
     });
-    expect(wrong.status === 422, wrong.json, "错配绑定应拒绝");
+    expect(wrong.status === 422, "错配绑定应拒绝").toBe(true);
 
     // 再发布一个新版本（走完整链）
     const br = await call("POST", `/projects/${projectId}/branches`, { session: member, body: { teamId, name: `after-bind-${runId}` } });
@@ -422,7 +423,7 @@ describe("M2 分支、发布与审批（真实集成）", () => {
 
     const bindings = await call("GET", `/projects/${projectId}/bindings?teamId=${teamId}`, { session: member });
     const b = bindings.json.find((x: { usage_key: string }) => x.usage_key === "sim-core");
-    expect(b.revision_id === mainHeadR1, b, "绑定不应随发布移动");
+    expect(b.revision_id === mainHeadR1, "绑定不应随发布移动").toBe(true);
   });
 
   it("回退：新受审查事件，历史保留，通道指回先前发布集", async () => {
@@ -442,7 +443,10 @@ describe("M2 分支、发布与审批（真实集成）", () => {
 
     const after = await call("GET", `/projects/${projectId}/channel?teamId=${teamId}&channel=stable`, { session: admin });
     const afterHead = after.json.find((h: { asset_id: string }) => h.asset_id === current.asset_id);
-    expect(afterHead.release_set_id === firstRelease, { afterHead, firstRelease }, "通道应指回原发布集");
+    // 回退语义：通道内容指回目标发布集的修订；头本身指向新的"回退发布集"（可审计，历史不被抹去）
+    expect(afterHead.revision_seq === 2, `回退后应指向首次发布的修订 r2，实际 seq=${afterHead.revision_seq}`).toBe(true);
+    expect(afterHead.release_set_id === rb.json.rollbackSetId, "通道头应指向本次回退发布集").toBe(true);
+    expect(String(afterHead.version_label).startsWith("ROLLBACK-"), "回退发布集应有 ROLLBACK 标签").toBe(true);
 
     // 历史保留：release_events 含 publish 与 rollback，且后来版本未被抹去
     await withTeamDb(teamId, async (c) => {
@@ -451,11 +455,11 @@ describe("M2 分支、发布与审批（真实集成）", () => {
           WHERE ch.project_id = $1`, [projectId]
       );
       const kinds = rows.map((r) => r.kind);
-      expect(kinds.includes("publish") && kinds.includes("rollback"), kinds, "事件链不完整");
+      expect(kinds.includes("publish") && kinds.includes("rollback"), "事件链不完整").toBe(true);
       const { rows: relCount } = await c.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM release_sets WHERE team_id = $1`, [teamId]
       );
-      expect(Number(relCount[0]!.n) >= 4, relCount, "回退不应抹去历史发布集");
+      expect(Number(relCount[0]!.n) >= 4, "回退不应抹去历史发布集").toBe(true);
     });
   });
 });

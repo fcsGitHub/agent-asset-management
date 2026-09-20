@@ -403,6 +403,22 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         );
         const snap = snapRows[0];
         if (!snap) throw ERR.CONFLICT("REVIEW_DIGEST_CHANGED", "没有有效审核快照");
+
+        // 3.5) 分支漂移守卫（B04 的发布端闭环）：prepare 后分支头再被修改 → 即使旧摘要匹配也拒绝。
+        // 此前该守卫只在 prepare-review 存在，持旧摘要者可绕过重审发布过期候选。
+        const { rows: drift } = await client.query<{ head_moved: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM branch_entries e JOIN change_request_items i
+               ON i.team_id = e.team_id AND i.asset_id = e.asset_id
+              AND e.branch_id = $1 AND i.change_request_id = $2
+              AND e.head_revision_id <> i.candidate_revision_id
+           ) AS head_moved`,
+          [cr.branch_id, crId]
+        );
+        if (drift[0]?.head_moved) {
+          throw ERR.CONFLICT("REVIEW_DIGEST_CHANGED", "分支内容在提交后已被修改，请重新提交 CR");
+        }
+
         const recomputed = computeReviewDigest({
           candidateDigest: snap.candidate_digest,
           evidenceDigests: [],
@@ -422,12 +438,19 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         );
         let channelId = channelRows[0]?.id;
         if (!channelId) {
+          // 并发发布可能同时走到这里（FOR UPDATE 锁不住不存在的行）：
+          // 幂等插入 + 重读，败者落到胜者已建的通道，随后被目标头失配守卫正常拒绝。
           const cid = newId();
           await client.query(
-            `INSERT INTO asset_channels (team_id, id, project_id, name) VALUES ($1,$2,$3,$4)`,
+            `INSERT INTO asset_channels (team_id, id, project_id, name) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (team_id, project_id, name) DO NOTHING`,
             [body.teamId, cid, cr.project_id, snap.channel]
           );
-          channelId = cid;
+          const { rows: again } = await client.query<{ id: string }>(
+            `SELECT id FROM asset_channels WHERE team_id = $1 AND project_id = $2 AND name = $3`,
+            [body.teamId, cr.project_id, snap.channel]
+          );
+          channelId = again[0]!.id;
         }
         const assetIds = snap.payload.revisions.map((r) => r.asset_id).sort();
         for (const aid of assetIds) {

@@ -1,4 +1,6 @@
-// ⌘K 命令栏（吸收 AgentPM CommandBar）：页面跳转 + 资产搜索；键盘优先，Esc 关闭。
+// ⌘K 命令栏（吸收 AgentPM CommandBar 双模）：页面跳转 + 资产搜索 + 自然语言意图（真实 LLM）。
+// 键盘优先，Esc 关闭。NL 意图由后端 /nl/parse 解析（规则 L1 / DeepSeek L2，带溯源），
+// 执行只映射到既有界面动作：跳转 / 搜索 / 预填登记表单——不产生新的服务端写权限。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { PageKey } from "../lib/shortcuts";
@@ -13,6 +15,21 @@ interface Command {
   run: () => void;
 }
 
+export interface NlIntentPayload {
+  intent: "navigate" | "search_assets" | "fill_register_form";
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string };
+  parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
+}
+
+export function describeIntent(i: NlIntentPayload): string {
+  if (i.intent === "navigate") {
+    const names: Record<string, string> = { dashboard: "总览", workbench: "工作台", activity: "团队动态", approvals: "审批队列" };
+    return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
+  }
+  if (i.intent === "search_assets") return `搜索资产：${i.params.query ?? ""}`;
+  return `预填登记表单${i.params.typeKeyHint ? `（类型含 "${i.params.typeKeyHint}"）` : ""}${i.params.name ? `，名称 "${i.params.name}"` : ""}`;
+}
+
 export function CommandBar({
   open,
   onClose,
@@ -20,6 +37,9 @@ export function CommandBar({
   onNavigate,
   teamId,
   onOpenAsset,
+  page,
+  seedQuery,
+  onExecuteNl,
 }: {
   open: boolean;
   onClose: () => void;
@@ -27,20 +47,39 @@ export function CommandBar({
   onNavigate: (page: PageKey) => void;
   teamId: string;
   onOpenAsset: (assetId: string) => void;
+  page: PageKey;
+  seedQuery?: { query: string; nonce: number };
+  onExecuteNl: (payload: NlIntentPayload) => boolean;  // 返回 true = 执行后关闭；false = 保持打开（如回填搜索）
 }) {
   const [query, setQuery] = useState("");
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [cursor, setCursor] = useState(0);
+  const [nl, setNl] = useState<NlIntentPayload | null>(null);
+  const [nlBusy, setNlBusy] = useState(false);
+  const [nlError, setNlError] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const seedRef = useRef(0);
 
   useEffect(() => {
     if (open) {
       setQuery("");
       setCursor(0);
       setAssets([]);
+      setNl(null);
+      setNlError("");
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open]);
+
+  // NL 执行后回填搜索词（如 search_assets 意图）
+  useEffect(() => {
+    if (seedQuery && seedQuery.nonce !== seedRef.current) {
+      seedRef.current = seedQuery.nonce;
+      setQuery(seedQuery.query);
+      setCursor(0);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  }, [seedQuery]);
 
   // 资产搜索防抖 250ms；空查询不出资产结果
   useEffect(() => {
@@ -79,10 +118,8 @@ export function CommandBar({
         onClose();
       },
     }));
-    const all = query.trim() ? assetCmds : pageCmds;
-    // 有查询时页面跳转仍保留在下方，资产结果置顶
-    return query.trim() ? [...assetCmds, ...pageCmds] : all;
-  }, [pages, assets, query, onNavigate, onClose]);
+    return query.trim() ? [...assetCmds, ...pageCmds] : pageCmds;
+  }, [pages, assets, query, onNavigate, onClose, onOpenAsset]);
 
   if (!open) return null;
 
@@ -91,16 +128,37 @@ export function CommandBar({
     if (cmd) cmd.run();
   };
 
+  async function parseNl() {
+    const text = query.trim();
+    if (!text || !teamId) return;
+    setNlBusy(true);
+    setNlError("");
+    setNl(null);
+    try {
+      const res = await api<NlIntentPayload>("/nl/parse", {
+        method: "POST",
+        body: { teamId, text, page },
+      });
+      setNl(res);
+    } catch (err) {
+      setNlError(err instanceof Error ? err.message : "解析失败");
+    } finally {
+      setNlBusy(false);
+    }
+  }
+
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-label="命令栏" onMouseDown={onClose}>
       <div className="commandbar" onMouseDown={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
           value={query}
-          placeholder="搜索资产，或输入页面名跳转…"
+          placeholder="搜索资产、跳转页面，或输入中文指令让 AI 解析…"
           onChange={(e) => {
             setQuery(e.target.value);
             setCursor(0);
+            setNl(null);
+            setNlError("");
           }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
@@ -109,16 +167,41 @@ export function CommandBar({
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               setCursor((c) => Math.max(c - 1, 0));
+            } else if (e.key === "Enter" && (e.altKey || e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              void parseNl();
             } else if (e.key === "Enter") {
               e.preventDefault();
-              execute(cursor);
+              if (nl) {
+                const shouldClose = onExecuteNl(nl);
+                setNl(null);
+                if (shouldClose) onClose();
+              } else {
+                execute(cursor);
+              }
             } else if (e.key === "Escape") {
               onClose();
             }
           }}
         />
+        {nlError && <div className="error-text" style={{ padding: "4px 14px" }}>{nlError}</div>}
+        {nl && (
+          <div className="nl-card">
+            <div className="nl-head">
+              <span className="nl-intent">{describeIntent(nl)}</span>
+              <span className={`chip ${nl.parser.kind === "llm" ? "" : "chip-dim"}`} title={nl.parser.note ?? ""}>
+                {nl.parser.kind === "llm" ? `LLM·${nl.parser.model ?? ""}${nl.parser.tokens ? ` · ${nl.parser.tokens} tokens` : ""}` : "规则解析"}
+              </span>
+            </div>
+            {nl.parser.note && <div className="nl-note">{nl.parser.note}</div>}
+            <div className="btn-row">
+              <button className="primary" onClick={() => { const shouldClose = onExecuteNl(nl); setNl(null); if (shouldClose) onClose(); }}>执行</button>
+              <button onClick={() => setNl(null)}>取消</button>
+            </div>
+          </div>
+        )}
         <ul className="commandlist">
-          {commands.length === 0 && <li className="command-empty">无匹配结果</li>}
+          {commands.length === 0 && !nl && <li className="command-empty">无匹配结果 — 可按 Ctrl+Enter 让 AI 解析这条指令</li>}
           {commands.map((c, i) => (
             <li key={c.id}>
               <button
@@ -136,6 +219,10 @@ export function CommandBar({
         <div className="commandbar-foot">
           <span>↑↓ 选择</span>
           <span>Enter 执行</span>
+          <button className="nl-trigger" onClick={() => void parseNl()} disabled={nlBusy || !query.trim()}>
+            {nlBusy ? "AI 解析中…" : "🤖 AI 解析（Ctrl+Enter）"}
+          </button>
+          <span style={{ flex: 1 }} />
           <span>Esc 关闭</span>
         </div>
       </div>

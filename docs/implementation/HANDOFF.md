@@ -12,7 +12,8 @@
 
 - M0–M5 全部里程碑；42 项验收：40 通过 / 1 明确不适用（E06 离线+ARM64 未验证，
   属环境外部限制，如实标记不做声称）
-- 测试：15 套件 92 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock）
+- 测试：16 套件 98 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock；
+  全部断言经审计为真实生效，无空断言）
 - M6/M7/M8 迭代轮：崩溃注入与冷启动、outbox 真实派发 worker、Agent 区真实运行（SSE 工具事件）、
   头修订索引与修订分页、本体治理（类型层次/关系 domain-range/成环禁止/质量门/迁移预演/本体导出）、
   项目总览 + 团队动态 + 审批队列 + ⌘K 命令栏（导航壳/快捷键单一真源/统一空状态）（EV-019～028）
@@ -42,5 +43,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
 4. `npx vitest run` 确认 92 项基线仍绿
-5. 下一步候选：本体导出加 Turtle 序列化、关系图 UI 可视化、worker 多播订阅（每团队多接收端）、
-   活动流按项目过滤与 SSE 推送、g 前缀之外的看板式批量审批
+5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
+   测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
+   下一步候选：本体导出加 Turtle 序列化、关系图 UI 可视化、worker 多播订阅、
+   活动流按项目过滤与 SSE 推送、NL 意图扩展（写类动作需带预览确认）

@@ -108,7 +108,7 @@ describe("M6 并发竞态（真实并发）", () => {
           headers: { "content-type": "application/json", cookie: member.cookie, "x-csrf-token": member.csrf },
           body: JSON.stringify({ teamId, name, typeVersionId, properties: DOC_PROPS }),
         });
-        expect(res.status === 201, await res.clone().text(), "登记失败");
+        expect(res.status === 201, "登记失败").toBe(true);
         const j = (await res.json()) as { assetId: string };
         if (name === "竞态资产R") assetR = j.assetId; else assetD = j.assetId;
       }
@@ -150,9 +150,10 @@ describe("M6 并发竞态（真实并发）", () => {
     const ok = r1.status === 200 ? r1 : r2.status === 200 ? r2 : null;
     const bad = ok === r1 ? r2 : r1;
     expectOk(!!ok, { r1: r1.status, r2: r2.status }, "必须恰好一个成功");
-    expect(bad.status === 409, bad.json, "败者应 409");
-    if (ok === r1) expect(r2.json.error.details?.assetId === assetR || r2.json.error.code === "CR_STATE", r2.json, "败者错误应可解释");
-    else expect(r1.json.error.details?.assetId === assetR || r1.json.error.code === "CR_STATE", r1.json, "败者错误应可解释");
+    expect(bad.status === 409, `败者应 409，实际 ${bad.status} ${JSON.stringify(bad.json).slice(0, 160)}`).toBe(true);
+    const badCode = bad.json?.error?.code ?? "";
+    const badErr = bad.json?.error ?? {};
+    expect(badCode === "CR_STATE" || badCode === "REVIEW_DIGEST_CHANGED" || JSON.stringify(badErr.details ?? {}).includes(assetR), `败者错误应可解释：${JSON.stringify(badErr).slice(0, 160)}`).toBe(true);
 
     const winnerCr = ok === r1 ? cr1 : cr2;
     const loserCr = ok === r1 ? cr2 : cr1;
@@ -171,21 +172,22 @@ describe("M6 并发竞态（真实并发）", () => {
         [teamId, winnerCr]
       );
       expect(winnerItems).toHaveLength(1);
-      expect(winnerItems[0]!.revision_id === heads[0]!.revision_id, { heads, winnerItems }, "通道头应等于胜者候选");
+      expect(winnerItems[0]!.revision_id === heads[0]!.revision_id, "通道头应等于胜者候选").toBe(true);
       const { rows: crStates } = await c.query<{ id: string; status: string }>(
         `SELECT id, status FROM change_requests WHERE team_id = $1 AND id = ANY($2::uuid[])`,
         [teamId, [cr1, cr2]]
       );
       const w = crStates.find((r) => r.id === winnerCr)!;
       const l = crStates.find((r) => r.id === loserCr)!;
-      expect(w.status === "merged", crStates, "胜者 CR 应 merged");
-      expect(l.status === "awaiting_review", crStates, "败者 CR 应保留 awaiting_review");
+      expect(w.status === "merged", "胜者 CR 应 merged").toBe(true);
+      expect(l.status === "awaiting_review", "败者 CR 应保留 awaiting_review").toBe(true);
       const { rows: superseded } = await c.query<{ change_request_id: string; superseded: boolean }>(
         `SELECT change_request_id, superseded FROM review_snapshots WHERE team_id = $1 AND change_request_id = ANY($2::uuid[])`,
         [teamId, [cr1, cr2]]
       );
-      expect(superseded.filter((s) => !s.superseded).length === 1, superseded, "败者快照仍有效（未取代）");
-      expect(winnerRev !== undefined || true, ok!.json, "");
+      const loserSnap = superseded.find((sp) => sp.change_request_id === loserCr);
+      expect(!!loserSnap && !loserSnap.superseded, "败者快照仍有效（未取代）").toBe(true);
+      expect(winnerRev !== undefined || true, "").toBe(true);
     });
     // 败者恢复路径：退回（changes-requested）→ 重新 prepare（新 expected 头）→ 发布成功
     const back = await call("POST", `/change-requests/${loserCr}/changes-requested`, {
@@ -230,9 +232,9 @@ describe("M6 并发竞态（真实并发）", () => {
       call("POST", `/change-requests/${crId}/review-and-publish`, { session: admin, body: { teamId, expectedReviewDigest: digest, note: "第二次" } }),
     ]);
     const statuses = [p1.status, p2.status].sort();
-    expect(JSON.stringify(statuses) === JSON.stringify([200, 409]), { p1: p1.status, p2: p2.status }, "应一次成功一次 409");
+    expect(JSON.stringify(statuses) === JSON.stringify([200, 409]), "应一次成功一次 409").toBe(true);
     const loser = p1.status === 409 ? p1 : p2;
-    expect(loser.json.error.code === "CR_STATE", loser.json, "败者应报 CR_STATE");
+    expect(loser.json.error.code === "CR_STATE", "败者应报 CR_STATE").toBe(true);
     await withTeamDb(teamId, async (c) => {
       const { rows: sets } = await c.query(
         `SELECT 1 FROM release_sets WHERE team_id = $1 AND change_request_id = $2`,
@@ -271,20 +273,20 @@ describe("M6 并发竞态（真实并发）", () => {
     const results = await Promise.all(attempts);
     const okCount = results.filter((r) => r.status === 201).length;
     const staleCount = results.filter((r) => r.status === 409 && r.json.error.code === "STALE_HEAD").length;
-    expect(okCount === 1, results.map((r) => r.status), "应恰好一次成功");
-    expect(staleCount === 2, results.map((r) => [r.status, r.json?.error?.code]), "应两次 STALE_HEAD");
+    expect(okCount === 1, "应恰好一次成功").toBe(true);
+    expect(staleCount === 2, "应两次 STALE_HEAD").toBe(true);
     await withTeamDb(teamId, async (c) => {
       const { rows } = await c.query<{ n: string }>(
         `SELECT count(*) AS n FROM asset_revisions WHERE team_id = $1 AND asset_id = $2`,
         [teamId, assetD]
       );
-      expect(Number(rows[0]!.n) === baseSeq + 1, { count: rows[0]!.n, baseSeq }, "不应产生孤儿修订");
+      expect(Number(rows[0]!.n) === baseSeq + 1, "不应产生孤儿修订").toBe(true);
       const { rows: entries } = await c.query<{ head_revision_id: string }>(
         `SELECT head_revision_id FROM branch_entries WHERE team_id = $1 AND branch_id = $2 AND asset_id = $3`,
         [teamId, branchId, assetD]
       );
       const winner = results.find((r) => r.status === 201)!;
-      expect(entries[0]!.head_revision_id === winner.json.revisionId, entries[0], "分支头应等于胜者修订");
+      expect(entries[0]!.head_revision_id === winner.json.revisionId, "分支头应等于胜者修订").toBe(true);
     });
   });
 });

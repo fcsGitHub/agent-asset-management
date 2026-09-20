@@ -56,6 +56,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         `INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'admin')`,
         [teamId, userId]
       );
+      // 团队治理设置默认行：单人例外等开关的文档化 UPDATE 路径依赖该行存在。
+      // team_settings 是租户 RLS 表，先在本事务内建立租户上下文再插入。
+      await client.query(`SELECT set_config('app.team_id', $1, true)`, [teamId]);
+      await client.query(
+        `INSERT INTO team_settings (team_id) VALUES ($1) ON CONFLICT (team_id) DO NOTHING`,
+        [teamId]
+      );
     });
 
     const sessionId = await createAuthSession(userId);

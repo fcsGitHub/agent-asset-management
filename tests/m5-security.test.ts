@@ -48,7 +48,7 @@ describe("E02 安全负例（真实集成）", () => {
       const res = await fetch(`${BASE}/blobs/${encodeURIComponent(c)}?teamId=${teamId}`, {
         headers: { cookie: user.cookie },
       });
-      expect(res.status === 404, `穿越样例 ${c} → ${res.status}`, "应 404");
+      expect(res.status === 404, "应 404").toBe(true);
     }
   });
 
@@ -59,13 +59,13 @@ describe("E02 安全负例（真实集成）", () => {
     const res = await fetch(`${BASE}/uploads?teamId=${teamId}`, {
       method: "POST", headers: { cookie: user.cookie, "x-csrf-token": user.csrf }, body: form,
     });
-    expect(res.status === 201, res.status, "正常内容应可上传");
+    expect(res.status === 201, "正常内容应可上传").toBe(true);
     const { digest } = (await res.json()) as { digest: string };
     // 内容库目录里不存在以用户文件名命名的文件
     const blobRoot = resolve(process.env.BLOBSTORE_ROOT ?? "./data/blobs");
     const entries = await readdir(join(blobRoot, teamId));
-    expect(!entries.some((f) => f.includes("evil")), entries.filter((f) => f.includes("evil")), "用户文件名不得成为存储路径");
-    expect(entries.includes(digest), entries, "对象键应为摘要");
+    expect(!entries.some((f) => f.includes("evil")), "用户文件名不得成为存储路径").toBe(true);
+    expect(entries.includes(digest), "对象键应为摘要").toBe(true);
   });
 
   it("下载越权：非本团队成员无法下载 blob；伪造 teamId 无效", async () => {
@@ -83,17 +83,17 @@ describe("E02 安全负例（真实集成）", () => {
     const forged = await fetch(`${BASE}/blobs/${digest}?teamId=${teamId}`, {
       headers: { cookie: outsider.cookie },
     });
-    expect(forged.status === 404, forged.status, "外人下载应 404（不泄露存在性）");
+    expect(forged.status === 404, "外人下载应 404（不泄露存在性）").toBe(true);
   });
 
   it("密钥不泄露：API 响应不含 DEEPSEEK key；配置端点不存在", async () => {
     // 健康检查与错误响应不应回显任何配置
     const health = await (await fetch(`http://127.0.0.1:${PORT}/healthz`)).text();
-    expect(!health.includes("sk-"), health, "健康检查泄露");
+    expect(!health.includes("sk-"), "健康检查泄露").toBe(true);
     const nf = await (await fetch(`${BASE}/config`, { headers: { cookie: user.cookie } })).text();
-    expect(!nf.includes("sk-"), nf, "未知端点不应回显配置");
+    expect(!nf.includes("sk-"), "未知端点不应回显配置").toBe(true);
     const notFound = await (await fetch(`${BASE}/.env`, { headers: { cookie: user.cookie } })).text();
-    expect(!notFound.includes("DEEPSEEK"), notFound, "不得暴露 .env 内容");
+    expect(!notFound.includes("DEEPSEEK"), "不得暴露 .env 内容").toBe(true);
   });
 
   it("会话撤销：登出后原 cookie 立即失效", async () => {
@@ -103,12 +103,12 @@ describe("E02 安全负例（真实集成）", () => {
     });
     const s = sessionOf(login);
     const me1 = await fetch(`${BASE}/auth/me`, { headers: { cookie: s.cookie } });
-    expect(me1.status === 200, me1.status, "登录后应可用");
+    expect(me1.status === 200, "登录后应可用").toBe(true);
     await fetch(`${BASE}/auth/logout`, {
       method: "POST", headers: { cookie: s.cookie, "x-csrf-token": s.csrf },
     });
     const me2 = await fetch(`${BASE}/auth/me`, { headers: { cookie: s.cookie } });
-    expect(me2.status === 401, me2.status, "登出后应 401");
+    expect(me2.status === 401, "登出后应 401").toBe(true);
   });
 
   it("blob 下载响应为 octet-stream（不按用户输入的内容类型渲染）", async () => {
@@ -119,6 +119,6 @@ describe("E02 安全负例（真实集成）", () => {
     });
     const { digest } = (await up.json()) as { digest: string };
     const dl = await fetch(`${BASE}/blobs/${digest}?teamId=${teamId}`, { headers: { cookie: user.cookie } });
-    expect((dl.headers.get("content-type") ?? "").includes("octet-stream"), dl.headers.get("content-type"), "应强制 octet-stream");
+    expect((dl.headers.get("content-type") ?? "").includes("octet-stream"), "应强制 octet-stream").toBe(true);
   });
 });

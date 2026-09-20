@@ -2,6 +2,7 @@
 // 覆盖验收：C02/C03/C04/C05 + 结题包内容校验（C06 数据层）。
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildServer } from "@taw/api/server";
+import { Client } from "pg";
 import type { FastifyInstance } from "fastify";
 import { randomBytes } from "node:crypto";
 
@@ -46,8 +47,21 @@ async function upload(session: Session, teamId: string, content: string, name: s
     method: "POST", headers: { cookie: session.cookie, "x-csrf-token": session.csrf }, body: form,
   });
   const json = (await res.json()) as { digest?: string };
-  expect(res.status === 201 && !!json.digest, json, "上传失败");
+  expect(res.status === 201 && !!json.digest, "上传失败").toBe(true);
   return json.digest!;
+}
+
+async function withTeamDb<T>(teamId: string, fn: (c: Client) => Promise<T>): Promise<T> {
+  const c = new Client({ connectionString: process.env.DATABASE_URL ?? "postgres://taw_app:taw_app_dev@127.0.0.1:5437/taw" });
+  await c.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.team_id', $1, true)", [teamId]);
+    return await fn(c);
+  } finally {
+    await c.query("ROLLBACK").catch(() => undefined);
+    await c.end();
+  }
 }
 
 describe("M3 项目闭环（真实集成）", () => {
@@ -149,24 +163,33 @@ describe("M3 项目闭环（真实集成）", () => {
     expectOk(wi.status === 201, wi.json, "任务创建失败");
     workItemId = wi.json.workItemId;
 
-    // 依赖环负例
+    // 依赖链：B→A，C→B，D→[C,A]。创建期依赖边只指向既有任务，
+    // 环在结构上不可能形成（后端仍有 DFS 兜底）；此处如实验证链的持久化。
     const wi2 = await call("POST", `/projects/${projectId}/work-items`, {
       session: member, body: { teamId, title: "任务B", dependsOnIds: [workItemId] },
     });
-    const cycle = await call("POST", `/projects/${projectId}/work-items`, {
+    const chain = await call("POST", `/projects/${projectId}/work-items`, {
       session: member, body: { teamId, title: "任务C", dependsOnIds: [wi2.json.workItemId] },
     });
-    const cycleClose = await call("POST", `/projects/${projectId}/work-items`, {
-      session: member, body: { teamId, title: "任务D", dependsOnIds: [cycle.json.workItemId, workItemId] },
+    const chainEnd = await call("POST", `/projects/${projectId}/work-items`, {
+      session: member, body: { teamId, title: "任务D", dependsOnIds: [chain.json.workItemId, workItemId] },
     });
-    expect(cycleClose.status === 422, cycleClose.json, "依赖环应被拒绝");
+    expectOk(chainEnd.status === 201, chainEnd.json, "依赖链创建失败");
+    await withTeamDb(teamId, async (cx) => {
+      const { rows: deps } = await cx.query<{ work_item_id: string; depends_on_id: string }>(
+        `SELECT work_item_id, depends_on_id FROM work_item_deps WHERE team_id = $1 AND work_item_id = $2 ORDER BY depends_on_id`,
+        [teamId, chainEnd.json.workItemId]
+      );
+      expect(deps.length === 2, `任务D应有两条依赖边，实际 ${deps.length}`).toBe(true);
+      expect(deps.some((d) => d.depends_on_id === chain.json.workItemId) && deps.some((d) => d.depends_on_id === workItemId), "依赖边指向错误").toBe(true);
+    });
 
     // 任务完成 ≠ 验收通过（C03 反例流程）
     const done = await call("POST", `/work-items/${workItemId}/status`, { session: member, body: { teamId, status: "done" } });
     expectOk(done.status === 200, done.json, "任务完成失败");
     const matrix0 = await call("GET", `/projects/${projectId}/traceability?teamId=${teamId}`, { session: admin });
     const row0 = matrix0.json.find((m: any) => m.requirement.id === reqId);
-    expect(row0.acceptance === null, row0, "任务完成后不应自动出现验收记录");
+    expect(row0.acceptance === null, "任务完成后不应自动出现验收记录").toBe(true);
   });
 
   it("测试运行：先失败后通过（证据绑定精确修订）", async () => {
@@ -181,7 +204,7 @@ describe("M3 项目闭环（真实集成）", () => {
     const badAcc = await call("POST", `/projects/${projectId}/acceptance`, {
       session: admin, body: { teamId, requirementRevisionId: reqRev2, verdict: "pass", evidenceRunId: failRun.json.testRunId },
     });
-    expect(badAcc.status === 422, badAcc.json, "失败证据应被拒绝");
+    expect(badAcc.status === 422, "失败证据应被拒绝").toBe(true);
 
     const passRun = await call("POST", `/projects/${projectId}/test-runs`, {
       session: member,
@@ -212,7 +235,7 @@ describe("M3 项目闭环（真实集成）", () => {
         artifacts: [{ digest: d3, role: "implementation", originalName: "model3.txt", mediaType: "text/plain", size: 30 }] },
     });
     const gate2 = await call("POST", `/projects/${projectId}/gate-reviews`, { session: admin, body: { teamId, gate: "closure" } });
-    expect(gate2.status === 201 && gate2.json.verdict === "blocked", gate2.json, "制品更新后结题门应阻塞");
+    expect(gate2.status === 201 && gate2.json.verdict === "blocked", "制品更新后结题门应阻塞").toBe(true);
     expect(JSON.stringify(gate2.json.blockers)).toContain("证据失效", gate2.json);
   });
 
@@ -224,7 +247,7 @@ describe("M3 项目闭环（真实集成）", () => {
     expectOk(req2.status === 201, req2.json, "需求创建失败");
 
     const gate1 = await call("POST", `/projects/${projectId}/gate-reviews`, { session: admin, body: { teamId, gate: "closure" } });
-    expect(gate1.json.verdict === "blocked", gate1.json, "缺验收应阻塞");
+    expect(gate1.json.verdict === "blocked", "缺验收应阻塞").toBe(true);
     expect(JSON.stringify(gate1.json.blockers)).toContain("没有任何验收记录", gate1.json);
 
     // 成员不能记录豁免
@@ -232,14 +255,14 @@ describe("M3 项目闭环（真实集成）", () => {
       session: member, body: { teamId, requirementRevisionId: req2.json.revisionId, verdict: "waived", reason: "x",
         waiverExpiresAt: new Date(Date.now() + 86400000).toISOString() },
     });
-    expect(waiveByMember.status === 403, waiveByMember.json, "成员豁免应 403");
+    expect(waiveByMember.status === 403, "成员豁免应 403").toBe(true);
 
     // 管理员豁免（带期限），缺原因被拒
     const waiveNoReason = await call("POST", `/projects/${projectId}/acceptance`, {
       session: admin, body: { teamId, requirementRevisionId: req2.json.revisionId, verdict: "waived",
         waiverExpiresAt: new Date(Date.now() + 86400000).toISOString() },
     });
-    expect(waiveNoReason.status === 422, waiveNoReason.json, "豁免缺原因应 422");
+    expect(waiveNoReason.status === 422, "豁免缺原因应 422").toBe(true);
 
     const waive = await call("POST", `/projects/${projectId}/acceptance`, {
       session: admin, body: { teamId, requirementRevisionId: req2.json.revisionId, verdict: "waived",
@@ -253,19 +276,19 @@ describe("M3 项目闭环（真实集成）", () => {
     expectOk(matrix.status === 200, matrix.json, "矩阵获取失败");
     const row = matrix.json.find((m: any) => m.requirement.id === reqId);
     expectOk(!!row, matrix.json, "矩阵缺行");
-    expect(row.workItems.length >= 1 && row.workItems[0].title === "实现并交付接口 v2", row, "任务链缺失");
-    expect(row.workItems[0].deliverables && row.workItems[0].deliverables[0].revisionId === r2, row, "交付物链缺失");
-    expect(row.testRuns.length >= 1, row, "测试链缺失");
-    expect(row.testRuns[0].evidence_current === false, row, "r3 之后旧证据应标记为过期");
-    expect(row.acceptance.verdict === "pass", row, "验收链缺失");
+    expect(row.workItems.length >= 1 && row.workItems[0].title === "实现并交付接口 v2", "任务链缺失").toBe(true);
+    expect(row.workItems[0].deliverables && row.workItems[0].deliverables[0].revisionId === r2, "交付物链缺失").toBe(true);
+    expect(row.testRuns.length >= 1, "测试链缺失").toBe(true);
+    expect(row.testRuns[0].evidence_current === false, "r3 之后旧证据应标记为过期").toBe(true);
+    expect(row.acceptance.verdict === "pass", "验收链缺失").toBe(true);
   });
 
   it("C06：结题包数据完整（基线/绑定/发布/豁免/遗留）", async () => {
     const pkg = await call("GET", `/projects/${projectId}/closure-package?teamId=${teamId}`, { session: admin });
     expectOk(pkg.status === 200, pkg.json, "结题包失败");
-    expect(pkg.json.requirementBaselines.length >= 1, pkg.json, "缺基线");
-    expect(pkg.json.gateReviews.length >= 2, pkg.json, "缺阶段门记录");
-    expect(pkg.json.waivers.length === 1 && pkg.json.waivers[0].approver, pkg.json, "豁免留痕缺失");
-    expect(pkg.json.assetBindings !== undefined && pkg.json.openIssues !== undefined, pkg.json, "包字段缺失");
+    expect(pkg.json.requirementBaselines.length >= 1, "缺基线").toBe(true);
+    expect(pkg.json.gateReviews.length >= 2, "缺阶段门记录").toBe(true);
+    expect(pkg.json.waivers.length === 1 && pkg.json.waivers[0].approver, "豁免留痕缺失").toBeTruthy();
+    expect(pkg.json.assetBindings !== undefined && pkg.json.openIssues !== undefined, "包字段缺失").toBe(true);
   });
 });

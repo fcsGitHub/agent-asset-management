@@ -257,3 +257,42 @@
   ⌘K 输入"轨道"资产置顶 → Enter 直开资产详情；? 浮层；g→d 跳总览均通过。
 - 回归：`npx vitest run` 15 套件 92 项全部通过（期间放宽词表质量门以兼容 M6 扩展包
   附加属性词表约定，质量门语义更新为 <name>/<name>Unit 双声明任一即可）。
+
+### EV-029 ｜ 2026-09-20 ｜ M9 真实 LLM 深化：NL 命令解析（tests/m9-llm，6 项）
+- 新端点 POST /nl/parse：解析器链 = L1 规则（确定性短命令，零模型成本）→ L2 真实 DeepSeek
+  （严格 JSON + zod 白名单校验，意图仅 navigate / search_assets / fill_register_form，
+  全部映射到既有只读/表单预填动作，不新增服务端写权限面）。
+  溯源如实返回 parser.kind/model/tokens；LLM 不可达或输出越白名单时回退"按原文搜索"
+  并在 note 中如实标注（注入式指令在真实运行中模型自行抵抗返回合法意图，回退路径亦被覆盖）。
+- 浏览器实测（真实 DeepSeek）：⌘K 输入自然语言 → Ctrl+Enter 解析 → 意图卡（LLM·deepseek-chat
+  · 229/244 tokens）→ 执行：search_assets 回填关键词并呈现资产结果；
+  fill_register_form 跳转登记页并预填类型（document）与名称。截图 m9-ui-nl-search.png、
+  m9-ui-nl-register.png。
+
+### EV-030 ｜ 2026-09-20 ｜ M9 语义候选抽取接真实 LLM 增强 + 诚实降级
+- services/semantic-worker/main.py：/extract_candidates 增加 enhance_llm——调用真实 DeepSeek
+  （OpenAI 兼容，stdlib urllib 无新依赖，key 只从环境读取）提出候选关系；
+  词表约束 + 端点必须原文可定位（不采信模型编造的词）+ 与规则候选合并去重；
+  LLM 候选同样 status=candidate，extractor_version 如实追加 "+llm/deepseek"；
+  无 key / 上游失败 → 警告明确、回退规则候选、不伪造 LLM 候选。
+- API /semantic/extract 透传 enhanceLlm，超时放宽至 45s。
+- 同名冲突修复（真产品缺陷）：semantica ConflictDetector 的 value 冲突按"同一实体 id、
+  不同来源"分组，此前按不同 entity_id 送检永远检不出冲突；改为按名字作为分组键送检
+  （候选场景中同名即候选同一现实实体，仅检测不合并），m5-semantic 同名冲突用例转真后通过。
+
+### EV-031 ｜ 2026-09-20 ｜ 测试诚实化：空洞断言清零，暴露并修复 5 个真产品缺陷
+- 审计发现 vitest 中不带匹配器的裸 `expect(cond, msg)` 不做任何断言（空断言），
+  全仓 10 个测试文件共 80 处用脚本统一改写为真实断言（`expect(cond, msg).toBe(true)`），
+  m6-concurrency 内联两处与 m8 一处人工改写。
+- 转真后暴露并逐一定位修复的真产品缺陷：
+  1) 发布事务缺少分支漂移守卫：prepare 后分支被改，持旧审核摘要仍可发布过期候选
+     （B04 守卫只存在于 prepare-review）→ review-and-publish 补齐同一 head_moved 检查；
+  2) 并发首发布竞态 500：两个 CR 同时发布到尚不存在的通道时，通道 INSERT 撞唯一约束
+     → 改为 ON CONFLICT DO NOTHING + 重读，败者被目标头失配守卫正常 409；
+  3) 单人例外配置路径失效：team_settings 无播种行，文档化的 UPDATE 静默零行
+     → 注册事务内建立租户上下文并播种默认行；
+  4) unknown_reconcile 从未生效：工具网关把 UnknownOutcomeError 吞成普通错误回喂模型
+     → 网关先落审计记录再重抛，D06 对账语义端到端真实生效（真实 LLM 验证）；
+  5) m2 STALE_HEAD 负例传入的是新头而非旧头（幽灵修订级联 4 个用例）等测试侧错误一并修正；
+  m6-worker 补"排干遗留未投递事件"基线步骤，消除对干净 outbox 的隐含假设。
+- 全量：`npx vitest run` 16 套件 98 项全部通过（每一条断言都真实生效）。

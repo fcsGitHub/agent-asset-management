@@ -3,6 +3,7 @@
 // 覆盖验收：D01（两条典型任务）/ D02（不能调高权发布）/ D04（预算与取消）/ D06（未知外部结果对账）。
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildServer } from "@taw/api/server";
+import { Client } from "pg";
 import type { FastifyInstance } from "fastify";
 import { randomBytes } from "node:crypto";
 
@@ -123,7 +124,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
     expect(names).toContain("asset.search");
     expect(names).toContain("proposal.create");
     for (const inv of run.invocations) {
-      expect(inv.status === "ok", inv, "所有工具调用应成功");
+      expect(inv.status === "ok", "所有工具调用应成功").toBe(true);
     }
     // 提案真实落库
     const { Client } = await import("pg");
@@ -135,7 +136,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       `SELECT id, kind, status FROM agent_proposals WHERE run_id = $1`, [runUuid]);
     await c.query("ROLLBACK");
     await c.end();
-    expect(rows.length >= 1 && rows[0].kind === "asset_registration" && rows[0].status === "pending", rows, "提案应落库且待审");
+    expect(rows.length >= 1 && rows[0].kind === "asset_registration" && rows[0].status === "pending", "提案应落库且待审").toBe(true);
   }, 200000);
 
   it("D01b：真实模型完成 Issue 处理任务（创建 Issue 落库）", async () => {
@@ -146,7 +147,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       { maxToolCalls: 10, maxTokens: 20000 });
     const run = await waitForRun(member, teamId, runUuid);
     expectOk(run.status === "completed", run, "Issue 处理运行应完成");
-    expect(run.invocations.some((i: { name: string }) => i.name === "issue.create"), run.invocations, "应调用 issue.create");
+    expect(run.invocations.some((i: { name: string }) => i.name === "issue.create"), "应调用 issue.create").toBe(true);
     const { Client } = await import("pg");
     const c = new Client({ connectionString: process.env.DATABASE_URL });
     await c.connect();
@@ -157,7 +158,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       [projectId]);
     await c.query("ROLLBACK");
     await c.end();
-    expect(rows[0]?.status === "open", rows, "Issue 应存在且 open");
+    expect(rows[0]?.status === "open", "Issue 应存在且 open").toBe(true);
   }, 200000);
 
   it("D02：Agent 不能调用高权发布动作；注入式提示被网关拒绝且无发布副作用", async () => {
@@ -169,7 +170,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
     const publishCalls = run.invocations.filter((i: { name: string }) =>
       ["review-and-publish", "review_and_publish", "release.publish"].includes(i.name));
     for (const pc of publishCalls) {
-      expect(pc.status === "denied", pc, "发布类调用必须被拒绝");
+      expect(pc.status === "denied", "发布类调用必须被拒绝").toBe(true);
     }
     const { Client } = await import("pg");
     const c = new Client({ connectionString: process.env.DATABASE_URL });
@@ -179,7 +180,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
     const { rows: rels } = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM release_sets`);
     await c.query("ROLLBACK");
     await c.end();
-    expect(rels[0]?.n === "0", rels, "不应产生任何发布集");
+    expect(rels[0]?.n === "0", "不应产生任何发布集").toBe(true);
     // 允许清单确实不含高权动作
     const me = await call("GET", `/runs/${runUuid}?teamId=${teamId}`, { session: member });
     void me;
@@ -190,8 +191,8 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       `请分别用 asset.search 检索关键词 "模型"、"引擎"、"文档"、"测试" 四次，然后总结结果。`,
       { maxToolCalls: 1, maxTokens: 20000 });
     const run = await waitForRun(member, teamId, runUuid);
-    expect(run.status === "blocked", run, "预算达限应 blocked");
-    expect(run.used.toolCalls >= 1, run, "应有工具调用消耗");
+    expect(run.status === "blocked", "预算达限应 blocked").toBe(true);
+    expect(run.used.toolCalls >= 1, "应有工具调用消耗").toBe(true);
   }, 240000);
 
   it("D04b：取消传播到模型调用，运行进入 cancelled", async () => {
@@ -210,7 +211,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
     const cancel = await call("POST", `/runs/${runUuid}/cancel`, { session: member, body: { teamId, reason: "不再需要" } });
     expectOk(cancel.status === 200, cancel.json, "取消请求失败");
     const run = await waitForRun(member, teamId, runUuid);
-    expect(run.status === "cancelled", run, "运行应进入 cancelled");
+    expect(run.status === "cancelled", "运行应进入 cancelled").toBe(true);
   }, 240000);
 
   it("D06：外部副作用后结果未知 → unknown_reconcile，不盲目重试", async () => {
@@ -218,7 +219,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       `请调用 external.notify 工具，参数 message 填 "发布前通知"，failMode 填 "timeout_after_effect"。然后说明发生了什么。`,
       { maxToolCalls: 6, maxTokens: 20000 });
     const run = await waitForRun(member, teamId, runUuid);
-    expect(run.status === "unknown_reconcile", run, "应进入对账状态");
+    expect(run.status === "unknown_reconcile", `应进入对账状态，实际 ${run.status}: ${String(run.error ?? "").slice(0, 160)}`).toBe(true);
     // 副作用已持久化（agent_proposals 中的外部标记）
     const { Client } = await import("pg");
     const c = new Client({ connectionString: process.env.DATABASE_URL });
@@ -229,7 +230,7 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       `SELECT type FROM run_events WHERE run_id = $1 AND type = 'unknown_reconcile'`, [runUuid]);
     await c.query("ROLLBACK");
     await c.end();
-    expect(ev.length === 1, ev, "应记录 unknown_reconcile 事件");
+    expect(ev.length === 1, "应记录 unknown_reconcile 事件").toBe(true);
 
     // 恢复检查：不重新触发
     const rec = await call("POST", `/runs/${runUuid}/recover`, { session: admin, body: { teamId } });
@@ -250,12 +251,28 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       await c.end();
       return rows;
     })();
-    expect(runs.length >= 1, runs, "需要一个已完成运行");
+    expect(runs.length >= 1, "需要一个已完成运行").toBe(true);
     const completed = runs[0]!.id;
+    // 事件 seq 是全库序列（长期运行的库不会从 1 开始）：
+    // 取该运行真实的最小 seq，断言 Last-Event-ID=最小 seq 时重放严格从其后开始。
+    const seqs = await (() => {
+      const c = new Client({ connectionString: process.env.DATABASE_URL });
+      return c.connect().then(async () => {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('app.team_id', $1, true)", [teamId]);
+        const { rows } = await c.query<{ seq: string }>(
+          `SELECT seq FROM run_events WHERE run_id = $1 ORDER BY seq`, [completed]);
+        await c.query("ROLLBACK");
+        await c.end();
+        return rows.map((r) => Number(r.seq));
+      });
+    })();
+    expect(seqs.length >= 2, "运行至少有两个事件").toBe(true);
+    const firstSeq = seqs[0]!;
     const res = await fetch(`${BASE}/runs/${completed}/events?teamId=${teamId}`, {
-      headers: { cookie: admin.cookie, "last-event-id": "1" },
+      headers: { cookie: admin.cookie, "last-event-id": String(firstSeq) },
     });
-    expect(res.status === 200, res.status, "SSE 应 200");
+    expect(res.status === 200, "SSE 应 200").toBe(true);
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let text = "";
@@ -267,8 +284,9 @@ describe("M4 真实 LLM Agent（DeepSeek，真实集成）", () => {
       if (text.includes("event: done")) break;
     }
     await reader.cancel().catch(() => undefined);
-    expect(text.includes("id: 2"), text.slice(0, 200), "应从 seq=2 续接（跳过 seq=1）");
-    expect(text.includes("run_started") === false || text.includes("id: 2"), "重放应尊重 Last-Event-ID");
+    const ids = [...text.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+    expect(ids.length >= 1, "应有重放事件").toBe(true);
+    expect(Math.min(...ids) > firstSeq, `续接应严格跳过 seq=${firstSeq}，实际最小 ${Math.min(...ids)}`).toBe(true);
   }, 60000);
 
   it("真实模型错误处理：错误 key → 运行 failed 且错误明确", async () => {

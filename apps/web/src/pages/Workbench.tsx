@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, uploadFile } from "../api";
 import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
-import { CommandBar } from "../components/CommandBar";
+import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
 
@@ -39,6 +39,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [page, setPage] = useState<PageKey>("dashboard");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [cmdSeed, setCmdSeed] = useState<{ query: string; nonce: number }>({ query: "", nonce: 0 });
+  const [registerHint, setRegisterHint] = useState<{ name?: string; typeKeyHint?: string; nonce: number }>({ nonce: 0 });
 
   useEffect(() => {
     void api<ProjectInfo[]>("/projects")
@@ -97,6 +99,34 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
     setWsView("assets");
     setPage("workbench");
     setMobileView("workspace");
+  }, []);
+
+  // NL 意图执行：只映射到既有界面动作（跳转 / 命令栏搜索 / 预填登记表单）。
+  // 解析来自 POST /nl/parse（规则 L1 或真实 DeepSeek L2），此处不做二次解释。
+  const executeNlIntent = useCallback((payload: NlIntentPayload): boolean => {
+    if (payload.intent === "navigate" && payload.params.page) {
+      setPage(payload.params.page);
+      return true;
+    }
+    if (payload.intent === "search_assets") {
+      // 保持命令栏打开：回填解析出的关键词，直接呈现资产结果
+      setCmdSeed({ query: payload.params.query ?? "", nonce: Date.now() });
+      setCmdOpen(true);
+      return false;
+    }
+    if (payload.intent === "fill_register_form") {
+      setRegisterHint({
+        name: payload.params.name,
+        typeKeyHint: payload.params.typeKeyHint,
+        nonce: Date.now(),
+      });
+      setPage("workbench");
+      setWsView("register");
+      setAssetId("");
+      setMobileView("workspace");
+      return true;
+    }
+    return true;
   }, []);
 
   async function logout() {
@@ -313,6 +343,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             ) : (
               <AssetRegister
                 project={project}
+                hint={registerHint}
                 onDone={() => {
                   setWsView("assets");
                   setMobileView("workspace");
@@ -332,6 +363,9 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         onNavigate={(p) => setPage(p)}
         teamId={project?.teamId ?? ""}
         onOpenAsset={openAssetFromSearch}
+        page={page}
+        seedQuery={cmdSeed}
+        onExecuteNl={executeNlIntent}
       />
       <ShortcutsOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
@@ -1114,7 +1148,7 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
   );
 }
 
-function AssetRegister({ project, onDone }: { project?: ProjectInfo; onDone: () => void }) {
+function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?: { name?: string; typeKeyHint?: string; nonce: number }; onDone: () => void }) {
   const [types, setTypes] = useState<TypeInfo[]>([]);
   const [typeKey, setTypeKey] = useState("");
   const [name, setName] = useState("");
@@ -1128,6 +1162,22 @@ function AssetRegister({ project, onDone }: { project?: ProjectInfo; onDone: () 
     if (!project) return;
     void api<TypeInfo[]>("/types", { query: { teamId: project.teamId } }).then(setTypes).catch(() => undefined);
   }, [project]);
+
+  // NL 意图预填（来自 ⌘K AI 解析）：按 typeKeyHint 模糊匹配类型、填名称；只填表单，不自动保存。
+  // types 可能晚于 hint 到位（类型表异步加载），故依赖中包含 types 以便就绪后重放匹配。
+  const hintNonce = hint?.nonce ?? 0;
+  useEffect(() => {
+    if (!hintNonce || !hint) return;
+    if (hint.typeKeyHint) {
+      const kw = hint.typeKeyHint.toLowerCase();
+      const hit =
+        types.find((t) => t.type_key.toLowerCase() === kw) ??
+        types.find((t) => t.type_key.toLowerCase().includes(kw)) ??
+        types.find((t) => t.title.includes(hint.typeKeyHint!));
+      if (hit) setTypeKey(hit.type_key);
+    }
+    if (hint.name) setName(hint.name);
+  }, [hintNonce, types]);
 
   const type = types.find((t) => t.type_key === typeKey);
   const fields = useMemo(() => Object.entries(type?.json_schema.properties ?? {}), [type]);

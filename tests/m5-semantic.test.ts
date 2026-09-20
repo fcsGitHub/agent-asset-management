@@ -105,12 +105,12 @@ describe("M5 语义与检索（真实 worker 集成）", () => {
         ],
       },
     });
-    expect(res.status === 200, JSON.stringify(res.json).slice(0, 300));
+    expect(res.status === 200).toBe(true);
     const j = res.json;
-    expect(j.candidate_entities.length >= 3, j, "实体候选不足");
-    expect(j.candidate_relations.some((r: any) => r.type === "dependsOn" && r.evidence.matched_pattern === "依赖于"), j, "dependsOn 候选缺失");
+    expect(j.candidate_entities.length >= 3, "实体候选不足").toBe(true);
+    expect(j.candidate_relations.some((r: any) => r.type === "dependsOn" && r.evidence.matched_pattern === "依赖于"), "dependsOn 候选缺失").toBe(true);
     // 来源：证据锚点携带修订引用；抽取器版本固定
-    expect(j.evidence_anchors.every((e: any) => e.revision_ref === `${teamId}/model-a/rev1`), j, "来源引用缺失");
+    expect(j.evidence_anchors.every((e: any) => e.revision_ref === `${teamId}/model-a/rev1`), "来源引用缺失").toBe(true);
     expect(String(j.extractor_version)).toContain("semantica/0.6.8", j);
   });
 
@@ -126,12 +126,12 @@ describe("M5 语义与检索（真实 worker 集成）", () => {
         ],
       },
     });
-    expect(res.status === 200, JSON.stringify(res.json).slice(0, 300));
+    expect(res.status === 200).toBe(true);
     // 单位冲突被真实检测（m 与 km）
-    expect(res.json.conflicts.length >= 1, res.json, "单位冲突应被检出");
+    expect(res.json.conflicts.length >= 1, "单位冲突应被检出").toBe(true);
     // 同名多实体：结构上保持独立，不自动合并
     const names = res.json.unresolved_entities as string[];
-    expect(names.includes("轨道传播模型A") || res.json.conflicts.length >= 1, res.json, "同名应进消歧或冲突");
+    expect(names.includes("轨道传播模型A") || res.json.conflicts.length >= 1, "同名应进消歧或冲突").toBe(true);
   });
 
   it("D07-单位：非法单位被结构校验拒绝（真实词表）", async () => {
@@ -144,8 +144,8 @@ describe("M5 语义与检索（真实 worker 集成）", () => {
         ],
       },
     });
-    expect(res.status === 200, JSON.stringify(res.json).slice(0, 300));
-    expect(res.json.structural_errors.some((e: string) => e.includes("positionUnit")), res.json, "非法单位应报结构错误");
+    expect(res.status === 200).toBe(true);
+    expect(res.json.structural_errors.some((e: string) => e.includes("positionUnit")), "非法单位应报结构错误").toBe(true);
   });
 
   it("D08：检索与语义接口先查权限，外人不可见", async () => {
@@ -154,10 +154,10 @@ describe("M5 语义与检索（真实 worker 集成）", () => {
       session: outsider,
       body: { teamId, revisionRef: "x/y/z", text: "测试", entityHints: [] },
     });
-    expect(ext.status === 404, ext.json, "外人语义抽取应 404");
+    expect(ext.status === 404, "外人语义抽取应 404").toBe(true);
     // 外人搜索团队资产 → 空或 404（不泄露）
     const search = await call("GET", `/assets/search?teamId=${teamId}`, { session: outsider });
-    expect(search.status === 404 || (search.json as any[]).length === 0, search.json, "外人搜索不应返回团队资产");
+    expect(search.status === 404 || (search.json as any[]).length === 0, "外人搜索不应返回团队资产").toBe(true);
   });
 
   it("D09：语义 worker 故障时明确降级，核心流程照常", async () => {
@@ -167,25 +167,25 @@ describe("M5 语义与检索（真实 worker 集成）", () => {
       session: member,
       body: { teamId, revisionRef: "x/y/z", text: "测试降级", entityHints: [] },
     });
-    expect(dead.status === 503 && dead.json.error.code === "DEPENDENCY_UNAVAILABLE", dead.json, "应 503 明确降级");
+    expect(dead.status === 503 && dead.json.error.code === "DEPENDENCY_UNAVAILABLE", "应 503 明确降级").toBe(true);
     // 核心流程不受影响：资产登记、检索、关系照常
     const types = await call("GET", `/types?teamId=${teamId}`, { session: member });
-    expect(types.status === 200, types.json, "类型列表失败");
+    expect(types.status === 200, "类型列表失败").toBe(true);
     const tv = (types.json as { id: string; type_key: string }[]).find((t) => t.type_key === "document")!;
     const asset = await call("POST", "/assets", {
       session: member,
       body: { teamId, name: "降级期登记文档", typeVersionId: tv.id,
         properties: { docRole: "manual", format: "txt", language: "zh-CN", confidentiality: "internal", scope: "x" } },
     });
-    expect(asset.status === 201, asset.json, "降级期资产登记失败");
+    expect(asset.status === 201, "降级期资产登记失败").toBe(true);
     const search = await call("GET", `/assets/search?teamId=${teamId}&q=降级期`, { session: member });
-    expect(search.status === 200 && search.json.length === 1, search.json, "降级期检索失败");
+    expect(search.status === 200 && search.json.length === 1, "降级期检索失败").toBe(true);
     // 恢复 worker 地址
     process.env.SEMANTIC_WORKER_URL = `http://127.0.0.1:${WORKER_PORT}`;
     const recovered = await call("POST", "/semantic/extract", {
       session: member,
       body: { teamId, revisionRef: "x/y/z", text: "恢复测试", entityHints: [] },
     });
-    expect(recovered.status === 200, recovered.json, "worker 恢复后应可用");
+    expect(recovered.status === 200, "worker 恢复后应可用").toBe(true);
   });
 });

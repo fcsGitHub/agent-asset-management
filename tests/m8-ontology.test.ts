@@ -63,7 +63,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -127,21 +127,21 @@ describe("M8 本体治理", () => {
         unitVocabularies: { position: ["m", "km"] }, // 需要 positionUnit 属性，schema 未定义
       },
     });
-    expect(badVocab.status === 422, badVocab, "词表悬挂引用应 422");
-    expect(String(badVocab.json?.error?.message).includes("position"), badVocab.json, "错误应指明 position 词表");
+    expect(badVocab.status === 422, "词表悬挂引用应 422").toBe(true);
+    expect(String(badVocab.json?.error?.message).includes("position"), "错误应指明 position 词表").toBe(true);
 
     const badRel = await call("POST", "/relation-types", {
       session: admin,
       body: { teamId, typeKey: "m8BadLink", version: "1.0.0", title: "坏引用", sourceTypeKeys: ["no.such-type"] },
     });
-    expect(badRel.status === 422, badRel, "关系类型悬挂 type_key 应 422");
-    expect(String(badRel.json?.error?.message).includes("尚未注册"), badRel.json, "错误应说明悬挂");
+    expect(badRel.status === 422, "关系类型悬挂 type_key 应 422").toBe(true);
+    expect(String(badRel.json?.error?.message).includes("尚未注册"), "错误应说明悬挂").toBe(true);
 
     const badKind = await call("POST", "/relation-types", {
       session: admin,
       body: { teamId, typeKey: "m8BadKind", version: "1.0.0", title: "坏 kind", sourceKinds: ["dragon"] },
     });
-    expect(badKind.status === 422 || badKind.status === 400, badKind, "非法 kind 应拒绝");
+    expect(badKind.status === 422 || badKind.status === 400, "非法 kind 应拒绝").toBe(true);
   });
 
   it("类型层次：子类型必须收窄父类型；资产实例须同时满足整条链；预览覆盖后代", async () => {
@@ -166,8 +166,8 @@ describe("M8 本体治理", () => {
         parentTypeVersionId: baseTypeId,
       },
     });
-    expect(badChild.status === 422, badChild, "改写父属性类型应 422");
-    expect(String(badChild.json?.error?.message).includes("收窄"), badChild.json, "错误应说明只能收窄");
+    expect(badChild.status === 422, "改写父属性类型应 422").toBe(true);
+    expect(String(badChild.json?.error?.message).includes("收窄"), "错误应说明只能收窄").toBe(true);
 
     // 层次在 GET /types 可见
     const types = await call("GET", `/types?teamId=${teamId}`, { session: admin });
@@ -179,16 +179,16 @@ describe("M8 本体治理", () => {
       session: admin,
       body: { teamId, name: "缺父必填", typeVersionId: childTypeId, properties: { extra: "x" } },
     });
-    expect(violation.status === 422, violation, "缺父类型必填应 422");
+    expect(violation.status === 422, "缺父类型必填应 422").toBe(true);
     const errs = JSON.stringify(violation.json);
-    expect(errs.includes("name"), violation.json, "错误应指出 name 缺失");
+    expect(errs.includes("name"), "错误应指出 name 缺失").toBe(true);
 
     // 同时满足整条链 → 成功
     const okAsset = await call("POST", "/assets", {
       session: admin,
       body: { teamId, name: `子类资产-${runId}`, typeVersionId: childTypeId, properties: { name: "child", extra: "ok" } },
     });
-    expect(okAsset.status === 201, okAsset.json, "满足整条链的资产应创建成功");
+    expect(okAsset.status === 201, "满足整条链的资产应创建成功").toBe(true);
 
     // 迁移预览：父类型的影响面包含后代类型资产；改写类型时标记继承问题
     const preview = await call("POST", "/types/migration-preview", {
@@ -199,15 +199,23 @@ describe("M8 本体治理", () => {
       },
     });
     expectOk(preview.status === 200, preview.json, "预览失败");
-    expect(preview.json.inheritanceIssue !== null, preview.json, "预览应指出继承违规");
-    expect(preview.json.safe === false, preview.json, "继承违规时 safe 应为 false");
-    expect(
-      (preview.json.descendantTypes as any[]).some((d) => d.type_key === "m8child"),
-      preview.json.descendantTypes,
-      "后代类型应列入影响面"
-    );
+    // m8base 是根类型（无父）：无继承约束，但结构变更仍被识别
+    expect(preview.json.inheritanceIssue === null, "根类型预览不应有继承违规").toBe(true);
+    expect((preview.json.descendantTypes as any[]).some((d) => d.type_key === "m8child"), "后代类型应列入影响面").toBe(true);
+
+    // 对子类型预演改写父属性类型 → 继承违规，safe=false
+    const childPreview = await call("POST", "/types/migration-preview", {
+      session: admin,
+      body: {
+        teamId, typeKey: "m8child",
+        jsonSchema: { type: "object", required: ["name"], properties: { name: { type: "number" } } },
+      },
+    });
+    expectOk(childPreview.status === 200, childPreview.json, "子类型预览失败");
+    expect(childPreview.json.inheritanceIssue !== null, "子类型改写父属性类型应指出继承违规").toBe(true);
+    expect(childPreview.json.safe === false, "继承违规时 safe 应为 false").toBe(true);
     const listed = await call("GET", `/assets/${okAsset.json.assetId}?teamId=${teamId}`, { session: admin });
-    expect(listed.status === 200, listed.json, "子类资产应存在");
+    expect(listed.status === 200, "子类资产应存在").toBe(true);
   });
 
   it("关系 domain/range：kind 与类级 type_keys 在断言时强制执行", async () => {
@@ -226,15 +234,15 @@ describe("M8 本体治理", () => {
       session: admin,
       body: { teamId, relationTypeVersionId: rt.json.relationTypeVersionId, sourceAssetId: docA, targetAssetId: baseAsset, confirm: true },
     });
-    expect(violation.status === 409, violation, "range 违规应 409");
-    expect(violation.json?.error?.code === "DOMAIN_RANGE_VIOLATION", violation.json, "错误码应为 DOMAIN_RANGE_VIOLATION");
+    expect(violation.status === 409, "range 违规应 409").toBe(true);
+    expect(violation.json?.error?.code === "DOMAIN_RANGE_VIOLATION", "错误码应为 DOMAIN_RANGE_VIOLATION").toBe(true);
 
     // document→document 合法
     const ok = await call("POST", "/relations", {
       session: admin,
       body: { teamId, relationTypeVersionId: rt.json.relationTypeVersionId, sourceAssetId: docA, targetAssetId: docB, confirm: true },
     });
-    expect(ok.status === 201, ok.json, "合法断言应 201");
+    expect(ok.status === 201, "合法断言应 201").toBe(true);
 
     // GET /relation-types 列表可用
     const list = await call("GET", `/relation-types?teamId=${teamId}`, { session: admin });
@@ -254,23 +262,23 @@ describe("M8 本体治理", () => {
     const e1 = await call("POST", "/relations", {
       session: admin, body: { teamId, relationTypeVersionId: rtId, sourceAssetId: docA, targetAssetId: docB, confirm: true },
     });
-    expect(e1.status === 201, e1.json, "首条断言应成功");
+    expect(e1.status === 201, "首条断言应成功").toBe(true);
     const e2 = await call("POST", "/relations", {
       session: admin, body: { teamId, relationTypeVersionId: rtId, sourceAssetId: docB, targetAssetId: docC, confirm: true },
     });
-    expect(e2.status === 201, e2.json, "第二条断言应成功");
+    expect(e2.status === 201, "第二条断言应成功").toBe(true);
 
     // 直接环 B→A
     const direct = await call("POST", "/relations", {
       session: admin, body: { teamId, relationTypeVersionId: rtId, sourceAssetId: docB, targetAssetId: docA, confirm: true },
     });
-    expect(direct.status === 409 && direct.json?.error?.code === "CYCLE_FORBIDDEN", direct, "直接环应 409");
+    expect(direct.status === 409 && direct.json?.error?.code === "CYCLE_FORBIDDEN", "直接环应 409").toBe(true);
 
     // 传递环 C→A（A→B→C→A）
     const transitive = await call("POST", "/relations", {
       session: admin, body: { teamId, relationTypeVersionId: rtId, sourceAssetId: docC, targetAssetId: docA, confirm: true },
     });
-    expect(transitive.status === 409 && transitive.json?.error?.code === "CYCLE_FORBIDDEN", transitive, "传递环应 409");
+    expect(transitive.status === 409 && transitive.json?.error?.code === "CYCLE_FORBIDDEN", "传递环应 409").toBe(true);
   });
 
   it("关系类型迁移预演：domain/range 收窄列出存量违反，cyclic 收紧数出存量环", async () => {
@@ -281,13 +289,9 @@ describe("M8 本体治理", () => {
       body: { teamId, typeKey: "m8LinkDoc", targetTypeKeys: ["m8base"] },
     });
     expectOk(preview.status === 200, preview.json, "关系预演失败");
-    expect(preview.json.affectedAssertions >= 1, preview.json, "应统计到存量断言");
-    expect(
-      (preview.json.domainRangeViolations as any[]).some((v) => v.side === "target"),
-      preview.json.domainRangeViolations,
-      "应列出目标端违反"
-    );
-    expect(preview.json.safe === false, preview.json, "存在违反时 safe 应为 false");
+    expect(preview.json.affectedAssertions >= 1, "应统计到存量断言").toBe(true);
+    expect((preview.json.domainRangeViolations as any[]).some((v) => v.side === "target"), "应列出目标端违反").toBe(true);
+    expect(preview.json.safe === false, "存在违反时 safe 应为 false").toBe(true);
 
     // cyclic true→false：m8LinkDoc 当前 cyclic=true；现有断言 docA→docB 无环，反向补一条造环
     const back = await call("POST", "/relations", {
@@ -299,14 +303,14 @@ describe("M8 本体治理", () => {
       body: { teamId, typeKey: "m8LinkDoc", cyclic: false },
     });
     expectOk(cycPreview.status === 200, cycPreview.json, "cyclic 预演失败");
-    expect(cycPreview.json.existingCycles >= 1, cycPreview.json, "应数出存量环");
-    expect(cycPreview.json.safe === false, cycPreview.json, "存量环使收窄不安全");
+    expect(cycPreview.json.existingCycles >= 1, "应数出存量环").toBe(true);
+    expect(cycPreview.json.safe === false, "存量环使收窄不安全").toBe(true);
   });
 
   it("本体导出：类含 subClassOf、对象属性含 domain/range，摘要稳定", async () => {
     const e1 = await call("GET", `/ontology/export?teamId=${teamId}`, { session: admin });
     expectOk(e1.status === 200, e1.json, "导出失败");
-    expect(e1.json.format === "taw-ontology/1", e1.json, "格式标识错误");
+    expect(e1.json.format === "taw-ontology/1", "格式标识错误").toBe(true);
     const classes = e1.json.classes as any[];
     const child = classes.find((c) => c.key === "m8child");
     expectOk(child?.subClassOf?.key === "m8base", child, "子类应带 subClassOf");
@@ -316,12 +320,12 @@ describe("M8 本体治理", () => {
     expectOk(props.some((p) => p.key === "dependsOn"), props, "默认关系类型应在导出中");
 
     const e2 = await call("GET", `/ontology/export?teamId=${teamId}`, { session: admin });
-    expect(e2.json.ontologyDigest === e1.json.ontologyDigest, [e1.json.ontologyDigest, e2.json.ontologyDigest], "摘要应稳定");
+    expect(e2.json.ontologyDigest === e1.json.ontologyDigest, "摘要应稳定").toBe(true);
 
     // 跨团队隔离：另一团队导出不含本团队自定义类
     const other = await register(`m8o2-${runId}@t.dev`, "M8他团队", `M8他团队-${runId}`);
     const otherExport = await call("GET", `/ontology/export?teamId=${other.teamId}`, { session: other.session });
     expectOk(otherExport.status === 200, otherExport.json, "他团队导出失败");
-    expect(!(otherExport.json.classes as any[]).some((c) => c.key === "m8child"), otherExport.json.classes, "他团队不应看到本团队类");
+    expect(!(otherExport.json.classes as any[]).some((c) => c.key === "m8child"), "他团队不应看到本团队类").toBe(true);
   });
 });

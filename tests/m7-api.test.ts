@@ -76,7 +76,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -139,13 +139,13 @@ describe("M7 API 补强（真实集成）", () => {
     const completed = res.json.find((r: any) => r.status === "completed");
     const blocked = res.json.find((r: any) => r.status === "blocked");
     expect(completed.invocations).toHaveLength(1);
-    expect(completed.invocations[0].name === "asset__search" && completed.invocations[0].status === "ok", completed, "工具调用映射错误");
-    expect(blocked.invocations[0].status === "denied" && blocked.error === "预算已用尽", blocked, "blocked 运行信息错误");
+    expect(completed.invocations[0].name === "asset__search" && completed.invocations[0].status === "ok", "工具调用映射错误").toBe(true);
+    expect(blocked.invocations[0].status === "denied" && blocked.error === "预算已用尽", "blocked 运行信息错误").toBe(true);
     const parsed = typeof completed.result === "string" ? JSON.parse(completed.result) : completed.result;
-    expect(parsed.finalText === "已完成整理", completed.result, "result 应含最终回复");
+    expect(parsed.finalText === "已完成整理", "result 应含最终回复").toBe(true);
     // 未登录不可见
     const anon = await fetch(`${BASE}/sessions/${sessionId}/runs?teamId=${teamId}`);
-    expect(anon.status === 401, anon.status, "未登录应 401");
+    expect(anon.status === 401, "未登录应 401").toBe(true);
   });
 
   it("修订历史分页：revisionsTotal 正确、revLimit/revOffset 翻页有序", async () => {
@@ -161,9 +161,9 @@ describe("M7 API 补强（真实集成）", () => {
 
     const full = await call("GET", `/assets/${assetId}?teamId=${teamId}`, { session: admin });
     expectOk(full.status === 200, full.json, "详情获取失败");
-    expect(full.json.revisionsTotal === 4, full.json.revisionsTotal, "总数应为 4");
+    expect(full.json.revisionsTotal === 4, "总数应为 4").toBe(true);
     expect(full.json.revisions).toHaveLength(4);
-    expect(full.json.revisions[0].seq === 4, full.json.revisions[0], "默认按 seq 降序");
+    expect(full.json.revisions[0].seq === 4, "默认按 seq 降序").toBe(true);
 
     const page1 = await call("GET", `/assets/${assetId}?teamId=${teamId}&revLimit=2`, { session: admin });
     expect(page1.json.revisions).toHaveLength(2);

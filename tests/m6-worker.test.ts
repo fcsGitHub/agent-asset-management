@@ -68,6 +68,15 @@ describe("M6 outbox 派发器（真实 HTTP + PG）", () => {
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const addr = server.address() as { port: number };
     baseUrl = `http://127.0.0.1:${addr.port}/outbox`;
+
+    // 排干开发库的历史遗留未投递事件（真实派发到本接收端）——
+    // 全量回归时其他套件的发布会向 outbox 写入真实事件，批次（默认 20）会被它们占满，
+    // 后续"每次播种后单轮派发"的断言必须建立在排干之后的基线上。排干产生的事件不入断言。
+    for (let i = 0; i < 200; i++) {
+      const drain = await dispatchOnce({ databaseUrl: WORKER_DB, dispatchUrl: baseUrl });
+      if (drain.leased === 0) break;
+    }
+    received.length = 0;
   });
 
   afterAll(async () => {

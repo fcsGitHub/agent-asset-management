@@ -16,6 +16,7 @@ import { projectLifecycleRoutes } from "./routes/lifecycle.js";
 import { runRoutes } from "./routes/runs.js";
 import { semanticRoutes } from "./routes/semantic.js";
 import { assetMetaRoutes } from "./routes/meta-share.js";
+import { nlRoutes } from "./routes/nl.js";
 
 export async function buildServer() {
   const app = Fastify({
@@ -78,6 +79,7 @@ export async function buildServer() {
   await app.register(runRoutes, { prefix: "/api/v1" });
   await app.register(semanticRoutes, { prefix: "/api/v1" });
   await app.register(assetMetaRoutes, { prefix: "/api/v1" });
+  await app.register(nlRoutes, { prefix: "/api/v1" });
 
   return app;
 }

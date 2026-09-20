@@ -88,27 +88,27 @@ describe("C07/C08 补强（真实集成）", () => {
     const noEtag = await call("PATCH", `/assets/${assetId}/meta`, {
       session: admin, body: { teamId, name: "改个名" },
     });
-    expect(noEtag.status === 422, noEtag.json, "缺 If-Match 应 422");
+    expect(noEtag.status === 422, "缺 If-Match 应 422").toBe(true);
 
     // 获取当前 ETag（meta_version=1）
     const stale = await call("PATCH", `/assets/${assetId}/meta`, {
       session: admin, body: { teamId, name: "并发写入者A" }, ifMatch: '"meta-1"',
     });
-    expect(stale.status === 200, stale.json, "首次修改应成功");
+    expect(stale.status === 200, "首次修改应成功").toBe(true);
     const newEtag = stale.json.etag as string;
 
     // 持旧 ETag 的并发写入者 B → 409，不静默覆盖
     const conflict = await call("PATCH", `/assets/${assetId}/meta`, {
       session: member, body: { teamId, name: "并发写入者B" }, ifMatch: '"meta-1"',
     });
-    expect(conflict.status === 409 && conflict.json.error.code === "STALE_HEAD", conflict.json, "过期 ETag 应 409");
-    expect(conflict.json.error.details.currentEtag === newEtag, conflict.json, "应返回当前 ETag 供恢复");
+    expect(conflict.status === 409 && conflict.json.error.code === "STALE_HEAD", "过期 ETag 应 409").toBe(true);
+    expect(conflict.json.error.details.currentEtag === newEtag, "应返回当前 ETag 供恢复").toBe(true);
 
     // B 拿新 ETag 重试 → 成功（先合并再写）
     const retry = await call("PATCH", `/assets/${assetId}/meta`, {
       session: member, body: { teamId, name: "并发写入者B（合并后）" }, ifMatch: newEtag,
     });
-    expect(retry.status === 200, retry.json, "新 ETag 重试应成功");
+    expect(retry.status === 200, "新 ETag 重试应成功").toBe(true);
   });
 
   it("C08：可分享会话——检查通过后分享，第三人可见；检查过期拒绝", async () => {
@@ -118,21 +118,21 @@ describe("C07/C08 补强（真实集成）", () => {
     const check = await call("POST", `/sessions/${sessionId}/share-check`, {
       session: member, body: { teamId },
     });
-    expect(check.status === 200 && check.json.shareable === true, check.json, "应可分享");
+    expect(check.status === 200 && check.json.shareable === true, "应可分享").toBe(true);
 
     // 第三人（非创建者、同团队成员）不能分享他人会话
     const notOwner = await call("POST", `/sessions/${sessionId}/share`, {
       session: admin, body: { teamId, confirmCheckDigest: check.json.checkDigest },
     });
-    expect(notOwner.status === 403, notOwner.json, "非创建者分享应 403");
+    expect(notOwner.status === 403, "非创建者分享应 403").toBe(true);
 
     const share = await call("POST", `/sessions/${sessionId}/share`, {
       session: member, body: { teamId, confirmCheckDigest: check.json.checkDigest },
     });
-    expect(share.status === 200 && share.json.visibility === "project", share.json, "分享应成功");
+    expect(share.status === 200 && share.json.visibility === "project", "分享应成功").toBe(true);
     // 项目成员（管理员）现在能看到该私有转共享会话
     const list = await call("GET", `/projects/${projectId}/sessions?teamId=${teamId}`, { session: admin });
-    expect(list.json.some((s: any) => s.sessionId === sessionId), list.json, "分享后项目成员应可见");
+    expect(list.json.some((s: any) => s.sessionId === sessionId), "分享后项目成员应可见").toBe(true);
   });
 
   it("C08：含密引用会话被来源检查阻止，不泄露内容", async () => {
@@ -151,21 +151,21 @@ describe("C07/C08 补强（真实集成）", () => {
     const check = await call("POST", `/sessions/${secretSessionId}/share-check`, {
       session: member, body: { teamId },
     });
-    expect(check.status === 200 && check.json.shareable === false, check.json, "含密会话不可分享");
+    expect(check.status === 200 && check.json.shareable === false, "含密会话不可分享").toBe(true);
     expect(JSON.stringify(check.json.blockers)).toContain("secret", check.json);
 
     // 绕过检查直接分享 → 403（摘要不匹配或阻断）
     const bypass = await call("POST", `/sessions/${secretSessionId}/share`, {
       session: member, body: { teamId, confirmCheckDigest: "0000000000000000" },
     });
-    expect(bypass.status === 409 || bypass.status === 403, bypass.json, "绕过检查应被拒");
+    expect(bypass.status === 409 || bypass.status === 403, "绕过检查应被拒").toBe(true);
 
     // 用真实（阻断态）摘要分享 → 403 且会话保持 private
     const share = await call("POST", `/sessions/${secretSessionId}/share`, {
       session: member, body: { teamId, confirmCheckDigest: check.json.checkDigest },
     });
-    expect(share.status === 403, share.json, "阻断态分享应 403");
+    expect(share.status === 403, "阻断态分享应 403").toBe(true);
     const list = await call("GET", `/projects/${projectId}/sessions?teamId=${teamId}`, { session: admin });
-    expect(!list.json.some((s: any) => s.sessionId === secretSessionId && s.visibility === "project"), list.json, "会话应保持私有");
+    expect(!list.json.some((s: any) => s.sessionId === secretSessionId && s.visibility === "project"), "会话应保持私有").toBe(true);
   });
 });

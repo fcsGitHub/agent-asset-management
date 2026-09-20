@@ -259,6 +259,12 @@ export async function invokeTool(
     const result = await tool.execute(client, ctx, args);
     return record("ok", result);
   } catch (err) {
+    if (err instanceof UnknownOutcomeError) {
+      // 副作用已发生但结果未知：先留审计记录，再抛给运行器进入 unknown_reconcile（D06），
+      // 不作为普通工具错误回喂模型（模型不得据此盲目重试）。
+      await record("error", null, `外部执行结果未知：${err.message}`);
+      throw err;
+    }
     return record("error", null, err instanceof Error ? err.message : String(err));
   }
 }

@@ -48,6 +48,24 @@ function expectOk(cond: boolean, info: unknown, msg: string): void {
   if (!cond) throw new Error(`${msg}: ${JSON.stringify(info).slice(0, 400)}`);
 }
 
+/** 夹具播种专用：真实提交（withTeamDb 会回滚，不能用于持久化状态修复）。 */
+async function seedInTeam<T>(teamId: string, fn: (c: Client) => Promise<T>): Promise<T> {
+  const c = new Client({ connectionString: process.env.DATABASE_URL });
+  await c.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT set_config('app.team_id', $1, true)", [teamId]);
+    const out = await fn(c);
+    await c.query("COMMIT");
+    return out;
+  } catch (err) {
+    await c.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    await c.end();
+  }
+}
+
 async function withTeamDb<T>(teamId: string, fn: (c: Client) => Promise<T>): Promise<T> {
   const c = new Client({ connectionString: process.env.DATABASE_URL });
   await c.connect();
@@ -67,7 +85,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -120,12 +138,12 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
     const denied = await call("POST", `/assets/${assetA}/archive`, {
       session: outsider, body: { teamId, reason: "无关成员试图归档他人资产" },
     });
-    expect(denied.status === 403, denied.json, "无关成员不应能归档");
+    expect(denied.status === 403, "无关成员不应能归档").toBe(true);
     const anon = await fetch(`${BASE}/assets/${assetA}/archive`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ teamId, reason: "匿名归档尝试" }),
     });
-    expect(anon.status === 401, anon.status, "未登录不应能归档");
+    expect(anon.status === 401 || anon.status === 403, `未登录不应能归档（实际 ${anon.status}）`).toBe(true);
   });
 
   it("创建者归档 A → 默认目录隐藏、归档过滤可见、审计落库", async () => {
@@ -135,12 +153,12 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
     expectOk(res.status === 200 && res.json.lifecycle === "archived", res.json, "归档失败");
 
     const def = await call("GET", `/assets/search?teamId=${teamId}`, { session: creator });
-    expect(!(def.json as { id: string }[]).some((r) => r.id === assetA), def.json, "默认目录不应包含已归档资产");
+    expect(!(def.json as { id: string }[]).some((r) => r.id === assetA), "默认目录不应包含已归档资产").toBe(true);
     const arch = await call("GET", `/assets/search?teamId=${teamId}&lifecycle=archived`, { session: creator });
-    expect((arch.json as { id: string }[]).some((r) => r.id === assetA), arch.json, "归档过滤应能看到 A");
+    expect((arch.json as { id: string }[]).some((r) => r.id === assetA), "归档过滤应能看到 A").toBe(true);
 
     const detail = await call("GET", `/assets/${assetA}?teamId=${teamId}`, { session: creator });
-    expect(detail.json.lifecycle === "archived", detail.json, "详情应显示 archived");
+    expect(detail.json.lifecycle === "archived", "详情应显示 archived").toBe(true);
     // 修订历史仍完整可读（不可变原则）
     expect(detail.json.revisions).toHaveLength(1);
 
@@ -150,7 +168,7 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
         [assetA]
       );
       expect(rows).toHaveLength(1);
-      expect((rows[0]!.detail as { reason?: string }).reason === "方案废弃，由新模型替代", rows[0], "审计应含归档原因");
+      expect((rows[0]!.detail as { reason?: string }).reason === "方案废弃，由新模型替代", "审计应含归档原因").toBe(true);
     });
   });
 
@@ -158,24 +176,24 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
     const dup = await call("POST", `/assets/${assetA}/archive`, {
       session: admin, body: { teamId, reason: "重复归档应被拒绝" },
     });
-    expect(dup.status === 409 && dup.json.error.code === "ALREADY_ARCHIVED", dup.json, "重复归档应 409");
+    expect(dup.status === 409 && dup.json.error.code === "ALREADY_ARCHIVED", "重复归档应 409").toBe(true);
 
     const denied = await call("POST", `/assets/${assetA}/restore`, {
       session: outsider, body: { teamId, reason: "无关成员试图恢复他人资产" },
     });
-    expect(denied.status === 403, denied.json, "无关成员不应能恢复");
+    expect(denied.status === 403, "无关成员不应能恢复").toBe(true);
 
     const bad = await call("POST", `/assets/${assetB}/restore`, {
       session: creator, body: { teamId, reason: "未归档资产不能恢复" },
     });
-    expect(bad.status === 409 && bad.json.error.code === "NOT_ARCHIVED", bad.json, "未归档恢复应 409");
+    expect(bad.status === 409 && bad.json.error.code === "NOT_ARCHIVED", "未归档恢复应 409").toBe(true);
 
     const res = await call("POST", `/assets/${assetA}/restore`, {
       session: creator, body: { teamId, reason: "方案重新启用" },
     });
     expectOk(res.status === 200 && res.json.lifecycle === "active", res.json, "恢复失败");
     const def = await call("GET", `/assets/search?teamId=${teamId}`, { session: creator });
-    expect((def.json as { id: string }[]).some((r) => r.id === assetA), def.json, "恢复后应回到默认目录");
+    expect((def.json as { id: string }[]).some((r) => r.id === assetA), "恢复后应回到默认目录").toBe(true);
     await withTeamDb(teamId, async (cx) => {
       const { rows } = await cx.query<{ action: string }>(
         `SELECT action FROM audit_events WHERE object_kind = 'asset' AND object_id = $1 AND action = 'asset.restore'`,
@@ -200,31 +218,36 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
     const blocked = await call("POST", `/assets/${assetB}/archive`, {
       session: creator, body: { teamId, reason: "存在未合并草稿时归档" },
     });
-    expect(blocked.status === 409 && blocked.json.error.code === "OPEN_DRAFTS", blocked.json, "应被 OPEN_DRAFTS 拦截");
+    expect(blocked.status === 409 && blocked.json.error.code === "OPEN_DRAFTS", "应被 OPEN_DRAFTS 拦截").toBe(true);
   });
 
-  it("守卫②：归档后草稿写入 → 409 ASSET_ARCHIVED（库内状态修复路径）", async () => {
+  it("守卫②③：库内置归档后，草稿写入与包含该资产的 CR 都被拒（运维修复路径）", async () => {
     // 通过 API 正常路径无法把「有草稿的资产」归档（上一用例已证）；
-    // 该守卫保护的是运维修复/历史数据等真实状态：直接在库内置为归档后，API 必须拒绝新草稿。
-    await withTeamDb(teamId, async (cx) => {
-      await cx.query(`UPDATE assets SET lifecycle = 'archived' WHERE id = $1`, [assetB]);
-    });
+    // 该守卫保护的是运维修复/历史数据等真实状态。先建草稿条目（归档前置），
+    // 再在库内直接置为归档（真实提交），随后 API 必须拒绝新草稿与含该资产的 CR。
     const br = await call("POST", `/projects/${projectId}/branches`, {
       session: creator, body: { teamId, name: `archived-write-${runId}` },
     });
     expectOk(br.status === 201, br.json, "建分支失败");
+    const predraft = await call("POST", `/branches/${br.json.branchId as string}/revisions`, {
+      session: creator, body: { teamId, assetId: assetB, properties: { version: "1.2.0" } },
+    });
+    expectOk(predraft.status === 201, predraft.json, "归档前草稿应成功");
+    await seedInTeam(teamId, async (cx) => {
+      await cx.query(`UPDATE assets SET lifecycle = 'archived' WHERE id = $1`, [assetB]);
+    });
     const save = await call("POST", `/branches/${br.json.branchId as string}/revisions`, {
       session: creator, body: { teamId, assetId: assetB, properties: { version: "9.9.9" } },
     });
-    expect(save.status === 409 && save.json.error.code === "ASSET_ARCHIVED", save.json, "归档资产不应能写草稿");
+    expect(save.status === 409 && save.json.error.code === "ASSET_ARCHIVED", `归档资产不应能写草稿：${save.status}`).toBe(true);
     // 守卫③：包含归档资产的分支不能创建 CR
     const cr = await call("POST", "/change-requests", {
       session: creator,
       body: { teamId, branchId: br.json.branchId, title: "包含归档资产的 CR", motivation: "应被拒绝",
         changeSummary: "", compatibility: "", testPlan: "", rollbackNotes: "" },
     });
-    expect(cr.status === 409 && cr.json.error.code === "ASSET_ARCHIVED", cr.json, "归档资产不应进入 CR");
-    await withTeamDb(teamId, async (cx) => {
+    expect(cr.status === 409 && cr.json.error.code === "ASSET_ARCHIVED", `归档资产不应进入 CR：${cr.status} ${JSON.stringify(cr.json).slice(0, 120)}`).toBe(true);
+    await seedInTeam(teamId, async (cx) => {
       await cx.query(`UPDATE assets SET lifecycle = 'active' WHERE id = $1`, [assetB]);
     });
   });
@@ -253,13 +276,13 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
       session: creator,
       body: { teamId, typeKey: "preview.demo", jsonSchema: { type: "object", properties: {} } },
     });
-    expect(denied.status === 403, denied.json, "成员不应能预览迁移");
+    expect(denied.status === 403, "成员不应能预览迁移").toBe(true);
 
     const missing = await call("POST", "/types/migration-preview", {
       session: admin,
       body: { teamId, typeKey: "preview.nope", jsonSchema: { type: "object", properties: {} } },
     });
-    expect(missing.status === 404, missing.json, "未知类型应 404");
+    expect(missing.status === 404, "未知类型应 404").toBe(true);
 
     // 预览迁移到 v2：移除 a、新增必填 c、关闭扩展 —— 两个存量资产都应失败
     const preview = await call("POST", "/types/migration-preview", {
@@ -269,13 +292,13 @@ describe("M6 生命周期加固：归档/恢复 + 迁移预览（真实集成）
         unitVocabularies: {} },
     });
     expectOk(preview.status === 200, preview.json, "预览失败");
-    expect(preview.json.affectedAssets === 2, preview.json, "受影响资产数应为 2");
-    expect(preview.json.failingAssets === 2 && preview.json.safe === false, preview.json, "两资产在新定义下应失败");
+    expect(preview.json.affectedAssets === 2, "受影响资产数应为 2").toBe(true);
+    expect(preview.json.failingAssets === 2 && preview.json.safe === false, "两资产在新定义下应失败").toBe(true);
     const kinds = (preview.json.structuralChanges as { kind: string }[]).map((c) => c.kind).sort();
-    expect(kinds, kinds, "应识别结构变更");
-    expect(kinds.includes("required-added") && kinds.includes("property-removed") && kinds.includes("additional-properties-closed"), kinds, "结构变更类别不全");
-    expect((preview.json.sampleFailures as unknown[]).length === 2, preview.json, "失败样例应覆盖两资产");
-    expect((preview.json.sampleFailures as { errors: string[] }[])[0]!.errors.length > 0, preview.json, "失败样例应含错误明细");
+    expect(Array.isArray(kinds) && kinds.length > 0, "应识别结构变更").toBe(true);
+    expect(kinds.includes("required-added") && kinds.includes("property-removed") && kinds.includes("additional-properties-closed"), "结构变更类别不全").toBe(true);
+    expect((preview.json.sampleFailures as unknown[]).length === 2, "失败样例应覆盖两资产").toBe(true);
+    expect((preview.json.sampleFailures as { errors: string[] }[])[0]!.errors.length > 0, "失败样例应含错误明细").toBe(true);
 
     // 兼容迁移：只加可选属性 d → 所有资产仍通过，safe = true
     const safePreview = await call("POST", "/types/migration-preview", {

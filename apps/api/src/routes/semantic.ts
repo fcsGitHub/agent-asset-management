@@ -30,6 +30,8 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
         revisionRef: z.string().min(3).max(200),
         text: z.string().min(1).max(60000),
         entityHints: z.array(z.object({ text: z.string().min(1).max(100), label: z.string().min(1).max(40).default("ENTITY") })).max(50).default([]),
+        // true 时 worker 叠加真实 LLM 候选（仍是候选，需人工确认）
+        enhanceLlm: z.boolean().default(false),
       }),
       req.body
     );
@@ -42,8 +44,9 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
           revision_ref: body.revisionRef,
           text: body.text,
           entity_hints: body.entityHints.map((h) => ({ text: h.text, label: h.label })),
+          enhance_llm: body.enhanceLlm,
         }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(45000),
       });
       if (!res.ok) {
         throw ERR.DEPENDENCY(`语义 worker 返回 HTTP ${res.status}`);

@@ -11,7 +11,10 @@
 #   -> structural_errors, conflicts, unresolved_entities
 #
 # 候选仅是候选：不能更新正式依赖、通道头、审批结果或业务权限。
+import json
+import os
 import re
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
@@ -39,6 +42,73 @@ RELATION_PATTERNS: List[Dict[str, Any]] = [
 
 UNIT_KEYS = {"positionUnit", "velocityUnit", "angleUnit", "timeScale", "frame"}
 
+# LLM 增强（可选）：enhance_llm=true 时调用真实 DeepSeek（OpenAI 兼容协议，stdlib 无新依赖）。
+# LLM 候选与规则候选合并；候选永远是 candidate，人工确认后才成为正式关系。
+# key 从环境读取，绝不写入日志或返回体。
+RELATION_VOCAB = [spec["type"] for spec in RELATION_PATTERNS] + ["related_to"]
+
+
+def _llm_chat(messages: List[Dict[str, str]], timeout: float = 25.0) -> Dict[str, Any]:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key or api_key == "replace-me":
+        raise RuntimeError("DEEPSEEK_API_KEY 未配置")
+    base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    req = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=json.dumps({"model": model, "messages": messages, "temperature": 0.1}).encode("utf-8"),
+        headers={"content-type": "application/json", "authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    choice = (data.get("choices") or [{}])[0].get("message", {})
+    return {"content": choice.get("content") or "", "tokens": data.get("usage", {}).get("total_tokens", 0)}
+
+
+def _llm_relation_candidates(text: str) -> List[Dict[str, Any]]:
+    """真实 LLM 候选关系：限定词表 + 端点必须原文出现（真实偏移定位）。
+    输出不合规（越词表/端点不在原文/自指）的一律丢弃，不折衷。"""
+    sys_prompt = (
+        "你是关系候选抽取器。从文本中抽取实体间的候选关系，只输出 JSON 数组，不要解释。"
+        f"relation type 只能取：{json.dumps(RELATION_VOCAB, ensure_ascii=False)}。"
+        '每个元素形如 {"type":"dependsOn","source":"<原文中的实体词>","target":"<原文中的实体词>",'
+        '"evidence":"<支撑该关系的原文片段>"}。'
+        "没有候选关系时输出 []。"
+    )
+    out = _llm_chat([
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": text[:6000]},
+    ])
+    content = out["content"]
+    start, end = content.find("["), content.rfind("]")
+    if start < 0 or end <= start:
+        raise ValueError("LLM 输出不含 JSON 数组")
+    raw = json.loads(content[start:end + 1])
+    anchors: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rel_type = str(item.get("type", ""))
+        src, tgt = str(item.get("source", "")).strip(), str(item.get("target", "")).strip()
+        if rel_type not in RELATION_VOCAB or not src or not tgt or src == tgt:
+            continue
+        si = text.find(src)
+        ti = text.find(tgt)
+        if si < 0 or ti < 0:
+            continue  # 端点必须真实出现在原文中（可定位证据，不采信模型编造的词）
+        evidence = str(item.get("evidence", ""))[:200] or text[max(si - 10, 0):min(ti + len(tgt) + 10, len(text))]
+        anchors.append({
+            "type": rel_type,
+            "source": {"text": src, "start": si, "end": si + len(src)},
+            "target": {"text": tgt, "start": ti, "end": ti + len(tgt)},
+            "confidence": 0.75,
+            "evidence": {"segment": evidence, "matched_pattern": "llm/deepseek"},
+            "llm_proposed": True,
+            "status": "candidate",
+        })
+    return anchors
+
 
 class EntityHint(BaseModel):
     text: str
@@ -49,6 +119,7 @@ class ExtractRequest(BaseModel):
     revision_ref: str            # 来源修订引用（团队/资产/修订）
     text: str
     entity_hints: List[EntityHint] = []
+    enhance_llm: bool = False    # true 时叠加真实 LLM 候选（仍为候选，需人工确认）
 
 
 class ValidateCandidate(BaseModel):
@@ -135,6 +206,21 @@ def extract_candidates(req: ExtractRequest):
             "status": "candidate",   # 永远是候选；确认只能由人完成
         })
 
+    # LLM 增强（可选）：与规则候选合并去重（键 = type+端点词）。任何失败如实降级为规则结果。
+    extractor_version = EXTRACTOR_VERSION
+    if req.enhance_llm:
+        try:
+            llm_rels = _llm_relation_candidates(req.text)
+            seen = {(r["type"], r["source"]["text"], r["target"]["text"]) for r in candidate_relations}
+            for cand in llm_rels:
+                key = (cand["type"], cand["source"]["text"], cand["target"]["text"])
+                if key not in seen:
+                    candidate_relations.append(cand)
+                    seen.add(key)
+            extractor_version = f"{EXTRACTOR_VERSION}+llm/deepseek"
+        except Exception as e:  # 上游失败不伪装成功
+            warnings.append(f"LLM 增强失败，已降级为规则候选: {e}")
+
     evidence_anchors = [
         {"text": e.text, "label": e.label, "start": e.start_char, "end": e.end_char,
          "revision_ref": req.revision_ref}
@@ -153,7 +239,7 @@ def extract_candidates(req: ExtractRequest):
         "candidate_relations": candidate_relations,
         "evidence_anchors": evidence_anchors,
         "warnings": warnings,
-        "extractor_version": EXTRACTOR_VERSION,
+        "extractor_version": extractor_version,
     }
 
 
@@ -172,7 +258,10 @@ def validate_candidates(req: ValidateRequest):
             if v is not None and v not in vocab:
                 structural_errors.append(f"{c.entity_id}: {k}=\"{v}\" 不在受控词表内")
 
-    # semantica 冲突检测：同名实体的属性冲突（真实调用）
+    # semantica 冲突检测：同名实体的属性冲突（真实调用）。
+    # semantica 的冲突检测按实体 id 分组（语义：同一实体来自不同来源）；
+    # 候选场景中"同名"即候选同一现实实体 → 以名字作为分组键送检。
+    # 仅检测、不合并：候选独立性由 unresolved_entities 与人工消歧保证。
     detector = ConflictDetector()
     by_name: Dict[str, List[Dict[str, Any]]] = {}
     for c in req.candidates:
@@ -182,7 +271,8 @@ def validate_candidates(req: ValidateRequest):
     for name, group in by_name.items():
         if len(group) < 2:
             continue
-        found = detector.detect_conflicts(group)
+        renamed = [{"id": name, "name": name, "properties": g["properties"]} for g in group]
+        found = detector.detect_conflicts(renamed)
         for cf in found:
             conflicts.append({
                 "name": name,

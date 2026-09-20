@@ -68,7 +68,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -128,7 +128,7 @@ describe("M6 扩展包：运行时注册全新类型并跑通全链路（真实�
         `SELECT json_schema, unit_vocabularies FROM asset_type_versions WHERE team_id = $1 AND id = $2`,
         [teamId, customTypeId]
       );
-      expect(rows[0]!.unit_vocabularies["samplingHz"], rows[0], "词表应入库");
+      expect(rows[0]!.unit_vocabularies["samplingHz"], "词表应入库").toEqual(["Hz", "kHz"]);
     });
   });
 
@@ -146,14 +146,14 @@ describe("M6 扩展包：运行时注册全新类型并跑通全链路（真实�
       body: { teamId, name: "非法单位", typeVersionId: customTypeId,
         properties: { gridSize: "8x8", samplingHz: 10, samplingHzUnit: "GHz" } },
     });
-    expect(badUnit.status === 422, badUnit.json, "词表外单位应拒绝");
-    expect(String(JSON.stringify(badUnit.json)).includes("Hz"), badUnit.json, "错误应提示词表");
+    expect(badUnit.status === 422, "词表外单位应拒绝").toBe(true);
+    expect(String(JSON.stringify(badUnit.json)).includes("Hz"), "错误应提示词表").toBe(true);
 
     const badRequired = await call("POST", "/assets", {
       session: member,
       body: { teamId, name: "缺必填", typeVersionId: customTypeId, properties: { gridSize: "8x8" } },
     });
-    expect(badRequired.status === 422, badRequired.json, "缺失必填应拒绝");
+    expect(badRequired.status === 422, "缺失必填应拒绝").toBe(true);
   });
 
   it("跨类型关系：自定义类型资产 可与 内置 document 类型资产 建立依赖关系", async () => {

@@ -63,7 +63,7 @@ async function register(email: string, name: string, team: string): Promise<{ se
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password: "password-123", displayName: name, teamName: team }),
   });
-  expect(res.status === 201, `register ${email} → ${res.status}`, "注册失败");
+  expect(res.status === 201, "注册失败").toBe(true);
   return { session: sessionOf(res), teamId: ((await res.json()) as { teamId: string }).teamId };
 }
 
@@ -123,13 +123,13 @@ describe("M8 项目总览与团队动态", () => {
 
     const ov = await call("GET", `/projects/${projectId}/overview?teamId=${teamId}`, { session: admin });
     expectOk(ov.status === 200, ov.json, "总览获取失败");
-    expect(ov.json.project.name === "M8动态项目", ov.json.project, "项目名应正确");
-    expect(ov.json.projectScope.branches.open === 2, ov.json.projectScope.branches, "main + 新分支 = 2 个开放分支");
-    expect(ov.json.projectScope.changeRequests.awaitingReview === 0, ov.json.projectScope.changeRequests, "无待审 CR");
-    expect(ov.json.projectScope.releases.total === 0, ov.json.projectScope.releases, "无发布");
-    expect(ov.json.teamScope.assets.active === 1, ov.json.teamScope.assets, "1 个活跃资产");
-    expect(ov.json.teamScope.assets.archived === 0, ov.json.teamScope.assets, "归档后已恢复 → 0");
-    expect(ov.json.teamScope.revisions >= 1, ov.json.teamScope, "至少 1 个修订");
+    expect(ov.json.project.name === "M8动态项目", "项目名应正确").toBe(true);
+    expect(ov.json.projectScope.branches.open === 2, "main + 新分支 = 2 个开放分支").toBe(true);
+    expect(ov.json.projectScope.changeRequests.awaitingReview === 0, "无待审 CR").toBe(true);
+    expect(ov.json.projectScope.releases.total === 0, "无发布").toBe(true);
+    expect(ov.json.teamScope.assets.active === 1, "1 个活跃资产").toBe(true);
+    expect(ov.json.teamScope.assets.archived === 0, "归档后已恢复 → 0").toBe(true);
+    expect(ov.json.teamScope.revisions >= 1, "至少 1 个修订").toBe(true);
   });
 
   it("团队活动流：审计动作与 Agent 运行人机混排、时间倒序、limit 生效、跨团队隔离", async () => {
@@ -146,34 +146,34 @@ describe("M8 项目总览与团队动态", () => {
     const feed = await call("GET", `/activity?teamId=${teamId}&limit=50`, { session: admin });
     expectOk(feed.status === 200, feed.json, "活动流获取失败");
     const items = feed.json.items as any[];
-    expect(items.length >= 3, items, "应含归档/恢复审计 + Agent 运行");
+    expect(items.length >= 3, "应含归档/恢复审计 + Agent 运行").toBe(true);
     // 时间倒序
     for (let i = 1; i < items.length; i += 1) {
-      expect(items[i - 1].ts >= items[i].ts, [items[i - 1].ts, items[i].ts], "应按时间倒序");
+      expect(items[i - 1].ts >= items[i].ts, "应按时间倒序").toBe(true);
     }
     const archive = items.find((i) => i.action === "asset.archive");
     expectOk(archive && archive.kind === "audit" && archive.actor === "M8动态管理员", archive, "归档审计项应带动作人与标签");
-    expect(archive.summary === "归档资产", archive, "归档动作应映射为中文标签");
+    expect(archive.summary === "归档资产", "归档动作应映射为中文标签").toBe(true);
     const agentItem = items.find((i) => i.kind === "agent");
     expectOk(agentItem && agentItem.summary === "整理轨道参数汇总", agentItem, "Agent 运行应入流");
-    expect(agentItem.action === "agent.run.completed", agentItem, "Agent 动作应带状态");
-    expect(agentItem.project === "M8动态项目", agentItem, "Agent 项应带项目名");
+    expect(agentItem.action === "agent.run.completed", "Agent 动作应带状态").toBe(true);
+    expect(agentItem.project === "M8动态项目", "Agent 项应带项目名").toBe(true);
 
     // limit 生效
     const limited = await call("GET", `/activity?teamId=${teamId}&limit=1`, { session: admin });
-    expect((limited.json.items as any[]).length === 1, limited.json, "limit=1 应只返回 1 条");
+    expect((limited.json.items as any[]).length === 1, "limit=1 应只返回 1 条").toBe(true);
 
     // 跨团队隔离：他团队的管理员看不到本团队动态（RLS + 成员资格双重约束）
     const other = await call("GET", `/activity?teamId=${otherTeamId}`, { session: otherSession });
     expectOk(other.status === 200, other.json, "他团队活动流失败");
     const otherItems = other.json.items as any[];
-    expect((otherItems.filter((i) => i.action === "asset.archive")).length === 0, otherItems, "他团队不应看到本团队归档事件");
+    expect((otherItems.filter((i) => i.action === "asset.archive")).length === 0, "他团队不应看到本团队归档事件").toBe(true);
     // 本团队成员访问他团队动态 → 404（非成员不可见）
     const intrude = await call("GET", `/activity?teamId=${otherTeamId}`, { session: admin });
-    expect(intrude.status === 404, intrude, "非成员访问他团队动态应 404");
+    expect(intrude.status === 404, "非成员访问他团队动态应 404").toBe(true);
 
     // 未登录 401
     const anon = await fetch(`${BASE}/activity?teamId=${teamId}`);
-    expect(anon.status === 401, anon.status, "未登录应 401");
+    expect(anon.status === 401, "未登录应 401").toBe(true);
   });
 });
