@@ -106,6 +106,8 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
 
       <RelationTypes relTypes={relTypes} />
 
+      <UnitVocabCard teamId={project.teamId} />
+
       {isAdmin && (
         <>
           <RegisterType project={project} types={types ?? []} onDone={(msg) => { setNotice(msg); reload(); }} />
@@ -227,6 +229,46 @@ function RelationTypes({ relTypes }: { relTypes: RelTypeInfo[] | null }) {
 function renderSide(kinds: string[], typeKeys: string[]): React.ReactNode {
   if (typeKeys.length > 0) return typeKeys.map((k) => <span key={k} className="badge" style={{ marginRight: 4 }}>{k}</span>);
   return <span className="onto-parent">kind:{kinds.join("|")}</span>;
+}
+
+/** 受控单位词表：来自语义 worker GET /units（与候选结构校验同一定义点）。
+ *  worker 不可达时如实提示降级，不伪造词表。 */
+function UnitVocabCard({ teamId }: { teamId: string }) {
+  const [units, setUnits] = useState<Record<string, string[]> | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    setUnits(null);
+    setError("");
+    api<{ units: Record<string, string[]> }>("/semantic/units", { query: { teamId } })
+      .then((r) => { if (alive) setUnits(r.units); })
+      .catch((e) => { if (alive) setError(errorText(e)); });
+    return () => { alive = false; };
+  }, [teamId]);
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>受控单位词表（语义结构校验同源）</h3>
+        {units !== null && <span className="chip chip-dim">{Object.keys(units).length} 属性键</span>}
+      </div>
+      <p className="hint" style={{ padding: 0 }}>
+        语义候选结构校验（validate_candidates）使用的受控词表；登记类型时按此填写单位型属性，越表值会被如实标出。
+      </p>
+      {error && <div className="error-text">单位词表暂不可用（语义 worker 降级，不影响本体治理）：{error}</div>}
+      {units !== null && Object.keys(units).length === 0 && (
+        <Empty icon="🧮" title="词表为空" hint="worker 未定义任何受控单位。" />
+      )}
+      {units !== null && Object.entries(units).map(([key, values]) => (
+        <div key={key} className="onto-units-row">
+          <code>{key}</code>
+          <span>{values.map((v) => <span key={v} className="badge" style={{ marginRight: 4 }}>{v}</span>)}</span>
+        </div>
+      ))}
+      {units === null && !error && <div className="state">加载词表…</div>}
+    </section>
+  );
 }
 
 function errorText(err: unknown): string {

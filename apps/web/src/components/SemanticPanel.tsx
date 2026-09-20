@@ -39,6 +39,28 @@ interface QueueItem {
   created_by_name: string | null;
   asset_name: string | null;
 }
+interface CandidateDetail {
+  id: string;
+  asset_id: string;
+  revision_id: string | null;
+  relation_type: string;
+  source_text: string; source_start: number; source_end: number;
+  target_text: string; target_start: number; target_end: number;
+  evidence_segment: string;
+  confidence: number;
+  llm_proposed: boolean;
+  extractor_version: string;
+  status: string;
+  created_at: string;
+  created_by_name: string | null;
+  decided_at: string | null;
+  decided_by_name: string | null;
+  resolved_relation_id: string | null;
+  asset_name: string | null;
+  resolved_type_key: string | null;
+  resolved_type_version: string | null;
+}
+interface BatchResult { candidateId: string; ok: boolean; relationId?: string; code?: string; message?: string }
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) {
@@ -73,6 +95,11 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qMapping, setQMapping] = useState<Record<string, { source: string; target: string }>>({});
   const [qErrors, setQErrors] = useState<Record<string, string>>({});
   const [importCount, setImportCount] = useState<number | null>(null);
+  // 批审（M18）：勾选 + 批量确认/忽略；详情展开按需拉取
+  const [qSel, setQSel] = useState<Record<string, boolean>>({});
+  const [qBusy, setQBusy] = useState(false);
+  const [qDetailOpen, setQDetailOpen] = useState<Record<string, boolean>>({});
+  const [qDetail, setQDetail] = useState<Record<string, CandidateDetail | null>>({});
 
   const loadQueue = useCallback(() => {
     if (!project) return;
@@ -224,6 +251,88 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     }
   }
 
+  // 批量确认：未映射端点的勾选项不送审、行内如实提示；其余逐条送批，逐条回执
+  async function batchConfirmSelected() {
+    if (!project || !queue) return;
+    const ids = queue.filter((q) => qSel[q.id]).map((q) => q.id);
+    if (ids.length === 0) return;
+    const items: Array<{ candidateId: string; sourceAssetId: string; targetAssetId: string }> = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const m = qMapping[id];
+      if (m?.source && m?.target) items.push({ candidateId: id, sourceAssetId: m.source, targetAssetId: m.target });
+      else missing.push(id);
+    }
+    setQErrors((prev) => {
+      const next = { ...prev };
+      for (const id of ids) next[id] = "";
+      for (const id of missing) next[id] = "未映射端点资产，未纳入批量确认";
+      return next;
+    });
+    if (items.length === 0) return;
+    setQBusy(true);
+    try {
+      const r = await api<{ confirmed: number; results: BatchResult[] }>("/semantic/candidates/batch-confirm", {
+        method: "POST",
+        body: { teamId: project.teamId, items },
+      });
+      setQErrors((prev) => {
+        const next = { ...prev };
+        for (const res of r.results) {
+          if (!res.ok) next[res.candidateId] = `${res.code ?? "INTERNAL"}：${res.message ?? "确认失败"}`;
+        }
+        return next;
+      });
+      setQSel({});
+      loadQueue();
+    } catch (err) {
+      setQErrors((prev) => ({ ...prev, [items[0]!.candidateId]: errorText(err) }));
+    } finally {
+      setQBusy(false);
+    }
+  }
+
+  // 批量忽略：勾选项整批送审，已处理条目由服务端逐条如实回执
+  async function batchDismissSelected() {
+    if (!project || !queue) return;
+    const ids = queue.filter((q) => qSel[q.id]).map((q) => q.id);
+    if (ids.length === 0) return;
+    setQBusy(true);
+    try {
+      const r = await api<{ dismissed: number; results: BatchResult[] }>("/semantic/candidates/batch-dismiss", {
+        method: "POST",
+        body: { teamId: project.teamId, candidateIds: ids },
+      });
+      setQErrors((prev) => {
+        const next: Record<string, string> = {};
+        for (const res of r.results) {
+          if (!res.ok) next[res.candidateId] = `${res.code ?? "INTERNAL"}：忽略失败`;
+        }
+        return next;
+      });
+      setQSel({});
+      loadQueue();
+    } catch (err) {
+      setQErrors((prev) => ({ ...prev, [ids[0]!]: errorText(err) }));
+    } finally {
+      setQBusy(false);
+    }
+  }
+
+  async function toggleDetail(id: string) {
+    const opening = !qDetailOpen[id];
+    setQDetailOpen((prev) => ({ ...prev, [id]: opening }));
+    if (!opening || qDetail[id]) return;
+    if (!project) return;
+    try {
+      const d = await api<CandidateDetail>(`/semantic/candidates/${id}`, { query: { teamId: project.teamId } });
+      setQDetail((prev) => ({ ...prev, [id]: d }));
+    } catch (err) {
+      setQDetail((prev) => ({ ...prev, [id]: null }));
+      setQErrors((prev) => ({ ...prev, [id]: errorText(err) }));
+    }
+  }
+
   if (!project) return <Empty icon="🗂" title="选择一个项目" hint="语义候选按团队资产上下文抽取与确认。" />;
 
   const setMap = (i: number, side: "source" | "target", value: string) => {
@@ -338,12 +447,41 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
         {queue !== null && queue.length === 0 && (
           <Empty icon="📥" title="队列是空的" hint="抽取候选后点「存入审核队列」，或等待其他成员入队。" />
         )}
+        {queue !== null && queue.length > 0 && (
+          <div className="sem-batchbar">
+            <label className="sem-check">
+              <input
+                type="checkbox"
+                aria-label="全选待审候选"
+                checked={queue.every((q) => qSel[q.id])}
+                onChange={(e) => setQSel(Object.fromEntries(queue.map((q) => [q.id, e.target.checked])))}
+              />
+              全选
+            </label>
+            <span className="sem-conf">已选 {queue.filter((q) => qSel[q.id]).length} / {queue.length}</span>
+            <button className="primary" disabled={qBusy || queue.every((q) => !qSel[q.id])} onClick={() => void batchConfirmSelected()}>
+              {qBusy ? "处理中…" : "批量确认"}
+            </button>
+            <button disabled={qBusy || queue.every((q) => !qSel[q.id])} onClick={() => void batchDismissSelected()}>
+              批量忽略
+            </button>
+            <span className="sem-conf">批量确认需先映射端点；未映射的条目会被跳过并逐行提示</span>
+          </div>
+        )}
         {queue !== null && queue.map((item) => {
           const m = qMapping[item.id];
           const canConfirm = !!m?.source && !!m?.target;
+          const detail = qDetail[item.id];
+          const detailOpen = !!qDetailOpen[item.id];
           return (
             <div key={item.id} className="sem-cand">
               <div className="sem-cand-head">
+                <input
+                  type="checkbox"
+                  aria-label={`批选 ${item.source_text}`}
+                  checked={!!qSel[item.id]}
+                  onChange={(e) => setQSel((prev) => ({ ...prev, [item.id]: e.target.checked }))}
+                />
                 <span className="badge">{item.relation_type}</span>
                 <span className="chip chip-dim">{item.llm_proposed ? "LLM 提议" : "规则"}</span>
                 <span className="sem-conf">{Math.round((item.confidence ?? 0) * 100)}%</span>
@@ -376,7 +514,36 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
                 </select>
                 <button className="primary" disabled={!canConfirm} onClick={() => void confirmQueue(item)}>确认断言</button>
                 <button onClick={() => void dismissQueue(item)}>忽略</button>
+                <button onClick={() => void toggleDetail(item.id)}>{detailOpen ? "收起详情" : "详情"}</button>
               </div>
+              {detailOpen && (
+                <div className="sem-detail">
+                  {!detail && <div className="state">加载详情…</div>}
+                  {detail && (
+                    <dl>
+                      <dt>状态</dt><dd>
+                        {detail.status === "pending" && "待审核"}
+                        {detail.status === "confirmed" && `已确认 · 断言 ${detail.resolved_relation_id?.slice(0, 8)}…（${detail.resolved_type_key ?? "?"} v${detail.resolved_type_version ?? "?"}）`}
+                        {detail.status === "dismissed" && "已忽略"}
+                      </dd>
+                      <dt>证据来源</dt><dd>
+                        {detail.asset_id && <span className="sem-endpoint" onClick={() => onOpenAsset(detail.asset_id)}>{detail.asset_name ?? detail.asset_id.slice(0, 8)}…（点击打开）</span>}
+                        {detail.revision_id && <> · 修订 {detail.revision_id.slice(0, 8)}…</>}
+                      </dd>
+                      <dt>原文定位</dt><dd>
+                        source [{detail.source_start}, {detail.source_end}) · target [{detail.target_start}, {detail.target_end})
+                      </dd>
+                      <dt>抽取器</dt><dd><code>{detail.extractor_version || "—"}</code>{detail.llm_proposed ? "（LLM 提议）" : ""}</dd>
+                      <dt>入队</dt><dd>{detail.created_by_name ?? "—"} · {new Date(detail.created_at).toLocaleString()}</dd>
+                      <dt>决策</dt><dd>
+                        {detail.status === "pending"
+                          ? "待定"
+                          : `${detail.decided_by_name ?? "—"} · ${detail.decided_at ? new Date(detail.decided_at).toLocaleString() : "—"}`}
+                      </dd>
+                    </dl>
+                  )}
+                </div>
+              )}
               {qErrors[item.id] && <div className="error-text">{qErrors[item.id]}</div>}
             </div>
           );

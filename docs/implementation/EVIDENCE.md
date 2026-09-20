@@ -481,3 +481,30 @@
   b37d1116…）→「Agent 提案」待审列表出现（建议名称"轨道仿真数据集 2026 · 类型
   提示 document"自动提取）→ 点接受 → 待审清空、已接受视图显示审核人。
   截图 m17-ui-proposals.png。
+
+### EV-040 ｜ 2026-09-21 ｜ M18 迭代轮：候选队列批审与详情 + 本体页单位词表
+- M15 的候选队列只能逐条审核；入队量大时人工成本线性增长。本轮补齐批量通道，
+  并把候选的完整留痕（原文定位/抽取器/决策人/断言去向）开放给审核人。
+- API：confirmCandidate 抽为共享核心（候选锁 + 状态机 + 类型解析 + 断言，单条与
+  批量同一路径）；POST /semantic/candidates/batch-confirm（≤50 条，每条 SAVEPOINT
+  隔离——一条失败回滚到保存点后继续，逐条如实回执 ok/relationId 或 code/message，
+  部分成功不伪装全成功；整单恒 200）；POST .../batch-dismiss（逐条回执，已处理
+  条目标 CANDIDATE_NOT_PENDING 不中断）；GET /semantic/candidates/:id（全字段 +
+  created_by/decided_by 双留痕 + resolved relation 的类型与版本去向）；
+  GET /semantic/units（代理 worker 词表，不可达 503 DEPENDENCY_UNAVAILABLE）。
+- worker：UNIT_VOCAB 提升为模块级唯一定义点（校验执行与对外展示同源），新增
+  GET /units。
+- UI：待审核队列批审条（全选/已选 n/批量确认/批量忽略；未映射端点的勾选项不送审、
+  行内如实提示）；每行批选框与「详情」展开（状态/证据来源可点击开资产/原文
+  spans/抽取器/入队人与时间/决策留痕或待定）；失败逐行回显。本体治理台新增
+  「受控单位词表」卡片（4 属性键真实词表；worker 降级时如实提示，不影响本体治理）。
+- 测试 tests/m18（6 项，全部真实集成）：混合批量确认（2 确认 + DOMAIN_RANGE_VIOLATION
+  + RELATION_TYPE_UNREGISTERED 逐条回执、违规保持待审、断言真实落地目录可见）；
+  重复批审逐条回执 CANDIDATE_NOT_PENDING；批量忽略（幽灵 id 如实回执不中断）；
+  详情（决策留痕/断言去向/spans/404）；越权（51 条 422、非成员批审与详情 404 且
+  数据未被改动）；单位词表（真实 worker 同源 + 不可达 503 降级）。
+  全量：`npx vitest run` **25 套件 136 项全部通过**（61s）。
+- 浏览器实测（真实 API 造数 + 真实 worker）：队列 3 条全选自动映射 → 批量确认
+  全部落地（图谱 2 节点 3 关系可见）→ 补入 verifies 候选 → 「详情」展开六项留痕
+  正确 → 勾选批量忽略 → 队列清空；本体页单位词表卡片渲染 positionUnit m/km/AU、
+  timeScale TAI/UTC/TT/TDB/GPST 等真实词表。

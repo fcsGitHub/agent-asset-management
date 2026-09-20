@@ -42,6 +42,15 @@ RELATION_PATTERNS: List[Dict[str, Any]] = [
 
 UNIT_KEYS = {"positionUnit", "velocityUnit", "angleUnit", "timeScale", "frame"}
 
+# 受控单位词表：validate_candidates 的结构校验依据，也是本体治理台展示的唯一定义点
+#（GET /units）。治理台展示与校验执行必须同源，改这里即可，不允许两处漂移。
+UNIT_VOCAB: Dict[str, List[str]] = {
+    "positionUnit": ["m", "km", "AU"],
+    "velocityUnit": ["m/s", "km/s"],
+    "timeScale": ["TAI", "UTC", "TT", "TDB", "GPST"],
+    "frame": ["ECI", "ECEF", "ICRF", "ITRF", "LVLH", "RTN"],
+}
+
 # LLM 增强（可选）：enhance_llm=true 时调用真实 DeepSeek（OpenAI 兼容协议，stdlib 无新依赖）。
 # LLM 候选与规则候选合并；候选永远是 candidate，人工确认后才成为正式关系。
 # key 从环境读取，绝不写入日志或返回体。
@@ -160,6 +169,12 @@ def _find_entities(text: str, hints: List[EntityHint]) -> List[Entity]:
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "extractor": EXTRACTOR_VERSION}
+
+
+@app.get("/units")
+def units():
+    # 受控单位词表只读暴露：与 validate_candidates 的结构校验同源
+    return {"units": UNIT_VOCAB, "extractor_version": EXTRACTOR_VERSION}
 
 
 @app.post("/extract_candidates")
