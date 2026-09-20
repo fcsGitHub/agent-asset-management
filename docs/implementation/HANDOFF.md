@@ -12,7 +12,7 @@
 
 - M0–M5 全部里程碑；42 项验收：40 通过 / 1 明确不适用（E06 离线+ARM64 未验证，
   属环境外部限制，如实标记不做声称）
-- 测试：11 套件 77 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock）
+- 测试：13 套件 84 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock）
 - 演练：M1 重启持久化（docker restart）、E03 备份恢复到新容器、E05 性能（≥1 万资产规模）、
   M6 并发竞态/并发负载/kill -9 中段事务崩溃注入/冷启动引导（EV-019～023）
 - 文档：README（真实执行过的命令）、docs/ops/{ADMIN,BACKUP,CONFIG}.md
@@ -37,5 +37,6 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 1. 读 docs/implementation/ACCEPTANCE.md（42 项状态）与本文件
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
-4. `npx vitest run` 确认 77 项基线仍绿
+   （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
+4. `npx vitest run` 确认 84 项基线仍绿
 5. 从"遗留清单"取任务，或响应用户新指令

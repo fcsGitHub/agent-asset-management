@@ -104,6 +104,37 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  // 会话级运行历史：界面重建对话中的 Agent 运行（含工具调用轨迹）
+  app.get("/sessions/:sessionId/runs", async (req) => {
+    const auth = requireAuth(req);
+    const { sessionId } = req.params as { sessionId: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows: sess } = await client.query(
+        `SELECT 1 FROM sessions WHERE team_id = $1 AND id = $2`,
+        [teamId, sessionId]
+      );
+      if (!sess[0]) throw ERR.NOT_FOUND();
+      const { rows: runs } = await client.query(
+        `SELECT id, status, prompt, result, error, used, created_at
+           FROM agent_runs WHERE team_id = $1 AND session_id = $2 ORDER BY created_at DESC LIMIT 20`,
+        [teamId, sessionId]
+      );
+      const runIds = runs.map((r) => r.id);
+      const { rows: invocations } = await client.query(
+        `SELECT run_id, call_id, name, args, result, status, error, created_at
+           FROM tool_invocations WHERE team_id = $1 AND run_id = ANY($2::uuid[]) ORDER BY created_at`,
+        [teamId, runIds]
+      );
+      return runs.map((r) => ({
+        ...r,
+        invocations: invocations.filter((i: { run_id: string }) => i.run_id === r.id),
+      }));
+    });
+  });
+
   // SSE 可续接：Last-Event-ID 之后继续，事件已落库；断线重连不重触发任务
   app.get("/runs/:runId/events", async (req, reply) => {
     const auth = requireAuth(req);

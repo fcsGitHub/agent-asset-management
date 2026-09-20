@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, uploadFile } from "../api";
 import type { Me } from "../App";
 
@@ -265,49 +265,171 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
   );
 }
 
+interface ToolInvocation { call_id: string; name: string; args: unknown; result: unknown; status: string; error: string }
+interface RunRecord { id: string; status: string; prompt: string; result: unknown; error: string; created_at: string; invocations: ToolInvocation[] }
+interface RunToolBlock { callId: string; name: string; args: unknown; state: "running" | "ok" | "denied" | "error"; result?: unknown; error?: string }
+/** 界面侧的运行视图：事件流实时更新；历史运行从 /sessions/:id/runs 重建。 */
+interface RunView { id: string; status: string; text: string; note: string; streaming: boolean; tools: RunToolBlock[] }
+
+const displayToolName = (wire: string) => wire.replace(/__/g, ".");
+
 function AgentPane({ project, sessionId }: { project?: ProjectInfo; sessionId: string }) {
   const [msgs, setMsgs] = useState<Msg[] | null>(null);
+  const [runs, setRuns] = useState<RunView[]>([]);
   const [error, setError] = useState("");
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+
+  const loadHistory = useCallback((teamId: string, sid: string) => {
+    void api<Msg[]>(`/sessions/${sid}/messages`, { query: { teamId } })
+      .then(setMsgs)
+      .catch((e) => setError(e instanceof ApiError ? e.message : "加载会话失败"));
+    void api<RunRecord[]>(`/sessions/${sid}/runs`, { query: { teamId } })
+      .then((rows) =>
+        setRuns(
+          rows.map((r) => ({
+            id: r.id,
+            status: r.status,
+            text: typeof r.result === "object" && r.result !== null && "finalText" in (r.result as object)
+              ? String((r.result as { finalText?: string }).finalText ?? "")
+              : "",
+            note: r.error,
+            streaming: false,
+            tools: r.invocations.map((i) => ({
+              callId: i.call_id, name: displayToolName(i.name), args: i.args,
+              state: i.status === "ok" ? "ok" : i.status === "denied" ? "denied" : "error",
+              result: i.result, error: i.error,
+            })),
+          }))
+        )
+      )
+      .catch(() => setRuns([]));
+  }, []);
 
   useEffect(() => {
     setMsgs(null);
     setError("");
+    setRuns([]);
+    esRef.current?.close();
+    esRef.current = null;
     if (!project || !sessionId) return;
-    void api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId: project.teamId } })
-      .then(setMsgs)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "加载会话失败"));
-  }, [project, sessionId]);
+    loadHistory(project.teamId, sessionId);
+    return () => {
+      esRef.current?.close();
+      esRef.current = null;
+    };
+  }, [project, sessionId, loadHistory]);
+
+  function openEventStream(teamId: string, runId: string) {
+    const es = new EventSource(`/api/v1/runs/${runId}/events?teamId=${teamId}`);
+    esRef.current = es;
+    const patch = (fn: (r: RunView) => RunView) =>
+      setRuns((prev) => prev.map((r) => (r.id === runId ? fn(r) : r)));
+    es.addEventListener("tool_call", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { callId: string; name: string; args: unknown };
+      patch((r) => ({ ...r, tools: [...r.tools, { callId: p.callId, name: displayToolName(p.name), args: p.args, state: "running" }] }));
+    });
+    es.addEventListener("tool_result", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { callId: string; status: string; result: unknown; error: string };
+      patch((r) => ({
+        ...r,
+        tools: r.tools.map((t) =>
+          t.callId === p.callId
+            ? { ...t, state: p.status === "ok" ? "ok" : p.status === "denied" ? "denied" : "error", result: p.result, error: p.error }
+            : t
+        ),
+      }));
+    });
+    es.addEventListener("message", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { role: string; text: string };
+      if (p.role === "assistant") patch((r) => ({ ...r, text: p.text }));
+    });
+    es.addEventListener("completed", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { finalText: string };
+      patch((r) => ({ ...r, text: p.finalText, status: "completed", streaming: false }));
+      es.close();
+      if (project) void api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId } }).then(setMsgs).catch(() => undefined);
+    });
+    es.addEventListener("blocked", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { reason: string; limit?: number };
+      const why = p.reason === "budget_tool_calls" ? `工具调用达到预算上限（${p.limit}）`
+        : p.reason === "budget_tokens" ? `token 达到预算上限（${p.limit}）`
+        : p.reason === "max_turns" ? "运行轮数达到上限" : p.reason;
+      patch((r) => ({ ...r, status: "blocked", streaming: false, note: `已暂停等待处置：${why}` }));
+      es.close();
+    });
+    es.addEventListener("cancelled", () => {
+      patch((r) => ({ ...r, status: "cancelled", streaming: false, note: "已被用户取消。" }));
+      es.close();
+    });
+    es.addEventListener("failed", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { error: string };
+      patch((r) => ({ ...r, status: "failed", streaming: false, note: `运行失败：${p.error}` }));
+      es.close();
+    });
+    es.addEventListener("unknown_reconcile", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { tool: string; detail: string };
+      patch((r) => ({ ...r, status: "unknown_reconcile", streaming: false, note: `外部副作用结果未知（${p.tool}），已进入对账，不盲目重试。` }));
+      es.close();
+    });
+    es.addEventListener("done", () => {
+      es.close();
+      if (esRef.current === es) esRef.current = null;
+    });
+    es.onerror = () => { /* EventSource 自动按 Last-Event-ID 重连续传 */ };
+  }
 
   async function send() {
     if (!project || !sessionId || !text.trim()) return;
     setSending(true);
     setError("");
     const content = text.trim();
+    setText("");
     try {
-      await api(`/sessions/${sessionId}/messages`, {
+      // 真实 LLM 运行：创建运行（同时持久化用户消息），SSE 流式接工具事件与回复
+      const created = await api<{ runId: string }>(`/sessions/${sessionId}/runs`, {
         method: "POST",
-        body: { teamId: project.teamId, role: "user", content },
+        body: { teamId: project.teamId, prompt: content },
       });
-      setText("");
-      const updated = await api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId: project.teamId } });
-      setMsgs(updated);
+      setRuns((prev) => [...prev, { id: created.runId, status: "running", text: "", note: "", streaming: true, tools: [] }]);
+      openEventStream(project.teamId, created.runId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "发送失败");
+      if (err instanceof ApiError && (err.status === 503 || err.code.startsWith("LLM_"))) {
+        // 模型不可用：诚实降级为普通消息持久化，不伪造 Agent 回复
+        try {
+          await api(`/sessions/${sessionId}/messages`, { method: "POST", body: { teamId: project.teamId, role: "user", content } });
+          setMsgs(await api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId: project.teamId } }));
+          setError("模型未配置或不可用，本条已保存为普通消息（未触发 Agent）。");
+        } catch {
+          setError("发送失败：模型不可用且消息保存失败。");
+        }
+      } else {
+        setError(err instanceof ApiError ? err.message : "发送失败");
+      }
     } finally {
       setSending(false);
     }
   }
 
+  async function cancelRun(runId: string) {
+    if (!project) return;
+    try {
+      await api(`/runs/${runId}/cancel`, { method: "POST", body: { teamId: project.teamId, reason: "用户在界面取消" } });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "取消失败");
+    }
+  }
+
+  const anyStreaming = runs.some((r) => r.streaming);
   return (
     <aside className="agent-pane" aria-label="Agent 对话区">
       <div className="pane-label">AGENT · {project?.name ?? "未选择项目"}</div>
       <div className="messages">
         {msgs === null && !error && <div className="state">{sessionId ? "加载会话…" : "从左侧选择一个会话。"}</div>}
         {error && <div className="state error">{error}</div>}
-        {msgs?.length === 0 && (
-          <div className="state">开始这段会话。你可以先在右侧「登记资产」完成上传与登记；Agent 助手稍后接入。</div>
+        {msgs?.length === 0 && runs.length === 0 && (
+          <div className="state">开始这段会话。发送任务给 Agent（真实模型执行，工具调用全程可见），或先在右侧登记资产。</div>
         )}
         {msgs?.map((m) => (
           <div key={m.id} className={`msg ${m.role}`}>
@@ -315,21 +437,60 @@ function AgentPane({ project, sessionId }: { project?: ProjectInfo; sessionId: s
             <div className="bubble">{m.content}</div>
           </div>
         ))}
+        {runs.map((r) => (
+          <div key={r.id} className="msg assistant" data-run-status={r.status}>
+            <div className="who">
+              Agent 运行
+              <span className="badge" style={{ marginLeft: 6 }}>{
+                r.status === "running" ? "运行中" : r.status === "completed" ? "已完成"
+                : r.status === "blocked" ? "已暂停" : r.status === "cancelled" ? "已取消"
+                : r.status === "failed" ? "失败" : "对账中"
+              }</span>
+            </div>
+            {r.tools.length > 0 && (
+              <div className="run-tools">
+                {r.tools.map((t) => (
+                  <details key={t.callId} className="run-tool">
+                    <summary>
+                      <span className={`tool-state ${t.state}`}>
+                        {t.state === "running" ? "…" : t.state === "ok" ? "✓" : t.state === "denied" ? "⛔" : "✗"}
+                      </span>
+                      <code>{t.name}</code>
+                      <span className="tool-summary">
+                        {t.state === "running" ? "执行中" : t.state === "denied" ? "权限网关拒绝" : t.state === "error" ? `出错：${t.error}` : "完成"}
+                      </span>
+                    </summary>
+                    <pre className="run-tool-detail">{JSON.stringify(t.args, null, 2)}</pre>
+                    {t.state === "ok" && t.result != null && (
+                      <pre className="run-tool-detail">{JSON.stringify(t.result, null, 2).slice(0, 800)}</pre>
+                    )}
+                  </details>
+                ))}
+              </div>
+            )}
+            {r.text && <div className="bubble">{r.text}</div>}
+            {r.streaming && !r.text && <div className="bubble">正在思考并调用工具…</div>}
+            {r.note && <div className="bubble" style={{ color: "var(--muted)" }}>{r.note}</div>}
+            {r.streaming && (
+              <button style={{ marginTop: 6 }} onClick={() => void cancelRun(r.id)}>取消运行</button>
+            )}
+          </div>
+        ))}
       </div>
       <div className="chat-input">
         <textarea
-          placeholder="输入消息…（Agent 将在后续里程碑接入；上传、登记、检索等操作不依赖模型）"
+          placeholder="给 Agent 派任务（真实模型 + 工具：资产检索 / 建提案 / 建 Issue）…"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send();
           }}
         />
-        <button onClick={() => void send()} disabled={sending || !text.trim() || !sessionId}>
-          {sending ? "发送中" : "发送"}
+        <button onClick={() => void send()} disabled={sending || anyStreaming || !text.trim() || !sessionId}>
+          {sending ? "发送中" : anyStreaming ? "运行中" : "发送"}
         </button>
       </div>
-      <div className="hint">Ctrl+Enter 发送 · 会话内容持久化保存</div>
+      <div className="hint">Ctrl+Enter 发送 · Agent 仅草稿写入权限，发布等高权动作必须由人类执行</div>
     </aside>
   );
 }

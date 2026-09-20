@@ -10,6 +10,7 @@ import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
 import { compileTypeSchema, validateProperties, diffJsonSchemas, countPropertyUsage } from "@taw/domain/validate";
+import { stableStringify } from "@taw/domain/digest";
 import {
   DEFAULT_RELATION_TYPES,
   DEFAULT_TYPE_DEFINITIONS,
@@ -24,15 +25,8 @@ async function teamRole(userId: string, teamId: string): Promise<string> {
   return rows[0].role;
 }
 
-/** 递归键排序的稳定 JSON 序列化（摘要规范化用）。 */
-export function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
-}
+/** 递归键排序的稳定 JSON 序列化见 @taw/domain/digest（与发布摘要共用同一实现）。 */
+export { stableStringify };
 
 export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   const store = blobStoreFromEnv();
@@ -368,9 +362,13 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   app.get("/assets/:assetId", async (req) => {
     const auth = requireAuth(req);
     const { assetId } = req.params as { assetId: string };
-    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    const query = (req.query ?? {}) as { teamId?: string; revLimit?: string; revOffset?: string };
+    const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
+    // 修订历史分页：长历史资产不再一次性返回全部修订（revisionsTotal 供界面提示）
+    const revLimit = Math.min(Math.max(Number(query.revLimit ?? 50), 1), 200);
+    const revOffset = Math.max(Number(query.revOffset ?? 0), 0);
     return withTeam(teamId, async (client) => {
       const { rows } = await client.query(
         `SELECT a.id, a.name, a.lifecycle, a.created_at, tv.type_key, tv.version AS type_version, tv.id AS type_version_id
@@ -380,10 +378,14 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       const asset = rows[0];
       if (!asset) throw ERR.NOT_FOUND();
+      const { rows: total } = await client.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM asset_revisions WHERE team_id = $1 AND asset_id = $2`,
+        [teamId, assetId]
+      );
       const { rows: revisions } = await client.query(
         `SELECT id, seq, content_digest, properties, created_at, created_by FROM asset_revisions
-          WHERE team_id = $1 AND asset_id = $2 ORDER BY seq DESC`,
-        [teamId, assetId]
+          WHERE team_id = $1 AND asset_id = $2 ORDER BY seq DESC LIMIT $3 OFFSET $4`,
+        [teamId, assetId, revLimit, revOffset]
       );
       const { rows: labels } = await client.query<{ label: string }>(
         `SELECT label FROM asset_labels WHERE team_id = $1 AND asset_id = $2`,
@@ -393,7 +395,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         `SELECT category_path, is_primary FROM asset_categories WHERE team_id = $1 AND asset_id = $2`,
         [teamId, assetId]
       );
-      return { ...asset, revisions, labels: labels.map((l) => l.label), categories };
+      return { ...asset, revisions, revisionsTotal: total[0]!.n, labels: labels.map((l) => l.label), categories };
     });
   });
 

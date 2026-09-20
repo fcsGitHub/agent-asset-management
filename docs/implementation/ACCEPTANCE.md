@@ -119,3 +119,7 @@ E06 的离线/ARM64 部分（外部环境限制，非代码缺陷）。
   新增 3 套件 15 项测试（m6-hardening 7、m6-concurrency 4、m6-extensibility 4），全量 **11 套件 77 项通过**；
   全仓 mock 审计干净（apps/packages/services/tests/scripts 无任何 mock 库引用）；
   发布竞态真实并发验证（B05 强化）；kill -9 中段事务崩溃注入 + 冷启动引导演练 16 步全绿。
+- 2026-09-20（M7 迭代轮）：① outbox 派发 worker 真实实现（租约/SKIP LOCKED/至少一次/退避慢车道，
+  tests/m6-worker 5 项，真实 HTTP 接收端）；② Agent 区接真实运行（SSE 工具事件流 + 取消 + 运行历史
+  端点，模型不可用诚实降级，浏览器实测真实 DeepSeek 回复与工具块）；③ 查询优化（头修订索引 top-1、
+  修订历史分页、stableStringify 去重）。全量 **13 套件 84 项通过**（EV-024～026）。

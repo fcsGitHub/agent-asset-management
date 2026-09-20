@@ -194,3 +194,30 @@
 - 扩展包：运行时注册 custom.sensor-grid（含 Hz/kHz 词表）零代码改动 → 词表外单位 422、
   缺必填 422 → 跨类型关系（自定义类型 → 内置 document）→ 草稿/CR/preview 发布/通道视图全链路。
 - 回归：`npx vitest run` 11 套件 77 项全部通过。
+
+### EV-024 ｜ 2026-09-20 ｜ M7 outbox 派发 worker（tests/m6-worker，5 项）
+- 迁移 0016：outbox 租约列（leased_at/lease_until/last_error）、未投递部分索引、
+  专用 taw_worker 角色（表级 RLS 策略，不绕过租户隔离整体）。
+- apps/worker/src/dispatcher.ts：FOR UPDATE SKIP LOCKED 租约抢占 + 至少一次投递 +
+  5s 超时 + 失败退避（超上限进 1 小时慢车道，保持未投递事实）。
+- 测试用真实 HTTP 接收端（测试内 node http server）验证：投递成功且 delivered_at 落库、
+  已投递不再重投、500 失败后 attempts/last_error 入账并恢复重投（attempt=2）、
+  有效租约阻止重复投递、慢车道长退避。
+
+### EV-025 ｜ 2026-09-20 ｜ M7 Agent 区接真实运行（浏览器验证）
+- 新端点 GET /sessions/:id/runs（会话运行历史 + 工具调用轨迹，tests/m7-api）。
+- Workbench Agent 区重写：发送即创建真实 DeepSeek 运行 → EventSource 接 SSE
+  （tool_call/tool_result/message/completed/blocked/cancelled/failed/unknown_reconcile，
+  断线按 Last-Event-ID 自动续传）→ 工具事件块（参数/结果展开、状态图标）→
+  取消按钮 → 模型不可用时诚实降级为普通消息（不伪造回复）。
+- 浏览器实测：任务"检索团队资产"→ asset.search 工具块"✓ 完成"→ 真实模型回复列出
+  库中 2 项资产及修订摘要。截图 docs/evidence/m7-ui-agent-run.png。
+
+### EV-026 ｜ 2026-09-20 ｜ M7 查询层优化
+- 迁移 0016 索引 idx_revisions_head (team_id, asset_id, seq DESC)：
+  头修订 LATERAL 查找从"取全部修订再排序"降为索引 top-1；
+  EXPLAIN ANALYZE 确认 Index Scan 无 Sort 节点，0.17ms。
+- GET /assets/:id 修订历史分页（revLimit/revOffset，revisionsTotal），
+  长历史资产不再全量返回（tests/m7-api 翻页断言）。
+- 去重：catalog.ts 本地 stableStringify 副本删除，与发布摘要共用 @taw/domain/digest 实现。
+- 回归：`npx vitest run` 13 套件 84 项全部通过。
