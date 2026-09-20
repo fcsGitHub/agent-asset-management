@@ -150,4 +150,171 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       archived: r.archived,
     }));
   });
+
+  // ---------- 项目总览（仪表盘统计，一次聚合查询；AgentPM Dashboard 范式） ----------
+  app.get("/projects/:projectId/overview", async (req) => {
+    const auth = requireAuth(req);
+    const { projectId } = req.params as { projectId: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await assertProjectAccess(auth.userId, teamId, projectId);
+    return withTeam(teamId, async (client) => {
+      const { rows: proj } = await client.query<{ id: string; name: string; code: string; status: string; created_at: string }>(
+        `SELECT id, name, code, status, created_at FROM projects WHERE team_id = $1 AND id = $2`,
+        [teamId, projectId]
+      );
+      if (!proj[0]) throw ERR.NOT_FOUND();
+
+      // 分支与变更请求（项目域）
+      const { rows: branchCounts } = await client.query<{ open: string; total: string }>(
+        `SELECT count(*) FILTER (WHERE status = 'open')::text AS open, count(*)::text AS total
+           FROM branches WHERE team_id = $1 AND project_id = $2`,
+        [teamId, projectId]
+      );
+      const { rows: crCounts } = await client.query<{
+        open: string;
+        awaiting: string;
+        changes_requested: string;
+        merged: string;
+      }>(
+        `SELECT count(*) FILTER (WHERE status = 'open')::text AS open,
+                count(*) FILTER (WHERE status = 'awaiting_review')::text AS awaiting,
+                count(*) FILTER (WHERE status = 'changes_requested')::text AS changes_requested,
+                count(*) FILTER (WHERE status = 'merged')::text AS merged
+           FROM change_requests WHERE team_id = $1 AND project_id = $2`,
+        [teamId, projectId]
+      );
+      // 发布（项目域，经通道归属；近 30 天口径）
+      const { rows: releaseCounts } = await client.query<{ total: string; last30d: string }>(
+        `SELECT count(*)::text AS total,
+                count(*) FILTER (WHERE rs.created_at > now() - interval '30 days')::text AS last30d
+           FROM release_sets rs
+           JOIN change_requests cr ON cr.team_id = rs.team_id AND cr.id = rs.change_request_id
+          WHERE rs.team_id = $1 AND cr.project_id = $2`,
+        [teamId, projectId]
+      );
+
+      // 资产库与关系（团队域，如实标注）
+      const { rows: assetCounts } = await client.query<{ active: string; archived: string }>(
+        `SELECT count(*) FILTER (WHERE lifecycle = 'archived')::text AS archived,
+                count(*) FILTER (WHERE lifecycle <> 'archived')::text AS active
+           FROM assets WHERE team_id = $1`,
+        [teamId]
+      );
+      const { rows: revisionCounts } = await client.query<{ total: string }>(
+        `SELECT count(*)::text AS total FROM asset_revisions WHERE team_id = $1`,
+        [teamId]
+      );
+      const { rows: relationCounts } = await client.query<{ confirmed: string; proposed: string }>(
+        `SELECT count(*) FILTER (WHERE status = 'confirmed')::text AS confirmed,
+                count(*) FILTER (WHERE status = 'proposed')::text AS proposed
+           FROM relation_assertions WHERE team_id = $1`,
+        [teamId]
+      );
+
+      const n = (v: string | undefined): number => Number(v ?? "0");
+      return {
+        project: proj[0],
+        projectScope: {
+          branches: { open: n(branchCounts[0]?.open), total: n(branchCounts[0]?.total) },
+          changeRequests: {
+            open: n(crCounts[0]?.open),
+            awaitingReview: n(crCounts[0]?.awaiting),
+            changesRequested: n(crCounts[0]?.changes_requested),
+            merged: n(crCounts[0]?.merged),
+          },
+          releases: { total: n(releaseCounts[0]?.total), last30d: n(releaseCounts[0]?.last30d) },
+        },
+        teamScope: {
+          assets: { active: n(assetCounts[0]?.active), archived: n(assetCounts[0]?.archived) },
+          revisions: n(revisionCounts[0]?.total),
+          relations: { confirmed: n(relationCounts[0]?.confirmed), proposed: n(relationCounts[0]?.proposed) },
+        },
+      };
+    });
+  });
+
+  // ---------- 团队活动流（事件溯源红利：直接读审计 + Agent 运行，零新表） ----------
+  // audit_events = 人的治理动作（归档/发布/审核准备/回滚…）；
+  // agent_runs = Agent 动作（人机混排时间线，参考 AgentPM 活动页）。
+  app.get("/activity", async (req) => {
+    const auth = requireAuth(req);
+    const query = (req.query ?? {}) as { teamId?: string; limit?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await assertTeamMember(auth.userId, teamId);
+    const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
+    return withTeam(teamId, async (client) => {
+      const { rows: audits } = await client.query<{
+        ts: string;
+        action: string;
+        object_kind: string;
+        object_id: string | null;
+        actor: string | null;
+        detail: Record<string, unknown>;
+      }>(
+        `SELECT a.created_at AS ts, a.action, a.object_kind, a.object_id, u.display_name AS actor, a.detail
+           FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id
+          WHERE a.team_id = $1
+          ORDER BY a.created_at DESC LIMIT $2`,
+        [teamId, limit]
+      );
+      const { rows: agentRuns } = await client.query<{
+        ts: string;
+        prompt: string;
+        status: string;
+        actor: string | null;
+        project_name: string | null;
+        session_title: string | null;
+      }>(
+        `SELECT r.created_at AS ts, r.prompt, r.status, u.display_name AS actor,
+                p.name AS project_name, s.title AS session_title
+           FROM agent_runs r
+           LEFT JOIN users u ON u.id = r.created_by
+           LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
+           LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
+          WHERE r.team_id = $1
+          ORDER BY r.created_at DESC LIMIT $2`,
+        [teamId, limit]
+      );
+      interface ActivityItem {
+        ts: string;
+        kind: "audit" | "agent";
+        action: string;
+        summary: string;
+        actor: string;
+        objectId: string | null;
+        project?: string;
+      }
+      const ACTION_LABELS: Record<string, string> = {
+        "asset.archive": "归档资产",
+        "asset.restore": "恢复资产",
+        "review_prepared": "准备审核快照",
+        "release_published": "发布到通道",
+        "release_rollback": "通道回滚",
+      };
+      const items: ActivityItem[] = [
+        ...audits.map((a): ActivityItem => ({
+          ts: a.ts,
+          kind: "audit",
+          action: a.action,
+          summary: ACTION_LABELS[a.action] ?? a.action,
+          actor: a.actor ?? "系统",
+          objectId: a.object_id,
+        })),
+        ...agentRuns.map((r): ActivityItem => ({
+          ts: r.ts,
+          kind: "agent",
+          action: `agent.run.${r.status}`,
+          summary: r.prompt.length > 80 ? `${r.prompt.slice(0, 80)}…` : r.prompt,
+          actor: r.actor ?? "Agent",
+          objectId: null,
+          project: r.project_name ?? undefined,
+        })),
+      ]
+        .sort((x, y) => (x.ts < y.ts ? 1 : -1))
+        .slice(0, limit);
+      return { items };
+    });
+  });
 }

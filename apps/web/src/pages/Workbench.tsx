@@ -1,12 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, uploadFile } from "../api";
 import type { Me } from "../App";
+import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
+import { CommandBar } from "../components/CommandBar";
+import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
+import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
+
+const RAIL_PAGES: { key: PageKey; label: string; icon: string }[] = [
+  { key: "dashboard", label: "总览", icon: "◈" },
+  { key: "workbench", label: "工作台", icon: "▤" },
+  { key: "activity", label: "动态", icon: "≡" },
+  { key: "approvals", label: "审批", icon: "✓" },
+];
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
 interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string }
-interface TypeInfo { id: string; type_key: string; version: string; title: string; json_schema: { required?: string[]; properties?: Record<string, { type?: string; enum?: string[]; title?: string }> } }
+interface TypeInfo { id: string; type_key: string; version: string; title: string; parent_type_key?: string | null; parent_version?: string | null; json_schema: { required?: string[]; properties?: Record<string, { type?: string; enum?: string[]; title?: string }> } }
 interface AssetDetail {
   id: string; name: string; lifecycle: string; type_key: string; type_version: string;
   revisions: { id: string; seq: number; content_digest: string; properties: object; created_at: string }[];
@@ -25,6 +36,9 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
   const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "release">("overview");
   const [assetId, setAssetId] = useState("");
+  const [page, setPage] = useState<PageKey>("dashboard");
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
     void api<ProjectInfo[]>("/projects")
@@ -50,6 +64,39 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
 
   const reloadProjects = useCallback(() => {
     void api<ProjectInfo[]>("/projects").then(setProjects).catch(() => undefined);
+  }, []);
+
+  // 全局键盘：Ctrl/⌘+K 命令栏；? 帮助；g+字母 两级跳转（输入框聚焦时不劫持）
+  useEffect(() => {
+    const go = createGoPrefixHandler(setPage);
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdOpen((v) => !v);
+        return;
+      }
+      if (e.key === "Escape") {
+        setCmdOpen(false);
+        setHelpOpen(false);
+        return;
+      }
+      if (isTypingTarget(e.target)) return;
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelpOpen((v) => !v);
+        return;
+      }
+      go(e);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const openAssetFromSearch = useCallback((id: string) => {
+    setAssetId(id);
+    setWsView("assets");
+    setPage("workbench");
+    setMobileView("workspace");
   }, []);
 
   async function logout() {
@@ -91,6 +138,43 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
       </header>
 
       <div className="body">
+        <nav className="rail" aria-label="主导航">
+          {RAIL_PAGES.map((p) => (
+            <button
+              key={p.key}
+              className={`rail-item${page === p.key ? " active" : ""}`}
+              title={p.label}
+              aria-label={p.label}
+              onClick={() => setPage(p.key)}
+            >
+              <span className="rail-icon" aria-hidden="true">{p.icon}</span>
+              <span className="rail-label">{p.label}</span>
+            </button>
+          ))}
+          <button className="rail-item" title="命令栏（Ctrl/⌘+K）" aria-label="打开命令栏" onClick={() => setCmdOpen(true)}>
+            <span className="rail-icon" aria-hidden="true">⌘</span>
+            <span className="rail-label">搜索</span>
+          </button>
+        </nav>
+
+        {page === "dashboard" ? (
+          <main className="page-main" aria-label="总览仪表盘">
+            <DashboardPage
+              project={project}
+              me={me}
+              onNavigate={(p) => setPage(p)}
+            />
+          </main>
+        ) : page === "activity" ? (
+          <main className="page-main" aria-label="团队动态">
+            <ActivityPage project={project} onOpenAsset={openAssetFromSearch} />
+          </main>
+        ) : page === "approvals" ? (
+          <main className="page-main" aria-label="审批队列">
+            <ApprovalsPage project={project} onOpenRelease={() => { setPage("workbench"); setWsView("release"); setAssetId(""); }} />
+          </main>
+        ) : (
+        <>
         <nav className={`drawer${drawerOpen ? "" : " closed"}`} aria-label="项目与会话导航">
           <h3>项目 → SESSION</h3>
           <button
@@ -237,7 +321,19 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             )}
           </section>
         </div>
+        </>
+        )}
       </div>
+
+      <CommandBar
+        open={cmdOpen}
+        onClose={() => setCmdOpen(false)}
+        pages={RAIL_PAGES}
+        onNavigate={(p) => setPage(p)}
+        teamId={project?.teamId ?? ""}
+        onOpenAsset={openAssetFromSearch}
+      />
+      <ShortcutsOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
@@ -1042,14 +1138,17 @@ function AssetRegister({ project, onDone }: { project?: ProjectInfo; onDone: () 
     <div className="card">
       <h3>登记资产</h3>
       <div className="field">
-        <label>资产类型（同一套版本与审批机制覆盖所有类型）</label>
+        <label>资产类型（同一套版本与审批机制覆盖所有类型；↳ 表示继承父类型）</label>
         <select value={typeKey} onChange={(e) => { setTypeKey(e.target.value); setProps({}); }}>
           <option value="">选择类型…</option>
-          {types.map((t) => (
-            <option key={t.id} value={t.type_key}>
-              {t.title}（{t.type_key} v{t.version}）
-            </option>
-          ))}
+          {types.map((t) => {
+            const parentKey = t.parent_type_key ? `${t.parent_type_key} v${t.parent_version}` : null;
+            return (
+              <option key={t.id} value={t.type_key}>
+                {parentKey ? "↳ " : ""}{t.title}（{t.type_key} v{t.version}{parentKey ? ` ← ${parentKey}` : ""}）
+              </option>
+            );
+          })}
         </select>
       </div>
       <div className="field">

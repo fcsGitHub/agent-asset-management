@@ -138,3 +138,39 @@ export function countPropertyUsage(revisions: { properties: unknown }[]): Record
   }
   return usage;
 }
+
+/* ---------------- 本体质量门（吸收 semantica 的质量门思想） ---------------- */
+
+/**
+ * 单位词表悬挂引用检查（质量门，软约束）：
+ * 词表 <name> 运行时校验属性 <name>Unit 的取值。若 schema 既未声明 <name>Unit
+ * 也未声明 <name>（基础属性，常见于带后缀的附加属性约定），该词表将永远不会
+ * 被任何已知属性触发 —— 判定为悬挂。二者有其一声明即通过。
+ */
+export function danglingVocabularies(
+  jsonSchema: unknown,
+  unitVocabularies: Record<string, string[]>
+): string[] {
+  const dangling: string[] = [];
+  if (typeof jsonSchema !== "object" || jsonSchema === null) return [];
+  const props = (jsonSchema as SchemaObj)["properties"];
+  const known =
+    typeof props === "object" && props !== null ? new Set(Object.keys(props as SchemaObj)) : new Set<string>();
+  for (const vocabName of Object.keys(unitVocabularies)) {
+    if (!known.has(`${vocabName}Unit`) && !known.has(vocabName)) dangling.push(vocabName);
+  }
+  return dangling;
+}
+
+/**
+ * 子类型定义相对父类型定义的继承检查（subClassOf 语义）：
+ * 子定义必须是父定义的收窄 —— 只允许 required-added / property-removed /
+ * enum-narrowed / additional-properties-closed；属性类型必须与父一致
+ * （type-changed 不是收窄而是改写，拒绝）。
+ */
+export function inheritanceViolations(parentSchema: unknown, childSchema: unknown): string[] {
+  const changes = diffJsonSchemas(parentSchema, childSchema);
+  return changes
+    .filter((c) => c.kind === "property-type-changed")
+    .map((c) => `属性 ${c.path}：${c.detail}（子类型只能收窄父类型，不能改写属性类型）`);
+}

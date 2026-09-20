@@ -171,6 +171,18 @@ export interface DefaultRelationType {
 
 const A = ["asset"];
 
+/** 稳定实体身份的合法 kind（与 migrations/0002 的 entities.kind CHECK 保持一致）。 */
+export const ENTITY_KINDS = [
+  "asset",
+  "project",
+  "requirement",
+  "test_run",
+  "evidence",
+  "issue",
+  "work_item",
+] as const;
+export type EntityKind = (typeof ENTITY_KINDS)[number];
+
 export const DEFAULT_RELATION_TYPES: DefaultRelationType[] = [
   { typeKey: "partOf", version: "1.0.0", title: "属于", sourceKinds: A, targetKinds: A, cyclic: false, isSymmetric: false, requiresRevision: false },
   { typeKey: "maintainedBy", version: "1.0.0", title: "维护主体", sourceKinds: A, targetKinds: A, cyclic: true, isSymmetric: false, requiresRevision: false },

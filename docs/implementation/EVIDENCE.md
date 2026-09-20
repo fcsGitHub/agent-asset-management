@@ -221,3 +221,39 @@
   长历史资产不再全量返回（tests/m7-api 翻页断言）。
 - 去重：catalog.ts 本地 stableStringify 副本删除，与发布摘要共用 @taw/domain/digest 实现。
 - 回归：`npx vitest run` 13 套件 84 项全部通过。
+
+### EV-027 ｜ 2026-09-20 ｜ M8 本体治理（吸收 semantica 关系语义层）
+- 迁移 0017：asset_type_versions.parent_type_version_id（subClassOf，显式版本引用 + 复合 FK +
+  环防御深度上限）；relation_type_versions.source/target_type_keys（类级 domain/range，
+  空数组=不限）；idx_assets_type、idx_agent_runs_team_time。
+- domain 层新增：ENTITY_KINDS、danglingVocabularies（词表悬挂质量门，<name>/<name>Unit
+  双声明任一即可，兼容既有附加属性约定）、inheritanceViolations（子类型只能收窄父类型，
+  属性类型改写拒绝）。
+- API：POST /types 支持 parentTypeVersionId + 质量门；资产登记按整条类型链校验；
+  POST /relations 强制 kind 级 + 类级 domain/range（409 DOMAIN_RANGE_VIOLATION）与
+  成环禁止（409 CYCLE_FORBIDDEN，递归 CTE 反向走边——修掉了初版从目标侧出发漏检直接环的 SQL）；
+  POST /relation-types 参数化 kinds/type_keys + 悬挂键质量门；GET /relation-types 列表；
+  POST /types/migration-preview 覆盖后代类型资产 + 继承违规预演；
+  POST /relation-types/migration-preview（收窄违反清单 + 存量环检测）；GET /ontology/export
+  （taw-ontology/1：类含 subClassOf、对象属性含 domain/range，stableStringify+sha256 摘要稳定）。
+- 测试 tests/m8-ontology（6 项，真实 HTTP/PG）：质量门拒绝、层次收窄校验与链上实例校验、
+  预览后代影响、domain/range 违规 409、直接/传递环 409、关系预演、导出摘要稳定与跨团队隔离。
+- 期间修复：类型层次预览 CTE 别名 desc 为 PG 保留字 → desc_types。
+
+### EV-028 ｜ 2026-09-20 ｜ M8 项目总览 + 团队动态 + 前端工作台化（吸收 AgentPM）
+- 后端：GET /projects/:id/overview（项目域分支/CR 状态分布/发布近30天 + 团队域资产/修订/关系，
+  单次聚合）；GET /activity?teamId（事件溯源红利：audit_events 人的治理动作 + agent_runs
+  Agent 运行 → 人机混排时间线，零新表）。测试 tests/m8-activity（2 项）：计数一致性、
+  倒序/limit/中文动作标签/跨团队 404 隔离/未登录 401。
+- 前端：左侧主导航栏（总览/工作台/动态/审批/搜索，窄屏自动横排）；总览仪表盘
+  （统计卡行 + 待处理审核 + 最近动态 + 快捷入口）；动态页（20/50/100 条 + 刷新）；
+  审批页（CR 队列 + 只读详情 + 快照提示 + 进入发布流程）；登记资产类型下拉显示 ↳ 继承父类型。
+- ⌘K 命令栏（页面跳转 + 资产搜索防抖置顶 + Enter 深链打开资产详情）；
+  lib/shortcuts.ts 快捷键单一真源（Ctrl/⌘+K、? 帮助浮层、g+字母两级跳转、isTypingTarget 防劫持）；
+  统一空状态四件套（Empty 组件）。
+- 浏览器实测（Playwright，端口 5174；5173 被另一 agent 的设计原型占用不冲突）：
+  仪表盘真实统计与动态渲染（docs/evidence/m8-ui-dashboard.png）；
+  登记→分支→草稿→CR 后审批队列显示"1 个待处理"及详情/快照提示（m8-ui-approvals.png）；
+  ⌘K 输入"轨道"资产置顶 → Enter 直开资产详情；? 浮层；g→d 跳总览均通过。
+- 回归：`npx vitest run` 15 套件 92 项全部通过（期间放宽词表质量门以兼容 M6 扩展包
+  附加属性词表约定，质量门语义更新为 <name>/<name>Unit 双声明任一即可）。
