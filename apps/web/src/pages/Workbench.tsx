@@ -4,6 +4,7 @@ import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
 import { RelationGraph } from "../components/RelationGraph";
 import { OntologyPage } from "../components/OntologyPage";
+import { SemanticPanel } from "../components/SemanticPanel";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
@@ -38,7 +39,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [sessionId, setSessionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "release">("overview");
+  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "release">("overview");
   const [assetId, setAssetId] = useState("");
   const [page, setPage] = useState<PageKey>("dashboard");
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -354,6 +355,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                   ["overview", "项目概况"],
                   ["assets", "资产目录"],
                   ["register", "登记资产"],
+                  ["semantic", "语义候选"],
                   ["release", "发布与通道"],
                 ] as const
               ).map(([key, label]) => (
@@ -392,6 +394,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 }}
                 onRegister={() => setWsView("register")}
               />
+            ) : wsView === "semantic" ? (
+              <SemanticPanel project={project} onOpenAsset={openAssetFromSearch} />
             ) : wsView === "release" ? (
               <ReleasePanel project={project} me={me} />
             ) : (

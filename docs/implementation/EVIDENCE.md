@@ -397,3 +397,24 @@
   界面真实登记 m13live 类型（8 类版本刷新可见）；livedepends 预演 range 收窄为
   software → 红色阻塞警告（safe=false + target 侧违规明细）。
   截图 m13-ui-ontology.png、m13-ui-ontology-forms.png。
+
+### EV-036 ｜ 2026-09-21 ｜ M14 迭代轮：语义候选工作台（M5/M9 抽取闭环的最后一块——人工确认入口）
+- 新工作台标签「语义候选」（SemanticPanel）：粘贴文本 + 来源资产（证据锚定其最新修订）
+  + 实体提示 + LLM 增强开关 → POST /semantic/extract（真实 worker；规则基线与
+  DeepSeek 增强合并）→ 候选关系列表：类型徽章、规则/LLM 提议来源、置信度、
+  原文证据引文。
+- 确认闭环：端点文本自动预映射团队资产名（精确/包含匹配，可改选）；关系类型按
+  候选 type 映射到已注册词表（未注册如实提示"需先在本体治理台登记"并禁用确认）；
+  确认 = 既有 POST /relations（confirm:true）——domain/range 与成环禁止由服务端
+  强制执行，违规错误逐条回显。断言成功后候选卡转为"✓ 已断言"态；忽略则隐藏。
+  抽取端无候选 / worker 不可达（503 DEPENDENCY_UNAVAILABLE）/ LLM 降级警告均如实呈现。
+- 后端零改动（纯既有端点的编排）；语义抽取从"只出报告"变为可操作的确认流水线。
+- 测试 tests/m14（3 项，真实 worker + 真实 DeepSeek）：规则抽取 → 端点精确映射 →
+  确认断言 → /relations 目录可见 confirmed 边；LLM 增强抽取（+llm/deepseek 版本或
+  如实降级）候选仍为 candidate 且经人工确认可断言；worker 不可达 503 如实报错。
+  全量：`npx vitest run` **21 套件 119 项全部通过**（57s）。
+- 浏览器实测（真实 DeepSeek）：粘贴文本抽取 → 抽取器 +llm/deepseek，2 条候选
+  （dependsOn 规则 50% + documentedBy LLM 提议 75%）；端点自动映射正确，确认断言
+  转"✓ 已断言（a2c08e02…）"；图谱页随之显示 2 节点 2 关系（新 dependsOn 边）。
+  无 key worker 场景的降级警告（"LLM 增强失败，已降级为规则候选: DEEPSEEK_API_KEY
+  未配置"）同样实测确认。截图 m14-ui-semantic.png。

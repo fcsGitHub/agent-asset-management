@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 116 项基线仍绿
+4. `npx vitest run` 确认 119 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -57,6 +57,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    M13 已完成：本体治理台（rail 本体，g+o：类层次树、关系类型表+断言计数、
    管理员登记类型/关系类型、双迁移预演、导出）、.primary 白底白字 UI 缺陷修复、
    图谱聚焦多跳展开（EV-035）。
-   下一步候选：语义候选审核界面（M5/M9 的抽取候选目前仅 API 返回）、
-   活动流按项目过滤（审计事件无项目维度，需先定语义）、worker 多播订阅、
-   NL 意图再扩展（如登记资产草稿直通）。
+   M14 已完成：语义候选工作台（工作区「语义候选」标签：真实抽取 → 端点自动映射 →
+   人工确认断言 → 图谱/关系目录联动；后端零改动）（EV-036）。
+   下一步候选：候选审核状态持久化（跨会话队列，需新表）、活动流按项目过滤
+   （审计事件无项目维度，需先定语义）、worker 多播订阅、NL 意图再扩展。
