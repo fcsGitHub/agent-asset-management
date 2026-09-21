@@ -221,7 +221,8 @@ export function DashboardPage({
  *  实时推送：SSE 订阅 /activity/stream（Postgres NOTIFY 触发，非轮询），
  *  事件按 key 去重覆盖（Agent 运行状态变化原地更新），断线重连后整体重取对齐。
  *  项目过滤：项目级动作（审核准备/发布/回滚/Agent 运行）按项目显示；
- *  团队级动作（资产归档/恢复等）仅在"全部项目"视图出现。 */
+ *  团队级动作（资产归档/恢复等）仅在"全部项目"视图出现。
+ *  action 过滤（M24）：历史与翻页由服务端同源过滤，实时推送事件由客户端按同一口径守护。 */
 export function ActivityPage({
   project,
   projects,
@@ -235,6 +236,10 @@ export function ActivityPage({
   const [error, setError] = useState("");
   const [limit, setLimit] = useState(50);
   const [filterProjectId, setFilterProjectId] = useState("");
+  // action 过滤（M24）："" 不过滤；"agent" 仅 Agent 运行；其余按审计动作精确匹配。
+  // 选项由服务端 /activity 响应同源下发（与服务端标签一致，不硬编码副本）。
+  const [actionFilter, setActionFilter] = useState("");
+  const [actionOptions, setActionOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [live, setLive] = useState(false);
   const limitRef = useRef(limit);
   limitRef.current = limit;
@@ -254,15 +259,17 @@ export function ActivityPage({
     if (!project) return null;
     const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
     if (filterProjectId) query.projectId = filterProjectId;
+    if (actionFilter) query.action = actionFilter;
     if (cursor) {
       query.before = cursor.before;
       query.beforeKind = cursor.beforeKind;
       query.beforeId = cursor.beforeId;
     }
-    const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null }>("/activity", { query });
+    const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null; actions?: Array<{ value: string; label: string }> }>("/activity", { query });
+    if (r.actions) setActionOptions(r.actions);
     applyItems(r.items, !!cursor);
     return r.next;
-  }, [project, filterProjectId, applyItems]);
+  }, [project, filterProjectId, actionFilter, applyItems]);
 
   const reload = useCallback(() => {
     if (!project) return;
@@ -283,20 +290,23 @@ export function ActivityPage({
       .finally(() => setLoadingMore(false));
   }, [next, loadingMore, fetchPage]);
 
-  // 审计导出：服务端以与列表相同的分页查询全量遍历（含当前项目过滤），时间正序 CSV
-  async function exportCsv() {
+  // 审计导出：服务端以与列表相同的分页查询全量遍历（含当前项目与 action 过滤），
+  // 时间正序写出；csv（BOM）或 json（结构化 + 截断标志）由服务端序列化
+  async function exportAs(format: "csv" | "json") {
     if (!project) return;
     setError("");
     try {
       const qs = new URLSearchParams({ teamId: project.teamId });
       if (filterProjectId) qs.set("projectId", filterProjectId);
+      if (actionFilter) qs.set("action", actionFilter);
+      qs.set("format", format);
       const res = await fetch(`/api/v1/activity/export?${qs}`, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `taw-audit-${project.teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `taw-audit-${project.teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.${format}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -306,7 +316,8 @@ export function ActivityPage({
     }
   }
 
-  // 实时流：连接期间新事件由服务端推送；断线重连成功后整体刷新对齐（流本身只推实时事件）
+  // 实时流：连接期间新事件由服务端推送；断线重连成功后整体刷新对齐（流本身只推实时事件）。
+  // action 过滤在客户端同步生效：不属于当前过滤的实时事件不插入视图（历史翻页由服务端过滤）。
   useEffect(() => {
     setLive(false);
     if (!project) return;
@@ -316,6 +327,8 @@ export function ActivityPage({
     es.addEventListener("activity", (e) => {
       const item = JSON.parse((e as MessageEvent).data) as ActivityItem;
       if (!item.key) return;
+      if (actionFilter === "agent" && item.kind !== "agent") return;
+      if (actionFilter && actionFilter !== "agent" && item.action !== actionFilter) return;
       setItems((prev) => {
         const list = prev ?? [];
         const idx = list.findIndex((x) => x.key === item.key);
@@ -332,7 +345,7 @@ export function ActivityPage({
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [project, filterProjectId, reload]);
+  }, [project, filterProjectId, actionFilter, reload]);
 
   // 重连成功（live 由 false→true 且已有历史）时重取一次对齐
   const firstLive = useRef(true);
@@ -360,6 +373,13 @@ export function ActivityPage({
             <option key={p.projectId} value={p.projectId}>{p.name}</option>
           ))}
         </select>
+        <select aria-label="按 action 类型过滤" value={actionFilter} onChange={(e) => setActionFilter(e.target.value)}
+          title="按动作类型过滤历史；实时新事件同样遵循当前过滤">
+          <option value="">全部动作</option>
+          {actionOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.value === "agent" ? `${o.label}（全部状态）` : `${o.label}（${o.value}）`}</option>
+          ))}
+        </select>
         <select aria-label="条数" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
           <option value={20}>最近 20 条</option>
           <option value={50}>最近 50 条</option>
@@ -368,9 +388,15 @@ export function ActivityPage({
         <button onClick={reload}>刷新</button>
         <button
           title={filterProjectId ? "导出当前项目过滤下的全部历史（CSV）" : "导出团队全部历史（CSV）"}
-          onClick={() => void exportCsv()}
+          onClick={() => void exportAs("csv")}
         >
           导出 CSV
+        </button>
+        <button
+          title={filterProjectId ? "导出当前过滤范围的结构化历史（JSON）" : "导出团队全部历史的结构化 JSON"}
+          onClick={() => void exportAs("json")}
+        >
+          导出 JSON
         </button>
       </div>
       {error && <div className="error-text">{error}</div>}

@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 151 项基线仍绿
+4. `npx vitest run` 确认 154 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -90,5 +90,10 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    confirmed 跳过、批内重复跳过、dismissed 放行三口径一致，只判不写；预演端点 +
    工作台「预览入队 → 确认入队」两步流）+ 提案批量审核备注入口（复用 M20 batch-review
    per-item note，写入审核留痕并渲染）（EV-045）。
-   下一步候选：图谱聚焦跳数记忆、导出格式 JSON 选项、按 action 类型过滤动态页、
-   队列候选批量重新映射端点、提案详情 diff 视图（登记提案 vs 已有资产属性对比）。
+   M24 已完成：动态 action 过滤（queryActivityPage 同源扩展 agent 组/精确动作、过滤
+   先于游标；选项随 /activity 同源下发；SSE 实时事件客户端同口径守护）+ 审计导出
+   JSON（结构化条目 + truncated 如实标注；盖章 detail 增 format/action；CSV 契约不变）
+   （EV-046）。
+   下一步候选：图谱聚焦跳数记忆、队列候选批量重新映射端点、提案详情 diff 视图
+   （登记提案 vs 已有资产属性对比）、导出时间范围参数、NL 动态过滤意图
+   （如「看归档记录」映射 action 过滤）。

@@ -247,6 +247,20 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "release_rollback": "通道回滚",
     "audit.export": "导出审计",
   };
+  // 动态页 action 过滤选项（M24）：Agent 运行是一组（不分状态），其余按审计动作精确匹配。
+  // 随 /activity 响应下发，前端下拉与服务端标签同源，不硬编码副本。
+  const ACTIVITY_FILTERS = [
+    { value: "agent", label: "Agent 运行" },
+    ...Object.entries(ACTION_LABELS).map(([value, label]) => ({ value, label })),
+  ];
+
+  // action 过滤解析（列表与导出共用）："agent" 仅 Agent 运行；其余按审计动作精确匹配；空/缺省不过滤
+  const parseActionFilter = (raw: unknown): string | null => {
+    const v = String(raw ?? "").trim();
+    if (!v) return null;
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(v)) throw ERR.INVALID("action 过滤参数不合法");
+    return v;
+  };
 
   // 活动条目（含导出用的精确时间戳文本；列表响应原样携带，额外字段对客户端无害）
   interface ExportActivityItem {
@@ -263,12 +277,15 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
   // 活动流分页查询核心（列表 /activity 与导出 /activity/export 共用，保证同源）：
   // 合并全序 (ts DESC, kind [audit 先于 agent], id DESC)，游标语义见 /activity 注释。
+  // actionFilter（M24）：null 不过滤；"agent" 仅 Agent 运行；其余按审计动作精确匹配
+  // （此时不含任何 Agent 运行）。过滤先于游标生效，翻页边界语义不变。
   const queryActivityPage = async (
     client: PoolClient,
     teamId: string,
     filterProjectId: string | null,
     limit: number,
-    cursor: { ts: string | null; auditId: number | null; runId: string | null }
+    cursor: { ts: string | null; auditId: number | null; runId: string | null },
+    actionFilter: string | null
   ): Promise<{ items: ExportActivityItem[]; next: { before: string; beforeKind: string; beforeId: string } | null }> => {
     const { rows: audits } = await client.query<{
       id: string;
@@ -288,6 +305,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
          LEFT JOIN users u ON u.id = a.actor_id
          LEFT JOIN projects p ON p.team_id = a.team_id AND p.id = a.project_id
         WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
+          AND ($6::text IS NULL OR ($6::text <> 'agent' AND a.action = $6::text))
           AND (
             $4::timestamptz IS NULL
             OR a.created_at < $4::timestamptz
@@ -295,7 +313,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           )
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT $2`,
-      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId]
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, actionFilter]
     );
     const { rows: agentRuns } = await client.query<{
       id: string;
@@ -315,6 +333,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
          LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
          LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
         WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
+          AND ($7::text IS NULL OR $7::text = 'agent')
           AND (
             $4::timestamptz IS NULL
             OR r.created_at < $4::timestamptz
@@ -323,7 +342,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           )
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT $2`,
-      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, cursor.runId]
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, cursor.runId, actionFilter]
     );
     const items: ExportActivityItem[] = [
       ...audits.map((a): ExportActivityItem => ({
@@ -371,7 +390,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.get("/activity", async (req) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
-      teamId?: string; limit?: string; projectId?: string;
+      teamId?: string; limit?: string; projectId?: string; action?: string;
       before?: string; beforeKind?: string; beforeId?: string;
     };
     const teamId = String(query.teamId ?? "");
@@ -381,6 +400,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     // 项目过滤语义：项目级动作（审核准备/发布/回滚、Agent 运行）带 project_id；
     // 团队级动作（资产归档/恢复等）为 NULL——按项目过滤时仅显示该项目内的动作。
     const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
+    const actionFilter = parseActionFilter(query.action);
 
     // 游标解析：字段齐全才生效；字段不合法如实 422（不静默从头重放）
     const rawBefore = String(query.before ?? "");
@@ -399,26 +419,33 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       else cursorRunId = rawBeforeId;
     }
 
-    return withTeam(teamId, async (client) =>
+    const { items, next } = await withTeam(teamId, async (client) =>
       queryActivityPage(client, teamId, filterProjectId, limit, {
         ts: cursorTs,
         auditId: cursorAuditId,
         runId: cursorRunId,
-      })
+      }, actionFilter)
     );
+    // actions：可用的 action 过滤选项（含 "agent" 组），与服务端标签同源下发
+    return { items, next, actions: ACTIVITY_FILTERS };
   });
 
-  // 审计导出（CSV）：复用与列表完全相同的分页查询（同源），DESC 遍历后按时间正序写出。
-  // 上限 20000 条：达到上限如实附加截断说明行，不静默截断。
+  // 审计导出：复用与列表完全相同的分页查询（同源，含 action 过滤），DESC 遍历后按
+  // 时间正序写出。格式 csv（默认，RFC 4180 + BOM）或 json（结构化条目 + 截断标志）。
+  // 上限 20000 条：达到上限如实标注截断（CSV 尾行说明 / JSON truncated 字段），不静默截断。
   // 导出本身是敏感可见动作：盖章 audit.export 审计事件（团队级，project_id 为 NULL，
-  // 过滤范围记录在 detail 中）；盖章不进入本次导出内容（先取数后盖章）。
+  // 过滤范围与格式记录在 detail 中）；盖章不进入本次导出内容（先取数后盖章）。
   app.get("/activity/export", async (req, reply) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string; projectId?: string };
+    const query = (req.query ?? {}) as { teamId?: string; projectId?: string; action?: string; format?: string };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertTeamMember(auth.userId, teamId);
     const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
+    const actionFilter = parseActionFilter(query.action);
+    const rawFormat = String(query.format ?? "").trim().toLowerCase();
+    if (rawFormat && rawFormat !== "csv" && rawFormat !== "json") throw ERR.INVALID("format 仅支持 csv 或 json");
+    const format = rawFormat === "json" ? "json" : "csv";
 
     const EXPORT_BATCH = 500;
     const EXPORT_CAP = 20000;
@@ -427,7 +454,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     let truncated = false;
     for (;;) {
       const page = await withTeam(teamId, (client) =>
-        queryActivityPage(client, teamId, filterProjectId, EXPORT_BATCH, cursor)
+        queryActivityPage(client, teamId, filterProjectId, EXPORT_BATCH, cursor, actionFilter)
       );
       rows.push(...page.items);
       if (!page.next) break;
@@ -447,9 +474,35 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         `INSERT INTO audit_events (team_id, actor_id, action, object_kind, detail, project_id)
          VALUES ($1,$2,'audit.export','audit',$3,NULL)`,
         [teamId, auth.userId,
-         JSON.stringify({ format: "csv", count: rows.length, truncated, projectId: filterProjectId })]
+         JSON.stringify({ format, count: rows.length, truncated, projectId: filterProjectId, action: actionFilter })]
       );
     });
+
+    const stamp = `taw-audit-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`;
+    if (format === "json") {
+      reply.header("content-type", "application/json; charset=utf-8");
+      reply.header("content-disposition", `attachment; filename="${stamp}.json"`);
+      // 时间正序（遍历为 DESC）；截断以 truncated+total 如实标注，不伪造完整性
+      return JSON.stringify({
+        teamId,
+        projectId: filterProjectId,
+        action: actionFilter,
+        format,
+        exportedAt: new Date().toISOString(),
+        truncated,
+        total: rows.length,
+        items: [...rows].reverse().map((it) => ({
+          entryId: it.key,
+          ts: it.tsExact,
+          kind: it.kind,
+          action: it.action,
+          summary: it.summary,
+          actor: it.actor,
+          project: it.project ?? null,
+          objectId: it.objectId,
+        })),
+      }, null, 2);
+    }
 
     const csvEscape = (v: string): string => `"${v.replace(/"/g, '""')}"`;
     const lines: string[] = ["ts,kind,entry_id,action,summary,actor,project,object_id"];
@@ -468,10 +521,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (truncated) lines.push(`# 已达导出上限 ${EXPORT_CAP} 条，更早的记录未包含`);
 
     reply.header("content-type", "text/csv; charset=utf-8");
-    reply.header(
-      "content-disposition",
-      `attachment; filename="taw-audit-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.csv"`
-    );
+    reply.header("content-disposition", `attachment; filename="${stamp}.csv"`);
     return "\uFEFF" + lines.join("\r\n");
   });
 

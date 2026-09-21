@@ -650,3 +650,34 @@
   状态一致）；真实 DeepSeek 运行 proposal.create 产出两条待审提案 → 全选+批量备注
   「评审通过：纳入月面资产目录（M23 批量备注实测）」→ 批量接受 →「已接受」视图中
   两条均渲染审核备注、M18 旧已接受提案无备注（精确对照）。
+
+### EV-046 ｜ 2026-09-21 ｜ M24 迭代轮：动态 action 过滤 + 审计导出 JSON
+
+**目标**：动态页按动作类型过滤历史（审计/追溯工具链第三块：M20 分页 → M22 导出
+→ M24 可查性）；导出新增结构化 JSON 格式，与 CSV 同源同遍历。
+
+- queryActivityPage 增 actionFilter 参数（列表与导出仍严格同源）："agent" 仅 Agent
+  运行（不分状态）、其余按审计动作精确匹配（此时不含运行）、null 不过滤；过滤先于
+  游标生效，翻页边界语义不变。SQL 谓词 `$n::text` 显式 casts。
+- GET /activity 响应新增 actions 选项（Agent 运行组 + ACTION_LABELS 全部动作），前端
+  下拉与服务端标签同源下发，不硬编码副本；parseActionFilter（列表/导出共用）对非法
+  字符如实 422。
+- GET /activity/export 增 action + format 参数：json 输出结构化条目（entryId/ts 微秒
+  文本/kind/action/summary/actor/project/objectId）+ 元数据（teamId/projectId/action/
+  exportedAt/truncated/total），时间正序、content-type application/json、附件 .json；
+  截断以 truncated+total 如实标注（CSV 尾行说明语义对应）；盖章 detail 增 format 与
+  action（先取数后盖章不变），CSV 缺省行为逐字节不变（M22 契约不回退）。
+- 动态页：action 过滤下拉（选项同源）；「导出 JSON」按钮（与 CSV 并列，携带当前
+  项目+action 过滤）；SSE 实时事件按同一口径客户端守护（过滤选中时不属于该动作的
+  实时事件不插入视图）。
+- 测试 tests/m24（3 项，真实集成）：过滤翻页恰为过滤全集（3 条归档 2+1 无重无漏）、
+  agent 组与精确动作互斥、actions 同源下发、项目+动作叠加遵循 M16 语义；JSON 导出
+  全集/正序/entry_id 唯一/truncated=false、过滤导出恰 3 条、盖章逐条核对（csv/json/
+  action/count）、audit.export 过滤视图可见章；单语句 generate_series 种 20001 条 →
+  JSON 导出恰 20000 且 truncated=true、非法 format/action 422、非成员 404。
+  全量：`npx vitest run` **31 套件 154 项全部通过**（71s）。
+- 浏览器实测：action 下拉选项来自服务端；选「归档资产」后 26 条全为 asset.archive
+  与 JSON 导出 total 一致；「导出审计」过滤可见刚产生的导出章（实时闭环）；无过滤
+  JSON 导出 31 条（29 审计 + 2 运行）正序唯一；真实点击「导出 JSON」按钮下载成功，
+  章如实记录点击时的 action 过滤（audit.export/count 4）；M22 的 CSV 旧章（无 action
+  键）原样兼容。
