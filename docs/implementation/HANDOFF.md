@@ -1,6 +1,6 @@
 # HANDOFF — 交接
 
-更新时间：2026-09-20（M6–M8 迭代轮后）
+更新时间：2026-09-22（M31 实测走查轮后）
 
 ## 仓库状态
 
@@ -12,8 +12,8 @@
 
 - M0–M5 全部里程碑；42 项验收：40 通过 / 1 明确不适用（E06 离线+ARM64 未验证，
   属环境外部限制，如实标记不做声称）
-- 测试：16 套件 98 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock；
-  全部断言经审计为真实生效，无空断言）
+- 测试：37 套件 167 项全部通过（真实 PostgreSQL、真实 HTTP、真实 DeepSeek、真实 semantica；无任何 mock；
+  全部断言经审计为真实生效，无空断言。注：M28～M30 提交信息中的"套件"数多记 1，M31 起以 vitest 文件数为准）
 - M6/M7/M8 迭代轮：崩溃注入与冷启动、outbox 真实派发 worker、Agent 区真实运行（SSE 工具事件）、
   头修订索引与修订分页、本体治理（类型层次/关系 domain-range/成环禁止/质量门/迁移预演/本体导出）、
   项目总览 + 团队动态 + 审批队列 + ⌘K 命令栏（导航壳/快捷键单一真源/统一空状态）（EV-019～028）
@@ -40,9 +40,11 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 
 1. 读 docs/implementation/ACCEPTANCE.md（42 项状态）与本文件
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
-3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
+3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5174 --strictPort`
+   + `SEMANTIC_WORKER_PORT=8100 ./.venv-sema/Scripts/python.exe services/semantic-worker/main.py`
+   （API 的 DeepSeek 自载 .env；worker 自 M31 起同样自载 .env，无需手动 export）
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 165 项基线仍绿
+4. `npx vitest run` 确认 167 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -110,8 +112,16 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    M30 已完成：按操作者筛选（actorId 与项目×动作×时间三维正交、actors 名单同源
    下发、导出/盖章/实时守护同口径）+ 图谱 PNG 位图导出（2x 栅格化）。至此审计
    过滤四维矩阵（项目/动作/时间/操作者）全部与 queryActivityPage 同源（EV-052）。
+   M31 已完成（实测走查轮，响应"从实际使用反馈收集需求"）：以真实用户身份走查
+   全部主流程，修 4 缺陷 + 1 记账纠偏——关系断言防重（createRelationAssertion
+   守卫 409 DUPLICATE_ASSERTION + 0022 部分唯一索引 + 存量重复撤回清理；修订限定
+   断言不受约束）、关系撤回端点 POST /relations/:id/withdraw（管理员/提议人、
+   relation.withdraw 审计盖章、动作标签同源）、语义 worker 最小 .env 加载器
+   （文档朴素命令启动不再丢 LLM 增强）、过时 M4 文案修正、"套件"计数纠偏。
+   m31 两项 + m14 适配，全量 37 套件 167 项全绿（EV-053）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向：暂无积压；如继续迭代，建议从实际使用反馈中收集需求。
+   可选后续方向：暂无积压；M31 走查轮即"从实际使用反馈收集需求"的第一次落地，
+   如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接点名需求。

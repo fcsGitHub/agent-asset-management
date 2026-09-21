@@ -247,6 +247,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "release_rollback": "通道回滚",
     "audit.export": "导出审计",
     "semantic.queue.export": "导出语义队列",
+    "relation.withdraw": "撤回关系断言",
   };
   // 动态页 action 过滤选项（M24）：Agent 运行是一组（不分状态），其余按审计动作精确匹配。
   // 随 /activity 响应下发，前端下拉与服务端标签同源，不硬编码副本。

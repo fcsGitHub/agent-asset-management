@@ -15,6 +15,7 @@ import json
 import os
 import re
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
@@ -25,6 +26,24 @@ from semantica.conflicts import ConflictDetector
 from semantica.provenance import ProvenanceManager
 from semantica.semantic_extract import RelationExtractor
 from semantica.semantic_extract.types import Entity
+
+
+def _load_env_file() -> None:
+    """最小 .env 加载器（与 packages/agent-adapter/src/env.ts、scripts/migrate.ts 同口径）：
+    只填充尚未设置的环境变量，不覆盖调用方显式配置；值绝不写入日志。
+    没有它，按文档的朴素命令启动 worker 会静默丢失 DEEPSEEK_API_KEY，LLM 增强永远降级。"""
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        m = re.match(r"^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$", line)
+        if m and m.group(1) not in os.environ:
+            os.environ[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+
+
+_load_env_file()
 
 EXTRACTOR_VERSION = f"taw-semantic-worker/1 + semantica/{SEMANTICA_VERSION}"
 

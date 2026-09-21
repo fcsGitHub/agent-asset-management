@@ -499,7 +499,7 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
         <h3>下一步</h3>
         <ul>
           <li>在「资产目录」查看团队正式资产；在「登记资产」上传并登记新资产。</li>
-          <li>左侧对话区可以继续会话；Agent 智能助手将在 M4 接入，所有基础操作无需等待模型。</li>
+          <li>左侧对话区可以给 Agent 派任务（真实模型 + 工具）；Agent 仅有草稿写入权限，发布等高权动作由人类执行。</li>
         </ul>
       </div>
     </>

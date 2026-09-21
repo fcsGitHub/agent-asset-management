@@ -185,18 +185,45 @@ export async function createRelationAssertion(
       );
       if (!tr[0]) throw ERR.INVALID("目标修订与资产不匹配");
     }
-    await client.query(
-      `INSERT INTO relation_assertions (team_id, id, relation_type_version_id, source_asset_id, source_revision_id,
-        target_asset_id, target_revision_id, conditions, evidence_note, status, proposed_by, confirmed_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [
-        teamId, id, body.relationTypeVersionId,
-        body.sourceAssetId, body.sourceRevisionId ?? null,
-        body.targetAssetId, body.targetRevisionId ?? null,
-        JSON.stringify(body.conditions ?? {}), body.evidenceNote ?? null,
-        status, userId, body.confirm ? userId : null,
-      ]
-    );
+    // 重复断言防护（实测走查发现）：同（团队 + 关系类型 + 源 + 目标）且不带修订限定的
+    // 存活断言只允许一条——事实型断言重复只会产生平行重边与虚高计数。带修订限定的
+    // 断言表达"对特定修订的事实"，语义上可多条，不在此约束。并发兜底见下方 23505 捕获。
+    if (!body.sourceRevisionId && !body.targetRevisionId) {
+      const { rows: dup } = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM relation_assertions
+          WHERE team_id = $1 AND relation_type_version_id = $2
+            AND source_asset_id = $3 AND target_asset_id = $4
+            AND source_revision_id IS NULL AND target_revision_id IS NULL
+            AND status <> 'withdrawn' LIMIT 1`,
+        [teamId, body.relationTypeVersionId, body.sourceAssetId, body.targetAssetId]
+      );
+      if (dup[0]) {
+        throw ERR.CONFLICT(
+          "DUPLICATE_ASSERTION",
+          `同一（关系类型 + 源 + 目标）的断言已存在（status=${dup[0].status}）；如需重建请先撤回既有断言`
+        );
+      }
+    }
+    try {
+      await client.query(
+        `INSERT INTO relation_assertions (team_id, id, relation_type_version_id, source_asset_id, source_revision_id,
+          target_asset_id, target_revision_id, conditions, evidence_note, status, proposed_by, confirmed_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          teamId, id, body.relationTypeVersionId,
+          body.sourceAssetId, body.sourceRevisionId ?? null,
+          body.targetAssetId, body.targetRevisionId ?? null,
+          JSON.stringify(body.conditions ?? {}), body.evidenceNote ?? null,
+          status, userId, body.confirm ? userId : null,
+        ]
+      );
+    } catch (err) {
+      // 并发竞态：检查通过后另一事务先插入，部分唯一索引以 23505 拒绝——转成同一业务错误
+      if ((err as { code?: string }).code === "23505") {
+        throw ERR.CONFLICT("DUPLICATE_ASSERTION", "同一（关系类型 + 源 + 目标）的断言已存在（并发插入被唯一索引拒绝）");
+      }
+      throw err;
+    }
   };
   if (existingClient) await run(existingClient);
   else await withTeam(teamId, run);
@@ -1219,5 +1246,53 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       return { outgoing: outgoing.rows, incoming: incoming.rows };
     });
+  });
+
+  // 撤回关系断言（实测走查发现：schema 预留 withdrawn 状态但全工程无任何撤回路径，
+  // 误建的关系无法移除，防重报错"请先撤回"也无路可走）。角色口径与资产归档一致：
+  // 团队管理员或断言提议人；撤回是可见动作，如实盖章审计。
+  app.post("/relations/:relationId/withdraw", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { relationId } = req.params as { relationId: string };
+    if (!/^[0-9a-f-]{36}$/.test(relationId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), reason: z.string().min(4).max(500) }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const { rows } = await client.query<{ id: string; status: string; proposed_by: string; type_key: string; source_name: string; target_name: string }>(
+        `SELECT ra.id, ra.status, ra.proposed_by, rt.type_key,
+                sa.name AS source_name, ta.name AS target_name
+           FROM relation_assertions ra
+           JOIN relation_type_versions rt ON rt.team_id = ra.team_id AND rt.id = ra.relation_type_version_id
+           JOIN assets sa ON sa.team_id = ra.team_id AND sa.id = ra.source_asset_id
+           JOIN assets ta ON ta.team_id = ra.team_id AND ta.id = ra.target_asset_id
+          WHERE ra.team_id = $1 AND ra.id = $2`,
+        [body.teamId, relationId]
+      );
+      const rel = rows[0];
+      if (!rel) throw ERR.NOT_FOUND();
+      if (rel.status === "withdrawn") {
+        throw ERR.CONFLICT("ALREADY_WITHDRAWN", "关系断言已处于撤回状态");
+      }
+      if (role !== "admin" && rel.proposed_by !== auth.userId) {
+        throw ERR.FORBIDDEN();
+      }
+      await client.query(
+        `UPDATE relation_assertions SET status = 'withdrawn', withdrawn_reason = $3
+          WHERE team_id = $1 AND id = $2`,
+        [body.teamId, relationId, body.reason]
+      );
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'relation.withdraw', 'relation', $3, $4)`,
+        [body.teamId, auth.userId, relationId,
+         JSON.stringify({ reason: body.reason, relationType: rel.type_key,
+           source: rel.source_name, target: rel.target_name })]
+      );
+    });
+    return reply.code(200).send({ teamId: body.teamId, relationId, status: "withdrawn" });
   });
 }

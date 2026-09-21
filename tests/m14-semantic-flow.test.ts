@@ -76,6 +76,8 @@ describe("M14 语义候选确认闭环（抽取 → 映射 → 断言，真实 w
   let admin: Session;
   let teamId = "";
   let docTypeId = "";
+  // 用例一已确认的断言键（类型|源|目标）——M31 起同键存活断言唯一，用例二按此分流预期
+  let confirmedKey = "";
   const call = caller(BASE);
   const assetIds = new Map<string, string>();
 
@@ -143,6 +145,7 @@ describe("M14 语义候选确认闭环（抽取 → 映射 → 断言，真实 w
       },
     });
     expectOk(rel.status === 201, rel.json, "确认断言应 201");
+    confirmedKey = `${depends!.type}|${depends!.source.text}|${depends!.target.text}`;
     // 关系目录可见（资产详情页的数据源）
     const aId = assetIds.get(depends!.source.text)!;
     const view = await call("GET", `/relations?teamId=${teamId}&assetId=${aId}`, { session: admin });
@@ -179,6 +182,7 @@ describe("M14 语义候选确认闭环（抽取 → 映射 → 断言，真实 w
     const rts = await call("GET", `/relation-types?teamId=${teamId}`, { session: admin });
     const rt = (rts.json as { id: string; type_key: string }[]).filter((x) => x.type_key === mappable.type).pop();
     expect(!!rt, `关系类型 ${mappable.type} 应已注册（默认词表）`).toBe(true);
+    const key = `${mappable.type}|${mappable.source.text}|${mappable.target.text}`;
     const rel = await call("POST", "/relations", {
       session: admin,
       body: {
@@ -187,7 +191,13 @@ describe("M14 语义候选确认闭环（抽取 → 映射 → 断言，真实 w
         confirm: true,
       },
     });
-    expectOk(rel.status === 201, rel.json, "LLM 候选经人工确认应可断言");
+    if (key === confirmedKey) {
+      // 与用例一同一事实：M31 防重守卫应如实 409（事实型断言不重复入库）
+      expect(rel.status === 409 && rel.json?.error?.code === "DUPLICATE_ASSERTION",
+        `重复断言应 409 DUPLICATE_ASSERTION：${JSON.stringify(rel.json)}`).toBe(true);
+    } else {
+      expectOk(rel.status === 201, rel.json, "LLM 候选经人工确认应可断言");
+    }
   });
 
   it("worker 不可达：503 DEPENDENCY_UNAVAILABLE 如实报错（核心流程不受影响）", async () => {
