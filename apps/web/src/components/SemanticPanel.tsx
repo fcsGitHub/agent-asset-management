@@ -122,6 +122,10 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qDetail, setQDetail] = useState<Record<string, CandidateDetail | null>>({});
   // 队列视图（M19）：待审（可批审）/ 已确认 / 已忽略
   const [qStatus, setQStatus] = useState<"pending" | "confirmed" | "dismissed">("pending");
+  // 批量重映射（M25）：为已选候选统一设置 source/target 端点（空侧不改），仅改映射不自动确认
+  const [bulkSource, setBulkSource] = useState("");
+  const [bulkTarget, setBulkTarget] = useState("");
+  const [bulkMsg, setBulkMsg] = useState("");
 
   const loadQueue = useCallback(() => {
     if (!project) return;
@@ -304,6 +308,24 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     }
   }
 
+  // 批量重映射（M25）：已选候选统一设置端点——常见场景是 N 条候选共享同一 source/target 资产，
+  // 逐条下拉太繁琐。空侧表示"该侧不改"；只改映射，确认仍走既有逐条/批量路径与全部校验
+  function applyBulkMapping() {
+    if (!queue) return;
+    const ids = queue.filter((q) => qSel[q.id]).map((q) => q.id);
+    if (ids.length === 0 || (!bulkSource && !bulkTarget)) return;
+    setQMapping((prev) => {
+      const next = { ...prev };
+      for (const id of ids) {
+        next[id] = { source: bulkSource || prev[id]?.source || "", target: bulkTarget || prev[id]?.target || "" };
+      }
+      return next;
+    });
+    setBulkMsg(`已为 ${ids.length} 条已选候选设置端点（仅改映射，不自动确认）`);
+    setBulkSource("");
+    setBulkTarget("");
+  }
+
   // 批量确认：未映射端点的勾选项不送审、行内如实提示；其余逐条送批，逐条回执
   async function batchConfirmSelected() {
     if (!project || !queue) return;
@@ -337,6 +359,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
         return next;
       });
       setQSel({});
+      setBulkMsg("");
       loadQueue();
     } catch (err) {
       setQErrors((prev) => ({ ...prev, [items[0]!.candidateId]: errorText(err) }));
@@ -532,7 +555,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
             <select
               aria-label="队列状态筛选"
               value={qStatus}
-              onChange={(e) => { setQStatus(e.target.value as typeof qStatus); setQSel({}); }}
+              onChange={(e) => { setQStatus(e.target.value as typeof qStatus); setQSel({}); setBulkMsg(""); }}
               style={{ marginLeft: 6 }}
             >
               <option value="pending">待审核</option>
@@ -562,6 +585,31 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
               全选
             </label>
             <span className="sem-conf">已选 {queue.filter((q) => qSel[q.id]).length} / {queue.length}</span>
+            <select
+              aria-label="批量设置 source 端点"
+              value={bulkSource}
+              onChange={(e) => { setBulkSource(e.target.value); setBulkMsg(""); }}
+              style={{ maxWidth: 170 }}
+            >
+              <option value="">source 不改</option>
+              {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <select
+              aria-label="批量设置 target 端点"
+              value={bulkTarget}
+              onChange={(e) => { setBulkTarget(e.target.value); setBulkMsg(""); }}
+              style={{ maxWidth: 170 }}
+            >
+              <option value="">target 不改</option>
+              {assetOptions.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <button
+              disabled={qBusy || queue.every((q) => !qSel[q.id]) || (!bulkSource && !bulkTarget)}
+              onClick={applyBulkMapping}
+            >
+              应用到已选
+            </button>
+            {bulkMsg && <span className="ok-text">{bulkMsg}</span>}
             <button className="primary" disabled={qBusy || queue.every((q) => !qSel[q.id])} onClick={() => void batchConfirmSelected()}>
               {qBusy ? "处理中…" : "批量确认"}
             </button>

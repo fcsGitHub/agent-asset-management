@@ -24,6 +24,18 @@ interface SimEdge { id: string; typeKey: string; status: string; source: number;
 const W = 1000;
 const H = 620;
 
+// 聚焦跳数记忆（M25）：上次选择的跳数持久化，重进页面或经 NL 再次聚焦时沿用。
+// 存储不可用（隐私模式等）时静默回退 1 跳——偏好记忆是增强，不是功能依赖。
+const HOPS_KEY = "taw.graph.focusHops";
+function loadFocusHops(): number {
+  try {
+    const v = Number(localStorage.getItem(HOPS_KEY));
+    return v === 2 || v === 3 ? v : 1;
+  } catch {
+    return 1;
+  }
+}
+
 // 类型着色：按 type_key 排序后取调色板（确定性，同类型同色）
 const PALETTE = ["#3b6ea5", "#2e6b4f", "#8a5a9e", "#b0703c", "#4f7d9e", "#7d6a3b", "#a54a6f", "#4a8a7a", "#6b6b9e", "#8a7a4a"];
 
@@ -39,7 +51,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [focusId, setFocusId] = useState("");
-  const [focusHops, setFocusHops] = useState(1);
+  const [focusHops, setFocusHops] = useState(loadFocusHops);
   const [tick, setTick] = useState(0); // 模拟帧驱动
   const nodesRef = useRef<SimNode[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -248,7 +260,15 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
           ))}
         </select>
         {focusId && (
-          <select aria-label="聚焦跳数" value={focusHops} onChange={(e) => setFocusHops(Number(e.target.value))}>
+          <select
+            aria-label="聚焦跳数"
+            value={focusHops}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              setFocusHops(n);
+              try { localStorage.setItem(HOPS_KEY, String(n)); } catch { /* 偏好记忆不可用时功能不受影响 */ }
+            }}
+          >
             <option value={1}>1 跳邻域</option>
             <option value={2}>2 跳邻域</option>
             <option value={3}>3 跳邻域</option>
