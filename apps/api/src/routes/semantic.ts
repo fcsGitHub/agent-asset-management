@@ -157,6 +157,83 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  // 回导（M28）：把本工作台导出的 JSON 件（semantic/candidates/export 的 items）
+  // 重新入队——跨团队复用评审成果或本团队恢复被忽略的候选。幂等：判定复用
+  // planImportDedup（确认/待审跳过、已忽略放行、批内重复跳过）；候选永远是候选，
+  // 回导一律以 pending 入队，不继承原状态与决策留痕。
+  // 资产解析逐条进行：item.assetName 精确匹配本团队资产，未提供时回退 body.assetId；
+  // 两者皆无的条目如实标记 unresolved，不中断其余条目（部分成功不伪装全成功）。
+  app.post("/semantic/candidates/reimport", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        assetId: z.string().uuid().optional(),
+        items: z.array(z.object({
+          relationType: z.string().min(1).max(64),
+          sourceText: z.string().min(1).max(300),
+          targetText: z.string().min(1).max(300),
+          evidenceSegment: z.string().max(2000).default(""),
+          confidence: z.number().min(0).max(1).default(0),
+          llmProposed: z.boolean().default(false),
+          extractorVersion: z.string().max(120).default(""),
+          assetName: z.string().min(1).max(300).optional(),
+        })).min(1).max(50),
+      }),
+      req.body
+    );
+    await teamRole(auth.userId, body.teamId);
+    const result = await withTeam(body.teamId, async (client) => {
+      if (body.assetId) {
+        const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
+          body.teamId, body.assetId,
+        ]);
+        if (!asset[0]) throw ERR.INVALID("回退来源资产不存在于本团队");
+      }
+      const plan = await planImportDedup(client, body.teamId, body.items);
+      const nameCache = new Map<string, string | null>();
+      const resolveAsset = async (name: string): Promise<string | null> => {
+        if (nameCache.has(name)) return nameCache.get(name)!;
+        const { rows } = await client.query<{ id: string }>(
+          `SELECT id FROM assets WHERE team_id = $1 AND name = $2 LIMIT 1`,
+          [body.teamId, name]
+        );
+        const id = rows[0]?.id ?? null;
+        nameCache.set(name, id);
+        return id;
+      };
+      const ids: string[] = [];
+      const duplicateIndexes: number[] = [];
+      const unresolvedIndexes: number[] = [];
+      for (let i = 0; i < body.items.length; i++) {
+        if (!plan[i]!.importable) {
+          duplicateIndexes.push(i);
+          continue;
+        }
+        const it = body.items[i]!;
+        let assetId: string | null = it.assetName ? await resolveAsset(it.assetName) : null;
+        if (!assetId && body.assetId) assetId = body.assetId;
+        if (!assetId) {
+          unresolvedIndexes.push(i);
+          continue;
+        }
+        const id = newId();
+        await client.query(
+          `INSERT INTO semantic_candidates (team_id, id, asset_id, relation_type,
+             source_text, target_text, evidence_segment, confidence, llm_proposed,
+             extractor_version, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [body.teamId, id, assetId, it.relationType, it.sourceText, it.targetText,
+            it.evidenceSegment, it.confidence, it.llmProposed, it.extractorVersion, auth.userId]
+        );
+        ids.push(id);
+      }
+      return { imported: ids.length, skipped: duplicateIndexes.length, candidateIds: ids, duplicateIndexes, unresolvedIndexes };
+    });
+    return reply.code(201).send({ teamId: body.teamId, ...result });
+  });
+
   // 入队预演（M23）：与真实入队共用 planImport 判定核心，只判不写——
   // 供入队前展示"哪些会入队、哪些会因队列已有/批内重复被跳过"。
   // 预演基于当前队列状态，真实入队以服务端逐条回执为准。
@@ -526,21 +603,16 @@ async function confirmCandidate(
   return assertion;
 }
 
-/** 共享入队预演核心（M23）：入队端点与预演端点同源判定，杜绝预演与真实入队口径漂移。
+/** 共享去重判定核心（M21/M23/M28）：入队、预演、回导三端点同源判定，杜绝口径漂移。
  *  队列卫生（M21）：同（类型 + 端点文本）已有 pending/confirmed 候选跳过（reason=queue）；
  *  dismissed 不算——被否决过的候选允许重新入队重审。
  *  批内重复（reason=batch）：同批前序可入队条目占用去重键——真实入队同事务内
- *  后条的去重 SELECT 能看到前条未提交的插入，预演必须以批内记忆补齐同一口径。 */
-async function planImport(
+ *  后条的去重 SELECT 能看到前条未提交的插入，预演/回导以批内记忆补齐同一口径。 */
+async function planImportDedup(
   client: PoolClient,
   teamId: string,
-  assetId: string,
   candidates: Array<{ relationType: string; sourceText: string; targetText: string }>
 ): Promise<Array<{ importable: boolean; reason: "queue" | "batch" | null }>> {
-  const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
-    teamId, assetId,
-  ]);
-  if (!asset[0]) throw ERR.INVALID("来源资产不存在于本团队");
   const seen = new Set<string>();
   const plan: Array<{ importable: boolean; reason: "queue" | "batch" | null }> = [];
   for (const c of candidates) {
@@ -564,4 +636,18 @@ async function planImport(
     plan.push({ importable: true, reason: null });
   }
   return plan;
+}
+
+/** 入队/预演共用：单资产校验 + 去重判定（回导端点自行做 per-item 资产解析）。 */
+async function planImport(
+  client: PoolClient,
+  teamId: string,
+  assetId: string,
+  candidates: Array<{ relationType: string; sourceText: string; targetText: string }>
+): Promise<Array<{ importable: boolean; reason: "queue" | "batch" | null }>> {
+  const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
+    teamId, assetId,
+  ]);
+  if (!asset[0]) throw ERR.INVALID("来源资产不存在于本团队");
+  return planImportDedup(client, teamId, candidates);
 }

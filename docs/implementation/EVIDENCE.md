@@ -767,3 +767,29 @@
   taw-queue-pending-…csv（BOM 字节级核对、空队列仅表头、文件名带当前视图状态）；
   in-page fetch 验证 confirmed 视图 6 条含断言去向；盖章两条（fetch+按钮）在动态
   页 action=semantic.queue.export 可见，过滤选项含「导出语义队列」。
+
+### EV-050 ｜ 2026-09-21 ｜ M28 迭代轮：语义队列导出件回导入队
+
+**目标**：M27 队列导出的闭环——导出件（JSON items）可直接回导入队，跨团队复用
+评审成果，本团队恢复被忽略的候选。
+
+- planImport 拆分：去重判定抽为 planImportDedup（入队/预演/回导三端点同源：
+  确认/待审跳过 reason=queue、已忽略放行、批内重复 reason=batch），单资产校验留在
+  planImport（import/preview 用）；回导端点自行做 per-item 资产解析——三处判定
+  口径不可能漂移。
+- POST /semantic/candidates/reimport：body {teamId, assetId?(回退), items≤50}——
+  items 即导出件条目（未知字段白名单丢弃，assetName 用于资产定位）。逐条资产解析
+  （item.assetName 精确匹配，带缓存；否则回退 body.assetId），两者皆无如实标记
+  unresolved 不中断整批；可入队条目以 pending 落库（不继承原状态与决策留痕——
+  候选永远是候选）。响应 {imported, skipped, candidateIds, duplicateIndexes,
+  unresolvedIndexes} 部分成功不伪装。
+- 工作台队列区新增「回导 JSON」文件入口（accept application/json）：解析 → 回导 →
+  如实回执「入队 X 条，跳过重复 Y 条（无法定位来源资产 Z 条）」；切换视图清空提示。
+- 测试 tests/m28（2 项，真实集成）：同团队回导——确认/待审 2 条跳过、已忽略 1 条
+  放行重新待审（不继承 dismissed）、二次回导 0 入 3 跳完全幂等、文件内批内同键
+  1 入 1 跳；跨团队回导——同名资产解析成功 3 条全部入队且锚定乙团队自己的资产、
+  缺名条目 unresolved=[0] 不影响有名条目入队、空 items 422、非成员 404。
+  全量：`npx vitest run` **35 套件 161 项全部通过**（73s）。
+- 浏览器实测（真实文件回路）：「已确认」视图导出 JSON（6 条）→ 文件注入 1 条新键
+  候选 → 「回导 JSON」上传 → 回执「回导完成：入队 1 条，跳过重复 6 条」→ 待审
+  视图出现新条目（ui_reimport_rel，锚定同名资产"轨道传播模型说明书"）。

@@ -2,7 +2,7 @@
 // 候选永远是候选；确认只能由人完成（确认 = 既有 POST /relations confirm:true，
 // domain/range 与成环禁止由服务端强制执行，违规如实回显）。
 // worker 不可达 / LLM 降级均如实展示，不伪造候选。
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { Empty } from "./Empty";
 
@@ -122,6 +122,32 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qDetail, setQDetail] = useState<Record<string, CandidateDetail | null>>({});
   // 队列视图（M19）：待审（可批审）/ 已确认 / 已忽略
   const [qStatus, setQStatus] = useState<"pending" | "confirmed" | "dismissed">("pending");
+  // 回导（M28）：解析导出件（items 数组，未知字段由服务端白名单丢弃）→ reimport → 如实回执
+  async function onReimportFile(file: File) {
+    if (!project) return;
+    setReimportBusy(true);
+    setReimportMsg("");
+    try {
+      const parsed = JSON.parse(await file.text()) as { items?: unknown };
+      if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+        throw new Error("文件格式不正确：缺少非空 items 数组");
+      }
+      const r = await api<{ imported: number; skipped: number; unresolvedIndexes: number[] }>(
+        "/semantic/candidates/reimport",
+        { method: "POST", body: { teamId: project.teamId, items: parsed.items } },
+      );
+      setReimportMsg(
+        `回导完成：入队 ${r.imported} 条，跳过重复 ${r.skipped} 条` +
+        (r.unresolvedIndexes.length ? `，无法定位来源资产 ${r.unresolvedIndexes.length} 条` : ""),
+      );
+      loadQueue();
+    } catch (err) {
+      setReimportMsg(err instanceof ApiError ? errorText(err) : `回导失败：${err instanceof Error ? err.message : "文件解析失败"}`);
+    } finally {
+      setReimportBusy(false);
+    }
+  }
+
   // 队列导出（M27）：导出当前视图状态的候选（服务端盖章 semantic.queue.export，动态页可见）
   async function exportQueue(format: "csv" | "json") {
     if (!project) return;
@@ -147,6 +173,10 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [bulkSource, setBulkSource] = useState("");
   const [bulkTarget, setBulkTarget] = useState("");
   const [bulkMsg, setBulkMsg] = useState("");
+  // 回导（M28）：从导出件 JSON 回入队列（幂等：确认/待审跳过、已忽略放行）
+  const reimportInputRef = useRef<HTMLInputElement>(null);
+  const [reimportBusy, setReimportBusy] = useState(false);
+  const [reimportMsg, setReimportMsg] = useState("");
 
   const loadQueue = useCallback(() => {
     if (!project) return;
@@ -576,7 +606,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
             <select
               aria-label="队列状态筛选"
               value={qStatus}
-              onChange={(e) => { setQStatus(e.target.value as typeof qStatus); setQSel({}); setBulkMsg(""); }}
+              onChange={(e) => { setQStatus(e.target.value as typeof qStatus); setQSel({}); setBulkMsg(""); setReimportMsg(""); }}
               style={{ marginLeft: 6 }}
             >
               <option value="pending">待审核</option>
@@ -588,8 +618,27 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
           <span style={{ flex: 1 }} />
           <button onClick={() => void exportQueue("csv")}>导出 CSV</button>
           <button onClick={() => void exportQueue("json")}>导出 JSON</button>
+          <input
+            ref={reimportInputRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void onReimportFile(f);
+              e.target.value = "";
+            }}
+          />
+          <button disabled={reimportBusy} title="选择本工作台导出的 JSON 件，已忽略的候选会重新入队待审；确认/待审的重复项自动跳过"
+            onClick={() => reimportInputRef.current?.click()}>
+            {reimportBusy ? "回导中…" : "回导 JSON"}
+          </button>
         </div>
-        {qErrors["__export"] && <div className="error-text">{qErrors["__export"]}</div>}
+        {(qErrors["__export"] || reimportMsg) && (
+          <div className={reimportMsg && !reimportMsg.startsWith("回导失败") ? "ok-text" : "error-text"}>
+            {reimportMsg || qErrors["__export"]}
+          </div>
+        )}
         {queue === null && <div className="state">加载中…</div>}
         {queue !== null && queue.length === 0 && (
           <Empty
