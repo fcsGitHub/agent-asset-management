@@ -201,6 +201,38 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
     return m;
   }, [typeKeys, assets]);
 
+  // 图谱快照导出（M29）：把当前视图序列化为独立 SVG 文件。CSS 变量在独立文件中
+  // 不可解析，注入同值的具体色样式并修正 marker 填充；节点/边的几何与颜色本就
+  // 是内联属性，无需转换。
+  function exportSvg() {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", String(W));
+    clone.setAttribute("height", String(H));
+    const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+    style.textContent = [
+      "svg { background: #fffefa; font-family: sans-serif; }",
+      ".edge line { stroke: #5f7169; stroke-width: 1.4; opacity: 0.65; }",
+      ".edge.proposed line { stroke-dasharray: 5 4; opacity: 0.55; }",
+      ".edge-label { font-size: 11px; fill: #5f7169; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
+      ".node-label { font-size: 12px; fill: #1c2b26; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
+    ].join("\n");
+    clone.insertBefore(style, clone.firstChild);
+    const markerPath = clone.querySelector("marker path");
+    if (markerPath) markerPath.setAttribute("fill", "#5f7169");
+    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `taw-graph-${new Date().toISOString().slice(0, 10)}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   const svgPoint = (ev: PointerEvent | React.PointerEvent): { x: number; y: number } => {
     const svg = svgRef.current;
     if (!svg) return { x: 0, y: 0 };
@@ -275,6 +307,9 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
           </select>
         )}
         <button onClick={reload}>刷新</button>
+        {simNodes.length > 0 && (
+          <button title="把当前图谱视图保存为独立 SVG 文件" onClick={exportSvg}>导出 SVG</button>
+        )}
       </div>
       {error && <div className="error-text">{error}</div>}
       {edges !== null && edges.length === 0 && (

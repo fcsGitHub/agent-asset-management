@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 161 项基线仍绿
+4. `npx vitest run` 确认 163 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -105,7 +105,10 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    动作标签与过滤选项自动出现）（EV-049）。
    M28 已完成：队列导出件回导入队（planImportDedup 三端点同源判定、per-item
    assetName 解析跨团队复用、unresolved 如实标记、二次回导完全幂等）（EV-050）。
+   M29 已完成：回导件兼容 CSV（宽容 RFC 4180 解析、与 JSON 同管线、转义往返）+
+   图谱 SVG 快照导出（样式内联、marker 修正）（EV-051）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
-   暂缓项：动态页导出计划任务（定时快照，需 worker 基建支撑，连续两轮评估为
-   不成比例）。可选后续方向：回导件兼容 CSV、图谱导出（PNG/SVG 快照）。
+   暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
+   （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
+   可选后续方向：图谱 PNG 位图导出、审计条目批量导出筛选扩展（按操作者）。

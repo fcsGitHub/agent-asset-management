@@ -15,6 +15,81 @@ function workerUrl(): string {
   return process.env.SEMANTIC_WORKER_URL ?? "http://127.0.0.1:8100";
 }
 
+/** 宽容的 RFC 4180 行解析（M29）：面向本工作台自己的全引号导出件——字段可带引号、
+ *  双引号转义、CRLF；容忍 BOM 与未加引号的朴素行。`#` 开头的截断说明行由上层跳过。 */
+export function parseQuotedCsv(text: string): string[][] {
+  const s = text.replace(/^\uFEFF/, "");
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+      continue;
+    }
+    if (ch === '"') { inQuotes = true; continue; }
+    if (ch === ",") { row.push(field); field = ""; continue; }
+    if (ch === "\r") continue;
+    if (ch === "\n") { row.push(field); field = ""; rows.push(row); row = []; continue; }
+    field += ch;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/** 导出件 CSV → 回导 items（M29）：必需列 relation_type/source_text/target_text，
+ *  其余列可选；`#` 说明行与空行跳过；字段不合法如实 422。 */
+function parseCandidatesCsv(text: string): Array<{
+  relationType: string; sourceText: string; targetText: string;
+  evidenceSegment: string; confidence: number; llmProposed: boolean;
+  extractorVersion: string; assetName?: string;
+}> {
+  const rows = parseQuotedCsv(text).filter((r) => !(r.length === 1 && r[0]!.trim() === ""));
+  if (rows.length < 2) throw ERR.INVALID("CSV 缺少表头或数据行");
+  const header = rows[0]!.map((h) => h.trim());
+  const col = (name: string): number => header.indexOf(name);
+  for (const c of ["relation_type", "source_text", "target_text"]) {
+    if (col(c) < 0) throw ERR.INVALID(`CSV 缺少必需列：${c}`);
+  }
+  const iType = col("relation_type"), iSrc = col("source_text"), iTgt = col("target_text");
+  const iEv = col("evidence_segment"), iConf = col("confidence");
+  const iLlm = col("llm_proposed"), iVer = col("extractor_version"), iAsset = col("asset_name");
+  const items: Array<{
+    relationType: string; sourceText: string; targetText: string;
+    evidenceSegment: string; confidence: number; llmProposed: boolean;
+    extractorVersion: string; assetName?: string;
+  }> = [];
+  for (const row of rows.slice(1)) {
+    if (row[0]!.trimStart().startsWith("#")) continue;
+    const get = (i: number): string => (i >= 0 && row[i] !== undefined ? row[i]!.trim() : "");
+    const relationType = get(iType), sourceText = get(iSrc), targetText = get(iTgt);
+    if (!relationType || !sourceText || !targetText) throw ERR.INVALID("CSV 存在缺少必需字段的行");
+    const confRaw = get(iConf);
+    let confidence = 0;
+    if (confRaw) {
+      const n = Number(confRaw);
+      if (!Number.isFinite(n) || n < 0 || n > 1) throw ERR.INVALID(`confidence 不合法：${confRaw}`);
+      confidence = n;
+    }
+    const assetName = get(iAsset);
+    items.push({
+      relationType, sourceText, targetText,
+      evidenceSegment: get(iEv),
+      confidence,
+      llmProposed: get(iLlm).toLowerCase() === "true",
+      extractorVersion: get(iVer),
+      ...(assetName ? { assetName } : {}),
+    });
+  }
+  if (items.length === 0) throw ERR.INVALID("CSV 中没有可导入的候选");
+  return items;
+}
+
 async function teamRole(userId: string, teamId: string): Promise<string> {
   const { rows } = await q<{ role: string }>(
     `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
@@ -179,11 +254,20 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
           llmProposed: z.boolean().default(false),
           extractorVersion: z.string().max(120).default(""),
           assetName: z.string().min(1).max(300).optional(),
-        })).min(1).max(50),
+        })).max(50).optional(),
+        // 回导件兼容 CSV（M29）：即本工作台导出的 CSV 文本（BOM/#说明行宽容解析）
+        csv: z.string().min(1).max(400000).optional(),
+      }).superRefine((v, ctx) => {
+        if (!v.items && !v.csv) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["items"], message: "items 与 csv 必须提供其一" });
+        }
       }),
       req.body
     );
     await teamRole(auth.userId, body.teamId);
+    const items = body.items ?? parseCandidatesCsv(body.csv!);
+    if (items.length === 0) throw ERR.INVALID("没有可导入的候选");
+    if (items.length > 50) throw ERR.INVALID(`候选超过单批 50 条上限（收到 ${items.length} 条）`);
     const result = await withTeam(body.teamId, async (client) => {
       if (body.assetId) {
         const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
@@ -191,7 +275,7 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
         ]);
         if (!asset[0]) throw ERR.INVALID("回退来源资产不存在于本团队");
       }
-      const plan = await planImportDedup(client, body.teamId, body.items);
+      const plan = await planImportDedup(client, body.teamId, items);
       const nameCache = new Map<string, string | null>();
       const resolveAsset = async (name: string): Promise<string | null> => {
         if (nameCache.has(name)) return nameCache.get(name)!;
@@ -206,12 +290,12 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
       const ids: string[] = [];
       const duplicateIndexes: number[] = [];
       const unresolvedIndexes: number[] = [];
-      for (let i = 0; i < body.items.length; i++) {
+      for (let i = 0; i < items.length; i++) {
         if (!plan[i]!.importable) {
           duplicateIndexes.push(i);
           continue;
         }
-        const it = body.items[i]!;
+        const it = items[i]!;
         let assetId: string | null = it.assetName ? await resolveAsset(it.assetName) : null;
         if (!assetId && body.assetId) assetId = body.assetId;
         if (!assetId) {

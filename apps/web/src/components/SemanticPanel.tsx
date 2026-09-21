@@ -128,13 +128,20 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     setReimportBusy(true);
     setReimportMsg("");
     try {
-      const parsed = JSON.parse(await file.text()) as { items?: unknown };
-      if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
-        throw new Error("文件格式不正确：缺少非空 items 数组");
+      let payload: Record<string, unknown>;
+      if (/\.csv$/i.test(file.name)) {
+        // CSV 回导件（M29）：服务端宽容解析（BOM/#说明行/转义引号）
+        payload = { teamId: project.teamId, csv: await file.text() };
+      } else {
+        const parsed = JSON.parse(await file.text()) as { items?: unknown };
+        if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+          throw new Error("文件格式不正确：缺少非空 items 数组");
+        }
+        payload = { teamId: project.teamId, items: parsed.items };
       }
       const r = await api<{ imported: number; skipped: number; unresolvedIndexes: number[] }>(
         "/semantic/candidates/reimport",
-        { method: "POST", body: { teamId: project.teamId, items: parsed.items } },
+        { method: "POST", body: payload },
       );
       setReimportMsg(
         `回导完成：入队 ${r.imported} 条，跳过重复 ${r.skipped} 条` +
@@ -621,7 +628,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
           <input
             ref={reimportInputRef}
             type="file"
-            accept="application/json,.json"
+            accept="application/json,.json,.csv,text/csv"
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0];
