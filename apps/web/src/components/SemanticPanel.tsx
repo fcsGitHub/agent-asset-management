@@ -61,6 +61,22 @@ interface CandidateDetail {
   resolved_type_version: string | null;
 }
 interface BatchResult { candidateId: string; ok: boolean; relationId?: string; code?: string; message?: string }
+// 入队预演（M23）：服务端同源判定结果 + 原样待提交载荷（确认时提交与预览完全一致的候选）
+interface ImportCandidate {
+  relationType: string;
+  sourceText: string; sourceStart: number; sourceEnd: number;
+  targetText: string; targetStart: number; targetEnd: number;
+  evidenceSegment: string;
+  confidence: number;
+  llmProposed: boolean;
+  extractorVersion: string;
+}
+interface ImportPreview {
+  candidates: ImportCandidate[];
+  total: number;
+  wouldImport: number;
+  duplicates: Array<{ index: number; reason: "queue" | "batch"; relationType: string; sourceText: string; targetText: string }>;
+}
 
 function errorText(err: unknown): string {
   if (err instanceof ApiError) {
@@ -96,6 +112,9 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qErrors, setQErrors] = useState<Record<string, string>>({});
   const [importCount, setImportCount] = useState<number | null>(null);
   const [importSkipped, setImportSkipped] = useState<number | null>(null);
+  // 入队预演（M23）：先服务端预演去重，确认后才真实入队
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
   // 批审（M18）：勾选 + 批量确认/忽略；详情展开按需拉取
   const [qSel, setQSel] = useState<Record<string, boolean>>({});
   const [qBusy, setQBusy] = useState(false);
@@ -155,6 +174,7 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     if (!project || !assetId || !headRevision || !text.trim()) return;
     setBusy(true); setError(""); setResult(null);
     setMapping({}); setAsserted({}); setDismissed({}); setRowErrors({});
+    setPreview(null); setImportCount(null);
     try {
       const entityHints = hints.split(/[,，\n]+/).map((s) => s.trim()).filter(Boolean)
         .map((t) => ({ text: t.slice(0, 100) }));
@@ -201,29 +221,56 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     }
   }
 
-  // 把本次抽取的全部候选存入团队审核队列（跨会话，其他成员可见可审）；
-  // 同（类型+端点）已有待审/已确认候选时服务端跳过，跳过数如实展示
-  async function importToQueue() {
+  // 把本次抽取的候选存入团队审核队列（跨会话，其他成员可见可审）。
+  // 两步（M23）：先服务端预演去重（与真实入队同源判定），确认后才真实入队。
+  function buildCandidates(): ImportCandidate[] {
+    if (!result) return [];
+    return result.candidate_relations.map((c) => ({
+      relationType: c.type,
+      sourceText: c.source.text, sourceStart: c.source.start ?? 0, sourceEnd: c.source.end ?? 0,
+      targetText: c.target.text, targetStart: c.target.start ?? 0, targetEnd: c.target.end ?? 0,
+      evidenceSegment: c.evidence?.segment ?? "",
+      confidence: c.confidence ?? 0,
+      llmProposed: !!c.llm_proposed,
+      extractorVersion: result.extractor_version,
+    }));
+  }
+
+  async function previewImport() {
     if (!project || !result || !assetId) return;
+    setError("");
+    setPreviewBusy(true);
+    try {
+      const candidates = buildCandidates();
+      const r = await api<{ total: number; wouldImport: number; duplicates: ImportPreview["duplicates"] }>(
+        "/semantic/candidates/import/preview",
+        {
+          method: "POST",
+          body: { teamId: project.teamId, assetId, revisionId: headRevision || undefined, candidates },
+        },
+      );
+      setPreview({ candidates, total: r.total, wouldImport: r.wouldImport, duplicates: r.duplicates });
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
+
+  async function confirmImport() {
+    if (!project || !preview) return;
     setError("");
     try {
       const r = await api<{ imported: number; skipped: number }>("/semantic/candidates/import", {
         method: "POST",
         body: {
           teamId: project.teamId, assetId, revisionId: headRevision || undefined,
-          candidates: result.candidate_relations.map((c) => ({
-            relationType: c.type,
-            sourceText: c.source.text, sourceStart: c.source.start ?? 0, sourceEnd: c.source.end ?? 0,
-            targetText: c.target.text, targetStart: c.target.start ?? 0, targetEnd: c.target.end ?? 0,
-            evidenceSegment: c.evidence?.segment ?? "",
-            confidence: c.confidence ?? 0,
-            llmProposed: !!c.llm_proposed,
-            extractorVersion: result.extractor_version,
-          })),
+          candidates: preview.candidates,
         },
       });
       setImportCount(r.imported);
       setImportSkipped(r.skipped);
+      setPreview(null);
       loadQueue();
     } catch (err) {
       setError(errorText(err));
@@ -386,9 +433,9 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
       {result && (
         <div className="sem-meta">
           抽取器 <code>{result.extractor_version}</code> · 候选关系 {candList.length} 条 · 证据锚点 {result.evidence_anchors.length} 个
-          {candList.length > 0 && (
-            <button style={{ marginLeft: 10 }} disabled={busy || !assetId} onClick={() => void importToQueue()}>
-              存入审核队列（{candList.length}）
+          {candList.length > 0 && !preview && (
+            <button style={{ marginLeft: 10 }} disabled={previewBusy || busy || !assetId} onClick={() => void previewImport()}>
+              {previewBusy ? "预演中…" : `预览入队（${candList.length}）`}
             </button>
           )}
           {importCount !== null && (
@@ -397,6 +444,31 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
               {(importSkipped ?? 0) > 0 && `；跳过重复 ${importSkipped} 条（队列中已有同类型同端点的候选）`}
             </span>
           )}
+        </div>
+      )}
+      {preview && (
+        <div className="sem-batchbar" style={{ display: "block", padding: "8px 12px" }}>
+          <strong>入队预演</strong>：本次将入队 <span className="ok-text">{preview.wouldImport}</span> 条
+          {preview.duplicates.length > 0 && <>，跳过 <span className="error-text" style={{ display: "inline" }}>{preview.duplicates.length}</span> 条</>}
+          （共 {preview.total} 条）。
+          {preview.duplicates.length > 0 && (
+            <ul style={{ margin: "6px 0", paddingLeft: 20 }}>
+              {preview.duplicates.map((d) => (
+                <li key={d.index}>
+                  <span className="badge">{d.relationType}</span> {d.sourceText} → {d.targetText}
+                  {" — "}
+                  {d.reason === "queue" ? "队列中已有同类型同端点的候选" : "本批次内重复（前序同键条目将先入队）"}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <button className="primary" disabled={previewBusy} onClick={() => void confirmImport()}>
+              确认入队（{preview.wouldImport}）
+            </button>
+            <button onClick={() => setPreview(null)}>取消</button>
+            <span className="sem-conf">预演基于当前队列状态；跳过项不会重复入队</span>
+          </div>
         </div>
       )}
       {candList.map((c, i) => {

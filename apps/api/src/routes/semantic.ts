@@ -128,25 +128,13 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
     const ids: string[] = [];
     const duplicateIndexes: number[] = [];
     await withTeam(body.teamId, async (client) => {
-      const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
-        body.teamId, body.assetId,
-      ]);
-      if (!asset[0]) throw ERR.INVALID("来源资产不存在于本团队");
+      const plan = await planImport(client, body.teamId, body.assetId, body.candidates);
       for (let i = 0; i < body.candidates.length; i++) {
-        const c = body.candidates[i]!;
-        // 队列卫生（M21）：同（类型 + 端点文本）已有 pending/confirmed 候选时跳过。
-        // dismissed 不算——被否决过的候选允许重新入队重审。
-        const { rows: dup } = await client.query(
-          `SELECT 1 FROM semantic_candidates
-            WHERE team_id = $1 AND relation_type = $2 AND source_text = $3 AND target_text = $4
-              AND status IN ('pending','confirmed')
-            LIMIT 1`,
-          [body.teamId, c.relationType, c.sourceText, c.targetText]
-        );
-        if (dup[0]) {
+        if (!plan[i]!.importable) {
           duplicateIndexes.push(i);
           continue;
         }
+        const c = body.candidates[i]!;
         const id = newId();
         await client.query(
           `INSERT INTO semantic_candidates (team_id, id, asset_id, revision_id, relation_type,
@@ -166,6 +154,33 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
       skipped: duplicateIndexes.length,
       candidateIds: ids,
       duplicateIndexes,
+    });
+  });
+
+  // 入队预演（M23）：与真实入队共用 planImport 判定核心，只判不写——
+  // 供入队前展示"哪些会入队、哪些会因队列已有/批内重复被跳过"。
+  // 预演基于当前队列状态，真实入队以服务端逐条回执为准。
+  app.post("/semantic/candidates/import/preview", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(candidateImportSchema, req.body);
+    await teamRole(auth.userId, body.teamId);
+    return withTeam(body.teamId, async (client) => {
+      const plan = await planImport(client, body.teamId, body.assetId, body.candidates);
+      const duplicates: Array<{ index: number; reason: "queue" | "batch"; relationType: string; sourceText: string; targetText: string }> = [];
+      plan.forEach((p, i) => {
+        if (!p.importable && p.reason) {
+          const c = body.candidates[i]!;
+          duplicates.push({ index: i, reason: p.reason, relationType: c.relationType, sourceText: c.sourceText, targetText: c.targetText });
+        }
+      });
+      return reply.code(200).send({
+        teamId: body.teamId,
+        assetId: body.assetId,
+        total: body.candidates.length,
+        wouldImport: plan.filter((p) => p.importable).length,
+        duplicates,
+      });
     });
   });
 
@@ -394,4 +409,44 @@ async function confirmCandidate(
     [teamId, candidateId, userId, assertion.relationId]
   );
   return assertion;
+}
+
+/** 共享入队预演核心（M23）：入队端点与预演端点同源判定，杜绝预演与真实入队口径漂移。
+ *  队列卫生（M21）：同（类型 + 端点文本）已有 pending/confirmed 候选跳过（reason=queue）；
+ *  dismissed 不算——被否决过的候选允许重新入队重审。
+ *  批内重复（reason=batch）：同批前序可入队条目占用去重键——真实入队同事务内
+ *  后条的去重 SELECT 能看到前条未提交的插入，预演必须以批内记忆补齐同一口径。 */
+async function planImport(
+  client: PoolClient,
+  teamId: string,
+  assetId: string,
+  candidates: Array<{ relationType: string; sourceText: string; targetText: string }>
+): Promise<Array<{ importable: boolean; reason: "queue" | "batch" | null }>> {
+  const { rows: asset } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [
+    teamId, assetId,
+  ]);
+  if (!asset[0]) throw ERR.INVALID("来源资产不存在于本团队");
+  const seen = new Set<string>();
+  const plan: Array<{ importable: boolean; reason: "queue" | "batch" | null }> = [];
+  for (const c of candidates) {
+    const { rows: dup } = await client.query(
+      `SELECT 1 FROM semantic_candidates
+        WHERE team_id = $1 AND relation_type = $2 AND source_text = $3 AND target_text = $4
+          AND status IN ('pending','confirmed')
+        LIMIT 1`,
+      [teamId, c.relationType, c.sourceText, c.targetText]
+    );
+    if (dup[0]) {
+      plan.push({ importable: false, reason: "queue" });
+      continue;
+    }
+    const key = `${c.relationType}\u0000${c.sourceText}\u0000${c.targetText}`;
+    if (seen.has(key)) {
+      plan.push({ importable: false, reason: "batch" });
+      continue;
+    }
+    seen.add(key);
+    plan.push({ importable: true, reason: null });
+  }
+  return plan;
 }

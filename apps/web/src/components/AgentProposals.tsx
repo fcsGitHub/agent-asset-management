@@ -46,9 +46,10 @@ export function AgentProposals({ project, onPrefillRegister }: {
   const [status, setStatus] = useState("pending");
   const [error, setError] = useState("");
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
-  // 批量审核（M20）：勾选 + 批量接受/拒绝，逐条回执
+  // 批量审核（M20）：勾选 + 批量接受/拒绝，逐条回执；备注（M23）可选，写入每条审核留痕
   const [pSel, setPSel] = useState<Record<string, boolean>>({});
   const [pBusy, setPBusy] = useState(false);
+  const [pNote, setPNote] = useState("");
 
   const load = useCallback(() => {
     if (!project) return;
@@ -74,8 +75,9 @@ export function AgentProposals({ project, onPrefillRegister }: {
 
   async function batchReview(decision: "accepted" | "rejected") {
     if (!project || !rows) return;
+    const note = pNote.trim();
     const items = rows.filter((p) => pSel[p.id] && p.status === "pending")
-      .map((p) => ({ proposalId: p.id, decision }));
+      .map((p) => ({ proposalId: p.id, decision, note: note || undefined }));
     if (items.length === 0) return;
     setPBusy(true);
     setError("");
@@ -92,6 +94,7 @@ export function AgentProposals({ project, onPrefillRegister }: {
         return next;
       });
       setPSel({});
+      setPNote("");
       load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "批量审核失败");
@@ -138,6 +141,14 @@ export function AgentProposals({ project, onPrefillRegister }: {
             全选
           </label>
           <span className="sem-conf">已选 {rows.filter((p) => pSel[p.id] && p.status === "pending").length} 个待审提案</span>
+          <input
+            style={{ flex: 1, minWidth: 180 }}
+            aria-label="批量审核备注（可选）"
+            placeholder="批量备注（可选，写入每条审核留痕）"
+            maxLength={2000}
+            value={pNote}
+            onChange={(e) => setPNote(e.target.value)}
+          />
           <button className="primary" disabled={pBusy} onClick={() => void batchReview("accepted")}>
             {pBusy ? "处理中…" : "批量接受"}
           </button>
