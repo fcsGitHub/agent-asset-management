@@ -246,6 +246,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "release_published": "发布到通道",
     "release_rollback": "通道回滚",
     "audit.export": "导出审计",
+    "semantic.queue.export": "导出语义队列",
   };
   // 动态页 action 过滤选项（M24）：Agent 运行是一组（不分状态），其余按审计动作精确匹配。
   // 随 /activity 响应下发，前端下拉与服务端标签同源，不硬编码副本。
@@ -448,6 +449,32 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     );
     // actions：可用的 action 过滤选项（含 "agent" 组），与服务端标签同源下发
     return { items, next, actions: ACTIVITY_FILTERS };
+  });
+
+  // 审计条目详情（M27）：列表只带摘要，治理回执原文（detail jsonb）按需拉取。
+  // 团队 scoped（assertTeamMember + withTeam RLS）；运行类条目走既有 GET /runs/:id。
+  app.get("/activity/audit/:auditId", async (req) => {
+    const auth = requireAuth(req);
+    const { auditId } = req.params as { auditId: string };
+    const query = (req.query ?? {}) as { teamId?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    if (!/^\d{1,20}$/.test(auditId)) throw ERR.INVALID("auditId 不合法");
+    await assertTeamMember(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT a.id::text AS id, a.action, a.object_kind, a.object_id, a.detail,
+                a.project_id, p.name AS project_name, a.created_at,
+                u.display_name AS actor
+           FROM audit_events a
+           LEFT JOIN users u ON u.id = a.actor_id
+           LEFT JOIN projects p ON p.team_id = a.team_id AND p.id = a.project_id
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [teamId, auditId]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      return rows[0];
+    });
   });
 
   // 审计导出：复用与列表完全相同的分页查询（同源，含 action 过滤），DESC 遍历后按

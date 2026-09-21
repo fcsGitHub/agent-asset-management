@@ -737,3 +737,33 @@
   （fetchPage 增请求时序守卫，过期响应不渲染且游标由其统一管理）；② datetime-local
   本地时间无时区后缀被 DB 按自身时区解释错位 8 小时（前端显式转 UTC 带 Z 时间戳，
   用户所见即过滤范围）。
+
+### EV-049 ｜ 2026-09-21 ｜ M27 迭代轮：审计条目详情 + 语义队列导出
+
+**目标**：补追溯闭环最后两块——治理回执原文的查看入口、语义队列的离线审阅件。
+
+- 审计详情端点 GET /activity/audit/:auditId：列表只带摘要，detail jsonb（治理回执
+  原文）按需拉取；团队 scoped（assertTeamMember + withTeam RLS），不存在 404、
+  非法 id 422、非成员 404；运行类条目沿用既有 GET /runs/:id。动态页点击 👤 条目
+  原地展开：动作/操作者/时间/项目/对象 + 回执 JSON（pre 截断 1500 字符），再次
+  点击收起。
+- 语义队列导出 GET /semantic/candidates/export：status=all|pending|confirmed|
+  dismissed（非法 422）× format=csv|json；CSV RFC 4180 全字段转义 + UTF-8 BOM +
+  时间正序，15 列含状态、断言去向（resolved_relation_id）、决策留痕；JSON 结构化
+  元数据回显；上限 20000 达到如实标注截断。导出即盖章（M22 惯例）：semantic.queue.
+  export 审计事件（团队级，detail 记录格式/条数/状态过滤/截断，先取数后盖章）；
+  动作入 ACTION_LABELS → 活动流中文标签与 action 过滤选项自动出现。
+- 工作台队列区新增「导出 CSV」「导出 JSON」，按当前视图状态导出（文件名带状态）。
+- 测试 tests/m27（2 项，真实集成）：详情端点回执原文返回、项目级带项目名、404/
+  422/越权如实；队列导出 BOM+表头+3 状态混合行、JSON 状态过滤恰 1 条且 confirmed
+  带 resolvedRelationId、三条盖章逐项核对（格式/条数/状态）、动态页过滤视图可见
+  章、actions 选项自动包含新动作、非法参数 422、非成员 404。
+  全量：`npx vitest run` **33 套件 159 项全部通过**（88s）。
+- 环境插曲：机器休眠后 Docker Desktop/Postgres/API/worker 全部停止，按既定流程
+  恢复（Docker Desktop → docker start taw-postgres → API/worker 重启）后测试一次
+  通过。
+- 浏览器实测：动态页点击「导出审计」条目展开回执原文（M26 导出的 count/since/
+  until/format JSON 完整可见）；语义队列「导出 CSV」按钮真实下载
+  taw-queue-pending-…csv（BOM 字节级核对、空队列仅表头、文件名带当前视图状态）；
+  in-page fetch 验证 confirmed 视图 6 条含断言去向；盖章两条（fetch+按钮）在动态
+  页 action=semantic.queue.export 可见，过滤选项含「导出语义队列」。

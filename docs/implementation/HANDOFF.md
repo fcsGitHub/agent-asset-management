@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 157 项基线仍绿
+4. `npx vitest run` 确认 159 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -100,7 +100,10 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    翻页、盖章记录范围）+ NL 动态过滤意图（L1 五句式 + L2 七值白名单、activityPreset
    直达过滤视图）+ 提案 diff 视图（同名/类型/属性对比）。修复过滤竞态与时区错位
    两个真实前端缺陷（EV-048）。
+   M27 已完成：审计条目详情（GET /activity/audit/:id 团队 scoped、动态页点击展开
+   回执原文）+ 语义队列导出（CSV/JSON × 状态过滤、semantic.queue.export 盖章、
+   动作标签与过滤选项自动出现）（EV-049）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
-   暂缓项：无（M26 清零）。可选后续方向：审计条目原文详情查看、动态页导出计划
-   任务（定时快照）、语义队列导出。
+   暂缓项：无。可选后续方向：动态页导出计划任务（定时快照，需 worker 支撑）、
+   队列候选从导出件回导入队（幂等去重复用 M21/M23 口径）。

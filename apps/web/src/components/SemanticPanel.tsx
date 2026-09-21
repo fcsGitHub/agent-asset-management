@@ -122,6 +122,27 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
   const [qDetail, setQDetail] = useState<Record<string, CandidateDetail | null>>({});
   // 队列视图（M19）：待审（可批审）/ 已确认 / 已忽略
   const [qStatus, setQStatus] = useState<"pending" | "confirmed" | "dismissed">("pending");
+  // 队列导出（M27）：导出当前视图状态的候选（服务端盖章 semantic.queue.export，动态页可见）
+  async function exportQueue(format: "csv" | "json") {
+    if (!project) return;
+    try {
+      const qs = new URLSearchParams({ teamId: project.teamId, status: qStatus, format });
+      const res = await fetch(`/api/v1/semantic/candidates/export?${qs}`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `taw-queue-${qStatus}-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setQErrors((prev) => ({ ...prev, __export: err instanceof Error ? err.message : "导出失败" }));
+    }
+  }
+
   // 批量重映射（M25）：为已选候选统一设置 source/target 端点（空侧不改），仅改映射不自动确认
   const [bulkSource, setBulkSource] = useState("");
   const [bulkTarget, setBulkTarget] = useState("");
@@ -564,7 +585,11 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
             </select>
           </label>
           {qStatus !== "pending" && <span className="sem-conf">历史视图只读；「详情」可查看决策留痕与断言去向</span>}
+          <span style={{ flex: 1 }} />
+          <button onClick={() => void exportQueue("csv")}>导出 CSV</button>
+          <button onClick={() => void exportQueue("json")}>导出 JSON</button>
         </div>
+        {qErrors["__export"] && <div className="error-text">{qErrors["__export"]}</div>}
         {queue === null && <div className="state">加载中…</div>}
         {queue !== null && queue.length === 0 && (
           <Empty

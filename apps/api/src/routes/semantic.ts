@@ -315,9 +315,124 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  // 候选详情：全字段 + 决策留痕 + 已解析关系摘要（含 spans 与断言去向）
-  app.get("/semantic/candidates/:candidateId", async (req) => {
+  // 语义队列导出（M27）：当前队列的离线审阅件（CSV/JSON）。导出是敏感可见动作：
+  // 盖章 semantic.queue.export 审计事件（团队级、detail 记录格式/条数/状态过滤/
+  // 截断；先取数后盖章——章不进入本次导出内容）。上限 20000 条，达上限如实标注。
+  app.get("/semantic/candidates/export", async (req, reply) => {
     const auth = requireAuth(req);
+    const query = (req.query ?? {}) as { teamId?: string; status?: string; format?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    const rawStatus = String(query.status ?? "all").trim();
+    if (!["all", "pending", "confirmed", "dismissed"].includes(rawStatus)) {
+      throw ERR.INVALID("status 仅支持 all / pending / confirmed / dismissed");
+    }
+    const rawFormat = String(query.format ?? "csv").trim().toLowerCase();
+    if (rawFormat && rawFormat !== "csv" && rawFormat !== "json") throw ERR.INVALID("format 仅支持 csv 或 json");
+    const format = rawFormat === "json" ? "json" : "csv";
+
+    const EXPORT_CAP = 20000;
+    const rows = await withTeam(teamId, async (client) => {
+      const { rows } = await client.query<{
+        id: string; relation_type: string; status: string;
+        source_text: string; target_text: string;
+        confidence: number; llm_proposed: boolean; extractor_version: string;
+        evidence_segment: string; created_at: string;
+        created_by_name: string | null; decided_by_name: string | null;
+        decided_at: string | null; resolved_relation_id: string | null;
+        asset_name: string | null;
+      }>(
+        `SELECT c.id, c.relation_type, c.status, c.source_text, c.target_text,
+                c.confidence::float8 AS confidence, c.llm_proposed, c.extractor_version,
+                c.evidence_segment, c.created_at,
+                cu.display_name AS created_by_name, du.display_name AS decided_by_name,
+                c.decided_at, c.resolved_relation_id, a.name AS asset_name
+           FROM semantic_candidates c
+           LEFT JOIN users cu ON cu.id = c.created_by
+           LEFT JOIN users du ON du.id = c.decided_by
+           LEFT JOIN assets a ON a.team_id = c.team_id AND a.id = c.asset_id
+          WHERE c.team_id = $1 AND ($2::text = 'all' OR c.status = $2::text)
+          ORDER BY c.created_at DESC
+          LIMIT $3`,
+        [teamId, rawStatus, EXPORT_CAP + 1]
+      );
+      return rows;
+    });
+    const truncated = rows.length > EXPORT_CAP;
+    const items = truncated ? rows.slice(0, EXPORT_CAP) : rows;
+
+    await withTeam(teamId, async (client) => {
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, detail, project_id)
+         VALUES ($1,$2,'semantic.queue.export','semantic_candidates',$3,NULL)`,
+        [teamId, auth.userId,
+         JSON.stringify({ format, count: items.length, status: rawStatus, truncated })]
+      );
+    });
+
+    const stamp = `taw-queue-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`;
+    if (format === "json") {
+      reply.header("content-type", "application/json; charset=utf-8");
+      reply.header("content-disposition", `attachment; filename="${stamp}.json"`);
+      return JSON.stringify({
+        teamId,
+        status: rawStatus,
+        format,
+        exportedAt: new Date().toISOString(),
+        truncated,
+        total: items.length,
+        items: [...items].reverse().map((c) => ({
+          id: c.id,
+          relationType: c.relation_type,
+          status: c.status,
+          sourceText: c.source_text,
+          targetText: c.target_text,
+          confidence: c.confidence,
+          llmProposed: c.llm_proposed,
+          extractorVersion: c.extractor_version,
+          evidenceSegment: c.evidence_segment,
+          assetName: c.asset_name,
+          createdBy: c.created_by_name,
+          decidedBy: c.decided_by_name,
+          decidedAt: c.decided_at,
+          resolvedRelationId: c.resolved_relation_id,
+          createdAt: c.created_at,
+        })),
+      }, null, 2);
+    }
+
+    const csvEscape = (v: string): string => `"${v.replace(/"/g, '""')}"`;
+    const lines: string[] = ["created_at,id,relation_type,status,source_text,target_text,confidence,llm_proposed,extractor_version,evidence_segment,asset_name,created_by,decided_by,decided_at,resolved_relation_id"];
+    const iso = (v: string | null): string => (v ? new Date(v).toISOString() : "");
+    for (const c of [...items].reverse()) {
+      lines.push([
+        csvEscape(iso(c.created_at)),
+        csvEscape(c.id),
+        csvEscape(c.relation_type),
+        csvEscape(c.status),
+        csvEscape(c.source_text),
+        csvEscape(c.target_text),
+        csvEscape(String(c.confidence ?? "")),
+        csvEscape(c.llm_proposed ? "true" : "false"),
+        csvEscape(c.extractor_version ?? ""),
+        csvEscape(c.evidence_segment ?? ""),
+        csvEscape(c.asset_name ?? ""),
+        csvEscape(c.created_by_name ?? ""),
+        csvEscape(c.decided_by_name ?? ""),
+        csvEscape(iso(c.decided_at)),
+        csvEscape(c.resolved_relation_id ?? ""),
+      ].join(","));
+    }
+    if (truncated) lines.push(`# 已达导出上限 ${EXPORT_CAP} 条，更早的记录未包含`);
+
+    reply.header("content-type", "text/csv; charset=utf-8");
+    reply.header("content-disposition", `attachment; filename="${stamp}.csv"`);
+    return "\uFEFF" + lines.join("\r\n");
+  });
+
+  // 候选详情：全字段 + 决策留痕 + 已解析关系摘要（含 spans 与断言去向）
+  app.get("/semantic/candidates/:candidateId", async (req) => {    const auth = requireAuth(req);
     const { candidateId } = req.params as { candidateId: string };
     const query = (req.query ?? {}) as { teamId?: string };
     const teamId = String(query.teamId ?? "");

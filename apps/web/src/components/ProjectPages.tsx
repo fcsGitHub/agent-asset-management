@@ -73,26 +73,73 @@ function StatCard({ label, value, sub, tone }: { label: string; value: string | 
   );
 }
 
-function ActivityList({ items, compact }: { items: ActivityItem[]; compact?: boolean }) {
+// 审计条目详情（M27）：治理回执原文（detail jsonb）按需拉取后的展示结构
+export interface AuditEntryDetail {
+  id: string;
+  action: string;
+  object_kind: string;
+  object_id: string | null;
+  detail: Record<string, unknown> | null;
+  project_name: string | null;
+  created_at: string;
+  actor: string | null;
+}
+
+function ActivityList({ items, compact, auditDetail, onAuditToggle }: {
+  items: ActivityItem[];
+  compact?: boolean;
+  /** 动态页（非 compact）注入：审计条目展开详情的加载态/内容 */
+  auditDetail?: Record<string, { loading: boolean; data: AuditEntryDetail | null; error?: string }>;
+  onAuditToggle?: (item: ActivityItem) => void;
+}) {
   if (items.length === 0) {
     return <Empty icon="🕒" title="还没有动态" hint="治理动作（归档/发布/回滚）和 Agent 运行会出现在这里。" />;
   }
   return (
     <ul className="activity-feed">
-      {items.map((it, i) => (
-        <li key={`${it.ts}-${i}`} className="activity-item">
-          <span className="activity-icon" aria-hidden="true">{it.kind === "agent" ? "🤖" : "👤"}</span>
-          <span className="activity-body">
-            <span className="activity-actor">{it.actor}</span>
-            <span className="activity-text">
-              {it.kind === "agent" ? "Agent 运行" : ""}{it.kind === "agent" && it.project ? `（${it.project}）` : it.kind === "agent" ? "" : " "}{it.summary}
+      {items.map((it, i) => {
+        const open = !compact && it.kind === "audit" && it.key !== undefined && !!auditDetail?.[it.key];
+        const d = open && it.key ? auditDetail?.[it.key] : undefined;
+        return (
+          <li key={`${it.ts}-${i}`} className="activity-item">
+            <span className="activity-icon" aria-hidden="true">{it.kind === "agent" ? "🤖" : "👤"}</span>
+            <span className="activity-body">
+              <span className="activity-actor">{it.actor}</span>
+              <span
+                className="activity-text"
+                role={it.kind === "audit" && !compact && onAuditToggle ? "button" : undefined}
+                style={it.kind === "audit" && !compact && onAuditToggle ? { cursor: "pointer" } : undefined}
+                onClick={it.kind === "audit" && !compact && onAuditToggle ? () => onAuditToggle(it) : undefined}
+                title={it.kind === "audit" && !compact && onAuditToggle ? "点击查看回执原文" : undefined}
+              >
+                {it.kind === "agent" ? "Agent 运行" : ""}{it.kind === "agent" && it.project ? `（${it.project}）` : it.kind === "agent" ? "" : " "}{it.summary}
+              </span>
+              {it.kind === "agent" && <span className="chip">{statusChip(it.action.replace("agent.run.", ""))}</span>}
+              {it.kind === "audit" && <span className="chip chip-dim">{it.action}</span>}
             </span>
-            {it.kind === "agent" && <span className="chip">{statusChip(it.action.replace("agent.run.", ""))}</span>}
-            {it.kind === "audit" && <span className="chip chip-dim">{it.action}</span>}
-          </span>
-          {!compact && <span className="activity-time">{fmtTime(it.ts)}</span>}
-        </li>
-      ))}
+            {!compact && <span className="activity-time">{fmtTime(it.ts)}</span>}
+            {open && (
+              <div className="audit-detail" style={{ marginTop: 6, paddingLeft: 12, borderLeft: "2px solid var(--muted)", width: "100%" }}>
+                {d?.loading && <div className="state">加载回执原文…</div>}
+                {d?.error && <div className="error-text">{d.error}</div>}
+                {d?.data && (
+                  <>
+                    <div className="proposal-meta">
+                      {d.data.action} · {d.data.actor ?? "系统"} · {fmtTime(d.data.created_at)}
+                      {d.data.project_name ? ` · ${d.data.project_name}` : ""}
+                      {d.data.object_kind ? ` · ${d.data.object_kind}` : ""}
+                      {d.data.object_id ? ` · ${d.data.object_id.slice(0, 8)}…` : ""}
+                    </div>
+                    <pre className="proposal-payload" style={{ margin: "4px 0", whiteSpace: "pre-wrap" }}>
+                      {d.data.detail ? JSON.stringify(d.data.detail, null, 2).slice(0, 1500) : "（无回执正文）"}
+                    </pre>
+                  </>
+                )}
+              </div>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -271,6 +318,8 @@ export function ActivityPage({
   // 请求时序守卫（M26 修复）：过滤条件变化（含 NL 预置注入）会立刻触发新请求，
   // 慢到的旧响应不得覆盖新结果（真实缺陷：无过滤首请求后到，混入未过滤条目）
   const fetchSeqRef = useRef(0);
+  // 审计条目详情（M27）：按需拉取治理回执原文（key = "audit:<id>"）
+  const [auditDetail, setAuditDetail] = useState<Record<string, { loading: boolean; data: AuditEntryDetail | null; error?: string }>>({});
 
   const applyItems = useCallback((incoming: ActivityItem[], append: boolean) => {
     setItems((prev) => {
@@ -343,6 +392,23 @@ export function ActivityPage({
       URL.revokeObjectURL(url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "导出失败");
+    }
+  }
+
+  // 展开/收起审计条目详情：首开时拉取一次，收起即移除（再开重新展示缓存或重拉）
+  async function toggleAuditDetail(it: ActivityItem) {
+    if (!project || !it.key) return;
+    const key = it.key;
+    if (auditDetail[key]) {
+      setAuditDetail((prev) => { const n = { ...prev }; delete n[key]; return n; });
+      return;
+    }
+    setAuditDetail((prev) => ({ ...prev, [key]: { loading: true, data: null } }));
+    try {
+      const d = await api<AuditEntryDetail>(`/activity/audit/${key.slice("audit:".length)}`, { query: { teamId: project.teamId } });
+      setAuditDetail((prev) => ({ ...prev, [key]: { loading: false, data: d } }));
+    } catch (err) {
+      setAuditDetail((prev) => ({ ...prev, [key]: { loading: false, data: null, error: err instanceof ApiError ? err.message : "加载回执原文失败" } }));
     }
   }
 
@@ -449,7 +515,7 @@ export function ActivityPage({
         </button>
       </div>
       {error && <div className="error-text">{error}</div>}
-      {items && <ActivityList items={items} />}
+      {items && <ActivityList items={items} auditDetail={auditDetail} onAuditToggle={(it) => void toggleAuditDetail(it)} />}
       {!items && !error && <div className="state">正在加载…</div>}
       {next && (
         <div className="btn-row" style={{ justifyContent: "center" }}>
