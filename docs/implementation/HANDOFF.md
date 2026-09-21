@@ -32,9 +32,11 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 ## 风险
 
 - 性能/并发结论为本机 Docker 口径（16 并发读 P95=42ms、混合负载 0 错误），生产硬件容量需另测。
-- 本机语义 worker（8100）进程偶发静默退出（exit 1、无 traceback，仅发生在会话空闲期；
-  同方式启动的 API/web 不受影响，worker 重启即恢复）——疑与宿主休眠/后台进程回收有关，
-  非代码缺陷；若在某个会话里发现 8100 失联，直接重启该进程即可。
+- 本机语义 worker（8100）会话后台任务方式启动会被宿主在回合/空闲边界回收（exit 1、
+  无 traceback、无 Windows 崩溃事件；同方式启动的 node API/web 不受影响，worker 自身
+  服务全程正常）——非代码缺陷。可靠启动方式（2026-09-22 实测）：
+  `powershell Start-Process -WindowStyle Hidden`（独立控制台 + 日志重定向
+  `data\worker-stdout.log`/`worker-stderr.log`）；直接后台重启仅作临时手段。
 - E06：离线/ARM64 无验证环境，交付物不做此声称。
 - Pi（@earendil-works/pi-*）以统一 LLM 层路径适配（ADR-0003），已核实包存在（0.85.1）
   但未打包集成；当前 Agent 经 OpenAI 兼容协议直连 DeepSeek，接口契约一致。
