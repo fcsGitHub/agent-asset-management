@@ -51,6 +51,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [flash, setFlash] = useState<{ text: string; tone: "ok" | "error"; nonce: number } | null>(null);
   // NL「聚焦 X 的图谱」解析出的聚焦资产（已聚焦同一资产时无需重复注入）
   const [graphFocus, setGraphFocus] = useState<{ id: string; nonce: number } | null>(null);
+  // NL「看归档记录」等意图预置的动态 action 过滤（M26）；nonce 变化即重复应用
+  const [activityPreset, setActivityPreset] = useState<{ action: string; nonce: number } | null>(null);
 
   useEffect(() => {
     if (!flash) return;
@@ -152,6 +154,9 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           setMobileView("workspace");
         })();
         return true;
+      }
+      if (payload.params.page === "activity" && payload.params.activityAction) {
+        setActivityPreset({ action: payload.params.activityAction, nonce: Date.now() });
       }
       setPage(payload.params.page);
       return true;
@@ -277,7 +282,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           </main>
         ) : page === "activity" ? (
           <main className="page-main" aria-label="团队动态">
-            <ActivityPage project={project} projects={projects ?? []} onOpenAsset={openAssetFromSearch} />
+            <ActivityPage project={project} projects={projects ?? []} onOpenAsset={openAssetFromSearch} presetAction={activityPreset} />
           </main>
         ) : page === "approvals" ? (
           <main className="page-main" aria-label="审批队列">

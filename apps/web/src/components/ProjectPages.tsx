@@ -227,10 +227,13 @@ export function ActivityPage({
   project,
   projects,
   onOpenAsset,
+  presetAction,
 }: {
   project?: ProjectInfo;
   projects?: ProjectInfo[];
   onOpenAsset: (assetId: string) => void;
+  /** NL「看归档记录」等意图预置的 action 过滤（M26）；仅注入状态，用户仍可自由改选 */
+  presetAction?: { action: string; nonce: number } | null;
 }) {
   const [items, setItems] = useState<ActivityItem[] | null>(null);
   const [error, setError] = useState("");
@@ -240,12 +243,34 @@ export function ActivityPage({
   // 选项由服务端 /activity 响应同源下发（与服务端标签一致，不硬编码副本）。
   const [actionFilter, setActionFilter] = useState("");
   const [actionOptions, setActionOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 时间范围（M26）：闭区间 [since, until]，datetime-local 值（分钟精度），空 = 不约束该侧
+  const [sinceLocal, setSinceLocal] = useState("");
+  const [untilLocal, setUntilLocal] = useState("");
   const [live, setLive] = useState(false);
+
+  // NL 意图注入的 action 过滤预设（M26）：nonce 变化即应用（同值可重复触发）
+  useEffect(() => {
+    if (presetAction?.action) setActionFilter(presetAction.action);
+  }, [presetAction]);
+
+  // datetime-local 是浏览器本地时间；无时区后缀的文本会被 DB 按其自身时区解释而错位。
+  // 显式转换为带 Z 的 UTC 时间戳，保证"用户所见即过滤范围"（M26 修复）
+  const toApiTs = (v: string): string => {
+    if (!v) return v;
+    if (v.length === 16) v = `${v}:00`;
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return v;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}Z`;
+  };
   const limitRef = useRef(limit);
   limitRef.current = limit;
   // 历史分页游标（M20）：页尾（精确时间戳, kind, id）；null = 没有更早的历史
   const [next, setNext] = useState<ActivityCursor | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // 请求时序守卫（M26 修复）：过滤条件变化（含 NL 预置注入）会立刻触发新请求，
+  // 慢到的旧响应不得覆盖新结果（真实缺陷：无过滤首请求后到，混入未过滤条目）
+  const fetchSeqRef = useRef(0);
 
   const applyItems = useCallback((incoming: ActivityItem[], append: boolean) => {
     setItems((prev) => {
@@ -257,25 +282,29 @@ export function ActivityPage({
 
   const fetchPage = useCallback(async (cursor: ActivityCursor | null): Promise<ActivityCursor | null> => {
     if (!project) return null;
+    const seq = ++fetchSeqRef.current;
     const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
     if (filterProjectId) query.projectId = filterProjectId;
     if (actionFilter) query.action = actionFilter;
+    if (sinceLocal) query.since = toApiTs(sinceLocal);
+    if (untilLocal) query.until = toApiTs(untilLocal);
     if (cursor) {
       query.before = cursor.before;
       query.beforeKind = cursor.beforeKind;
       query.beforeId = cursor.beforeId;
     }
     const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null; actions?: Array<{ value: string; label: string }> }>("/activity", { query });
+    if (seq !== fetchSeqRef.current) return null; // 过期响应：不渲染、不更新游标
     if (r.actions) setActionOptions(r.actions);
     applyItems(r.items, !!cursor);
+    setNext(r.next); // 游标由本函数统一管理：只有最新请求才能推进/回收「加载更早」
     return r.next;
-  }, [project, filterProjectId, actionFilter, applyItems]);
+  }, [project, filterProjectId, actionFilter, sinceLocal, untilLocal, applyItems]);
 
   const reload = useCallback(() => {
     if (!project) return;
     setError("");
     void fetchPage(null)
-      .then((n) => setNext(n))
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载动态失败"));
   }, [project, fetchPage]);
 
@@ -285,7 +314,6 @@ export function ActivityPage({
     if (!next || loadingMore) return;
     setLoadingMore(true);
     void fetchPage(next)
-      .then((n) => setNext(n))
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载更早动态失败"))
       .finally(() => setLoadingMore(false));
   }, [next, loadingMore, fetchPage]);
@@ -299,6 +327,8 @@ export function ActivityPage({
       const qs = new URLSearchParams({ teamId: project.teamId });
       if (filterProjectId) qs.set("projectId", filterProjectId);
       if (actionFilter) qs.set("action", actionFilter);
+      if (sinceLocal) qs.set("since", toApiTs(sinceLocal));
+      if (untilLocal) qs.set("until", toApiTs(untilLocal));
       qs.set("format", format);
       const res = await fetch(`/api/v1/activity/export?${qs}`, { credentials: "same-origin" });
       if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
@@ -380,6 +410,25 @@ export function ActivityPage({
             <option key={o.value} value={o.value}>{o.value === "agent" ? `${o.label}（全部状态）` : `${o.label}（${o.value}）`}</option>
           ))}
         </select>
+        <input
+          type="datetime-local"
+          aria-label="开始时间"
+          title="只看此时间之后的动态（含）"
+          value={sinceLocal}
+          onChange={(e) => setSinceLocal(e.target.value)}
+          style={{ maxWidth: 190 }}
+        />
+        <input
+          type="datetime-local"
+          aria-label="结束时间"
+          title="只看此时间之前的动态（含）"
+          value={untilLocal}
+          onChange={(e) => setUntilLocal(e.target.value)}
+          style={{ maxWidth: 190 }}
+        />
+        {(sinceLocal || untilLocal) && (
+          <button title="清除时间范围" onClick={() => { setSinceLocal(""); setUntilLocal(""); }}>清除时间</button>
+        )}
         <select aria-label="条数" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
           <option value={20}>最近 20 条</option>
           <option value={50}>最近 50 条</option>

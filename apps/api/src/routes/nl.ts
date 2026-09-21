@@ -14,6 +14,10 @@ import { DeepSeekProvider, LlmError } from "@taw/agent-adapter/deepseek";
 
 const PAGES = ["dashboard", "workbench", "activity", "approvals", "graph", "ontology", "proposals"] as const;
 
+// 动态 action 过滤白名单（M26）：与 /activity 下发的 ACTIVITY_FILTERS 同一口径。
+// 枚举校验拒绝越表值——LLM 给出白名单外的值视为未通过校验（走诚实回退）。
+const ACTIVITY_ACTIONS = ["agent", "asset.archive", "asset.restore", "review_prepared", "release_published", "release_rollback", "audit.export"] as const;
+
 export const NlIntent = z
   .object({
     intent: z.enum(["navigate", "search_assets", "fill_register_form", "create_issue"]),
@@ -24,6 +28,8 @@ export const NlIntent = z
       name: z.string().max(120).optional(),
       // 图谱聚焦目标（M21）：page=graph 时可选，界面解析为资产后进入聚焦模式
       assetName: z.string().max(120).optional(),
+      // 动态过滤目标（M26）：page=activity 时可选，直达对应 action 过滤视图
+      activityAction: z.enum(ACTIVITY_ACTIONS).optional(),
       title: z.string().max(200).optional(),
       body: z.string().max(4000).optional(),
     }).default({}),
@@ -64,6 +70,19 @@ export function ruleParse(text: string): NlIntent | null {
   if (focus && focus[1]!.trim()) {
     return { intent: "navigate", params: { page: "graph", assetName: focus[1]!.trim().slice(0, 120) } };
   }
+  // 动态过滤（M26）：「看归档记录」「查看导出审计记录」「Agent 运行记录」等 →
+  // activity + action 过滤（白名单枚举，越表词不命中、落入后续解析）
+  const ACTION_WORDS: Record<string, (typeof ACTIVITY_ACTIONS)[number]> = {
+    "归档": "asset.archive", "恢复": "asset.restore", "发布": "release_published",
+    "回滚": "release_rollback", "导出审计": "audit.export", "导出": "audit.export", "审计": "audit.export",
+    "Agent 运行": "agent", "Agent": "agent", "AGENT": "agent", "agent": "agent", "智能体": "agent",
+  };
+  const act = t.match(
+    /^(?:看|查看|打开|显示|跳到|跳转|去|go to)?\s*(导出审计|归档|恢复|发布|回滚|审计|Agent 运行|Agent|AGENT|agent|智能体)?\s*(?:的)?(?:记录|动态|日志|历史)$/
+  );
+  if (act && act[1] && ACTION_WORDS[act[1]]) {
+    return { intent: "navigate", params: { page: "activity", activityAction: ACTION_WORDS[act[1]] } };
+  }
   const search = t.match(/^(?:搜索|查找|找一下?|查一下?)(?:资产|相关资产)?[：:\s]*(.+)$/);
   if (search && search[1]!.trim()) {
     return { intent: "search_assets", params: { query: search[1]!.trim().slice(0, 120) } };
@@ -103,7 +122,7 @@ function buildLlmMessages(text: string, page: string) {
       content:
         "你是团队资产工作台的界面命令解析器。把用户的中文指令解析为一个 JSON 对象，只输出 JSON，不要输出任何解释。" +
         `可选意图（白名单，四选一）：\n` +
-        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals","assetName":"<仅 page=graph 且用户想聚焦某资产时填写资产名>"}} —— 跳转页面（proposals 是 Agent 提案审核页；graph+assetName 进入聚焦模式）\n` +
+        `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals","assetName":"<仅 page=graph 且用户想聚焦某资产时填写资产名>","activityAction":"<仅 page=activity 且用户想看特定类别动态时填写，七选一：agent|asset.archive|asset.restore|review_prepared|release_published|release_rollback|audit.export>"}} —— 跳转页面（proposals 是 Agent 提案审核页；graph+assetName 进入聚焦模式；activity+activityAction 直达对应动作过滤视图）\n` +
         `2) {"intent":"search_assets","params":{"query":"<搜索关键词>"}} —— 搜索资产\n` +
         `3) {"intent":"fill_register_form","params":{"typeKeyHint":"<类型键，可选：${TYPE_KEYS_HINT}>","name":"<资产名，可选>"}} —— 预填登记表单\n` +
         `4) {"intent":"create_issue","params":{"title":"<问题标题，必填>","body":"<问题详情，可选>"}} —— 起草问题工单（界面会先预览，用户确认后才创建）\n` +

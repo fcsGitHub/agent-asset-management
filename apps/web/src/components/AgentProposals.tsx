@@ -16,6 +16,9 @@ interface ProposalRow {
   initiated_by_name: string | null;
   reviewed_by_name: string | null;
 }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string }
+// diff 用的现有资产摘要（来自资产详情端点的首修订属性）
+interface AssetDiff { id: string; name: string; lifecycle: string; type_key: string; headProps: Record<string, unknown> }
 
 const KIND_LABELS: Record<string, string> = {
   asset_registration: "资产登记提案",
@@ -50,6 +53,45 @@ export function AgentProposals({ project, onPrefillRegister }: {
   const [pSel, setPSel] = useState<Record<string, boolean>>({});
   const [pBusy, setPBusy] = useState(false);
   const [pNote, setPNote] = useState("");
+  // 提案 diff（M26）：登记提案与现有资产的对比（同名检测 + 类型/属性差异）。
+  // 资产列表随项目加载；命中的资产详情按需拉取一次。
+  const [assets, setAssets] = useState<AssetRow[]>([]);
+  const [diffOpen, setDiffOpen] = useState<Record<string, boolean>>({});
+  const [diffData, setDiffData] = useState<Record<string, AssetDiff | null>>({});
+  const [diffErr, setDiffErr] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!project) return;
+    void api<AssetRow[]>("/assets/search", { query: { teamId: project.teamId, lifecycle: "all", limit: "200" } })
+      .then(setAssets)
+      .catch(() => setAssets([]));
+  }, [project]);
+
+  async function toggleDiff(p: ProposalRow) {
+    if (!project) return;
+    const opening = !diffOpen[p.id];
+    setDiffOpen((prev) => ({ ...prev, [p.id]: opening }));
+    if (!opening || diffData[p.id] !== undefined) return;
+    const payload = (p.payload ?? {}) as Record<string, unknown>;
+    const name = pickName(payload);
+    const exact = name ? assets.find((a) => a.name === name) : undefined;
+    if (!exact) {
+      setDiffData((prev) => ({ ...prev, [p.id]: null }));
+      return;
+    }
+    try {
+      const d = await api<{ id: string; name: string; lifecycle: string; type_key: string; revisions?: Array<{ properties?: Record<string, unknown> }> }>(
+        `/assets/${exact.id}`, { query: { teamId: project.teamId } }
+      );
+      setDiffData((prev) => ({
+        ...prev,
+        [p.id]: { id: d.id, name: d.name, lifecycle: d.lifecycle, type_key: d.type_key, headProps: d.revisions?.[0]?.properties ?? {} },
+      }));
+    } catch (err) {
+      setDiffData((prev) => ({ ...prev, [p.id]: null }));
+      setDiffErr((prev) => ({ ...prev, [p.id]: err instanceof ApiError ? err.message : "加载资产详情失败" }));
+    }
+  }
 
   const load = useCallback(() => {
     if (!project) return;
@@ -187,6 +229,60 @@ export function AgentProposals({ project, onPrefillRegister }: {
                   <div className="proposal-name">
                     建议名称：<strong>{name}</strong>
                     {typeKey && <span className="proposal-meta"> · 类型提示 {typeKey}</span>}
+                  </div>
+                )}
+                {p.kind === "asset_registration" && (name || typeKey) && (
+                  <div className="proposal-diff">
+                    <button onClick={() => void toggleDiff(p)}>{diffOpen[p.id] ? "收起对比" : "与现有资产对比"}</button>
+                    {diffOpen[p.id] && (
+                      <div style={{ marginTop: 6 }}>
+                        {diffErr[p.id] && <div className="error-text">{diffErr[p.id]}</div>}
+                        {diffData[p.id] === undefined && <div className="state">加载对比…</div>}
+                        {diffData[p.id] === null && (() => {
+                          const similar = name
+                            ? assets.filter((a) => a.name !== name && (a.name.includes(name) || name.includes(a.name))).slice(0, 5)
+                            : [];
+                          return (
+                            <div className="proposal-note">
+                              ✓ 无同名资产，可按提案预填登记。
+                              {similar.length > 0 && <span> 名称相近：{similar.map((a) => a.name).join("、")}</span>}
+                            </div>
+                          );
+                        })()}
+                        {diffData[p.id] && (() => {
+                          const d = diffData[p.id]!;
+                          const NAME_KEYS = ["name", "assetName", "title", "asset_name"];
+                          const TYPE_KEYS = ["typeKey", "type_key", "type", "suggestedType", "assetType"];
+                          const propKeys = [...new Set([
+                            ...Object.keys(payload).filter((k) => !NAME_KEYS.includes(k) && !TYPE_KEYS.includes(k)),
+                            ...Object.keys(d.headProps),
+                          ])];
+                          const show = (v: unknown): string =>
+                            v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v);
+                          return (
+                            <div>
+                              <div className="proposal-note">
+                                ⚠ 已存在同名资产：{d.name}（{d.type_key} · {d.lifecycle === "archived" ? "已归档" : "在用"}）——接受提案不会写入，请注意是否重复登记。
+                              </div>
+                              <ul style={{ margin: "4px 0", paddingLeft: 18 }}>
+                                <li key="__type">
+                                  类型：提案 {show(typeKey)} · 现有 {show(d.type_key)} {typeKey === d.type_key ? "✓" : "⚠"}
+                                </li>
+                                {propKeys.map((k) => {
+                                  const pvs = show(payload[k]);
+                                  const evs = show(d.headProps[k]);
+                                  return (
+                                    <li key={k}>
+                                      {k}：提案 {pvs} · 现有 {evs} {pvs === evs ? "✓" : "⚠"}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
                   </div>
                 )}
                 {typeof reviewInfo.note === "string" && reviewInfo.note && (

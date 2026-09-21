@@ -17,7 +17,7 @@ interface Command {
 
 export interface NlIntentPayload {
   intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue";
-  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; title?: string; body?: string };
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; activityAction?: string; title?: string; body?: string };
   parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
 }
 
@@ -29,6 +29,14 @@ export function describeIntent(i: NlIntentPayload): string {
     };
     if (i.params.page === "graph" && i.params.assetName) {
       return `聚焦「${i.params.assetName}」的关系图谱`;
+    }
+    if (i.params.page === "activity" && i.params.activityAction) {
+      const actionNames: Record<string, string> = {
+        "agent": "Agent 运行", "asset.archive": "归档资产", "asset.restore": "恢复资产",
+        "review_prepared": "准备审核快照", "release_published": "发布到通道",
+        "release_rollback": "通道回滚", "audit.export": "导出审计",
+      };
+      return `查看动态：${actionNames[i.params.activityAction] ?? i.params.activityAction}`;
     }
     return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
   }

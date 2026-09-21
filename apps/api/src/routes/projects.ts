@@ -262,6 +262,18 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return v;
   };
 
+  // 时间范围解析（M26，列表与导出共用）：since/until 为完整时间戳（与游标同格式正则），
+  // 边界闭区间 [since, until]；只给一侧则只约束该侧；until < since 如实 422
+  const parseRange = (sinceRaw: unknown, untilRaw: unknown): { since: string | null; until: string | null } => {
+    const tsRe = /^\d{4}-\d{2}-\d{2}[T ][\d:.+Z-]{8,40}$/;
+    const since = String(sinceRaw ?? "").trim();
+    const until = String(untilRaw ?? "").trim();
+    if (since && !tsRe.test(since)) throw ERR.INVALID("since 时间戳格式不合法");
+    if (until && !tsRe.test(until)) throw ERR.INVALID("until 时间戳格式不合法");
+    if (since && until && since > until) throw ERR.INVALID("until 不得早于 since");
+    return { since: since || null, until: until || null };
+  };
+
   // 活动条目（含导出用的精确时间戳文本；列表响应原样携带，额外字段对客户端无害）
   interface ExportActivityItem {
     key: string;
@@ -278,14 +290,16 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   // 活动流分页查询核心（列表 /activity 与导出 /activity/export 共用，保证同源）：
   // 合并全序 (ts DESC, kind [audit 先于 agent], id DESC)，游标语义见 /activity 注释。
   // actionFilter（M24）：null 不过滤；"agent" 仅 Agent 运行；其余按审计动作精确匹配
-  // （此时不含任何 Agent 运行）。过滤先于游标生效，翻页边界语义不变。
+  // （此时不含任何 Agent 运行）。range（M26）：闭区间 [since, until] 静态边界，
+  // 与游标组合 = 窗口内键集翻页。过滤先于游标生效，翻页边界语义不变。
   const queryActivityPage = async (
     client: PoolClient,
     teamId: string,
     filterProjectId: string | null,
     limit: number,
     cursor: { ts: string | null; auditId: number | null; runId: string | null },
-    actionFilter: string | null
+    actionFilter: string | null,
+    range: { since: string | null; until: string | null } = { since: null, until: null }
   ): Promise<{ items: ExportActivityItem[]; next: { before: string; beforeKind: string; beforeId: string } | null }> => {
     const { rows: audits } = await client.query<{
       id: string;
@@ -306,6 +320,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
          LEFT JOIN projects p ON p.team_id = a.team_id AND p.id = a.project_id
         WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
           AND ($6::text IS NULL OR ($6::text <> 'agent' AND a.action = $6::text))
+          AND ($7::timestamptz IS NULL OR a.created_at >= $7::timestamptz)
+          AND ($8::timestamptz IS NULL OR a.created_at <= $8::timestamptz)
           AND (
             $4::timestamptz IS NULL
             OR a.created_at < $4::timestamptz
@@ -313,7 +329,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           )
         ORDER BY a.created_at DESC, a.id DESC
         LIMIT $2`,
-      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, actionFilter]
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, actionFilter, range.since, range.until]
     );
     const { rows: agentRuns } = await client.query<{
       id: string;
@@ -334,6 +350,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
          LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
         WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
           AND ($7::text IS NULL OR $7::text = 'agent')
+          AND ($8::timestamptz IS NULL OR r.created_at >= $8::timestamptz)
+          AND ($9::timestamptz IS NULL OR r.created_at <= $9::timestamptz)
           AND (
             $4::timestamptz IS NULL
             OR r.created_at < $4::timestamptz
@@ -342,7 +360,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           )
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT $2`,
-      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, cursor.runId, actionFilter]
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, cursor.runId, actionFilter, range.since, range.until]
     );
     const items: ExportActivityItem[] = [
       ...audits.map((a): ExportActivityItem => ({
@@ -391,6 +409,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
       teamId?: string; limit?: string; projectId?: string; action?: string;
+      since?: string; until?: string;
       before?: string; beforeKind?: string; beforeId?: string;
     };
     const teamId = String(query.teamId ?? "");
@@ -401,6 +420,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     // 团队级动作（资产归档/恢复等）为 NULL——按项目过滤时仅显示该项目内的动作。
     const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
     const actionFilter = parseActionFilter(query.action);
+    const range = parseRange(query.since, query.until);
 
     // 游标解析：字段齐全才生效；字段不合法如实 422（不静默从头重放）
     const rawBefore = String(query.before ?? "");
@@ -424,7 +444,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         ts: cursorTs,
         auditId: cursorAuditId,
         runId: cursorRunId,
-      }, actionFilter)
+      }, actionFilter, range)
     );
     // actions：可用的 action 过滤选项（含 "agent" 组），与服务端标签同源下发
     return { items, next, actions: ACTIVITY_FILTERS };
@@ -437,12 +457,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   // 过滤范围与格式记录在 detail 中）；盖章不进入本次导出内容（先取数后盖章）。
   app.get("/activity/export", async (req, reply) => {
     const auth = requireAuth(req);
-    const query = (req.query ?? {}) as { teamId?: string; projectId?: string; action?: string; format?: string };
+    const query = (req.query ?? {}) as { teamId?: string; projectId?: string; action?: string; since?: string; until?: string; format?: string };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertTeamMember(auth.userId, teamId);
     const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
     const actionFilter = parseActionFilter(query.action);
+    const range = parseRange(query.since, query.until);
     const rawFormat = String(query.format ?? "").trim().toLowerCase();
     if (rawFormat && rawFormat !== "csv" && rawFormat !== "json") throw ERR.INVALID("format 仅支持 csv 或 json");
     const format = rawFormat === "json" ? "json" : "csv";
@@ -454,7 +475,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     let truncated = false;
     for (;;) {
       const page = await withTeam(teamId, (client) =>
-        queryActivityPage(client, teamId, filterProjectId, EXPORT_BATCH, cursor, actionFilter)
+        queryActivityPage(client, teamId, filterProjectId, EXPORT_BATCH, cursor, actionFilter, range)
       );
       rows.push(...page.items);
       if (!page.next) break;
@@ -474,8 +495,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         `INSERT INTO audit_events (team_id, actor_id, action, object_kind, detail, project_id)
          VALUES ($1,$2,'audit.export','audit',$3,NULL)`,
         [teamId, auth.userId,
-         JSON.stringify({ format, count: rows.length, truncated, projectId: filterProjectId, action: actionFilter })]
-      );
+         JSON.stringify({ format, count: rows.length, truncated, projectId: filterProjectId, action: actionFilter, since: range.since, until: range.until })]
+    );
     });
 
     const stamp = `taw-audit-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`;
@@ -487,6 +508,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         teamId,
         projectId: filterProjectId,
         action: actionFilter,
+        since: range.since,
+        until: range.until,
         format,
         exportedAt: new Date().toISOString(),
         truncated,
