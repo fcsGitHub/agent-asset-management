@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 145 项基线仍绿
+4. `npx vitest run` 确认 148 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -83,5 +83,8 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    M21 已完成：候选导入去重（同类型+端点 pending/confirmed 拒入、dismissed 放行、
    skipped/duplicateIndexes 如实回执）+ NL 图谱聚焦（L1 三句式 + L2 assetName 白名
    单；Workbench 解析资产注入 RelationGraph initialFocusId）（EV-043）。
-   下一步候选：类型登记时的单位词表在线校验、动态页审计导出（CSV/JSON）、
-   候选批量入队前的预览去重界面、图谱聚焦跳数记忆、提案批量审核备注入口。
+   M22 已完成：审计导出 CSV（queryActivityPage 共享核心、DESC 遍历正序写出、
+   RFC 4180 + BOM + 微秒 ts + entry_id、audit.export 盖章、20000 上限如实截断）+
+   登记类型单位词表在线校验（实时 ⚠/✓、worker 降级如实提示）（EV-044）。
+   下一步候选：候选批量入队前的预览去重界面、图谱聚焦跳数记忆、提案批量审核
+   备注入口、导出格式 JSON 选项、按 action 类型过滤动态页。

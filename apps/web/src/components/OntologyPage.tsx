@@ -54,6 +54,9 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
   const [relTypes, setRelTypes] = useState<RelTypeInfo[] | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  // 受控单位词表（worker 同源）：词表卡片展示 + 登记类型的在线校验共用一份
+  const [unitVocab, setUnitVocab] = useState<Record<string, string[]> | null>(null);
+  const [unitVocabErr, setUnitVocabErr] = useState("");
 
   const isAdmin = me.teams.find((t) => t.teamId === project?.teamId)?.role === "admin";
 
@@ -66,6 +69,11 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
     void api<RelTypeInfo[]>("/relation-types", { query: { teamId: project.teamId } })
       .then(setRelTypes)
       .catch(() => setRelTypes([]));
+    setUnitVocab(null);
+    setUnitVocabErr("");
+    api<{ units: Record<string, string[]> }>("/semantic/units", { query: { teamId: project.teamId } })
+      .then((r) => setUnitVocab(r.units))
+      .catch((e) => setUnitVocabErr(errorText(e)));
   }, [project]);
 
   useEffect(reload, [reload]);
@@ -106,11 +114,11 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
 
       <RelationTypes relTypes={relTypes} />
 
-      <UnitVocabCard teamId={project.teamId} />
+      <UnitVocabCard units={unitVocab} error={unitVocabErr} />
 
       {isAdmin && (
         <>
-          <RegisterType project={project} types={types ?? []} onDone={(msg) => { setNotice(msg); reload(); }} />
+          <RegisterType project={project} types={types ?? []} unitVocab={unitVocab} onDone={(msg) => { setNotice(msg); reload(); }} />
           <RegisterRelationType project={project} existing={relTypes ?? []} onDone={(msg) => { setNotice(msg); reload(); }} />
           <TypeMigrationPreview project={project} types={types ?? []} />
           <RelationMigrationPreview project={project} relTypes={relTypes ?? []} />
@@ -231,22 +239,9 @@ function renderSide(kinds: string[], typeKeys: string[]): React.ReactNode {
   return <span className="onto-parent">kind:{kinds.join("|")}</span>;
 }
 
-/** 受控单位词表：来自语义 worker GET /units（与候选结构校验同一定义点）。
+/** 受控单位词表：来自语义 worker（与候选结构校验同一定义点），OntologyPage 统一拉取。
  *  worker 不可达时如实提示降级，不伪造词表。 */
-function UnitVocabCard({ teamId }: { teamId: string }) {
-  const [units, setUnits] = useState<Record<string, string[]> | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let alive = true;
-    setUnits(null);
-    setError("");
-    api<{ units: Record<string, string[]> }>("/semantic/units", { query: { teamId } })
-      .then((r) => { if (alive) setUnits(r.units); })
-      .catch((e) => { if (alive) setError(errorText(e)); });
-    return () => { alive = false; };
-  }, [teamId]);
-
+function UnitVocabCard({ units, error }: { units: Record<string, string[]> | null; error: string }) {
   return (
     <section className="card">
       <div className="card-head">
@@ -278,8 +273,15 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : "操作失败";
 }
 
-/** 登记类型（admin）：typeKey/版本/标题/父类型/JSON Schema；质量门错误如实展示。 */
-function RegisterType({ project, types, onDone }: { project: ProjectInfo; types: TypeInfo[]; onDone: (msg: string) => void }) {
+/** 登记类型（admin）：typeKey/版本/标题/父类型/JSON Schema；质量门错误如实展示。
+ *  单位词表在线校验（M22）：属性键命中受控词表且带 enum 时逐值比对，越表值即时提示
+ *  （仅提示不阻断——词表约束的是语义候选校验，登记仍由质量门与迁移预演把关）。 */
+function RegisterType({ project, types, unitVocab, onDone }: {
+  project: ProjectInfo;
+  types: TypeInfo[];
+  unitVocab: Record<string, string[]> | null;
+  onDone: (msg: string) => void;
+}) {
   const [typeKey, setTypeKey] = useState("");
   const [version, setVersion] = useState("1.0.0");
   const [title, setTitle] = useState("");
@@ -287,6 +289,33 @@ function RegisterType({ project, types, onDone }: { project: ProjectInfo; types:
   const [schemaText, setSchemaText] = useState(DEFAULT_SCHEMA);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // 实时单位校验：schemaText 可解析且词表可用时逐值比对；其余状态如实降级
+  const unitCheck = useMemo(() => {
+    if (!unitVocab) return { state: "unavailable" as const, warnings: [], hasUnitProps: false };
+    try {
+      const schema = JSON.parse(schemaText) as { properties?: Record<string, { enum?: unknown }> };
+      const warnings: string[] = [];
+      let hasUnitProps = false;
+      for (const [k, s] of Object.entries(schema.properties ?? {})) {
+        const vocab = unitVocab[k];
+        if (!vocab) continue;
+        hasUnitProps = true;
+        if (!Array.isArray(s?.enum)) {
+          warnings.push(`${k} 在受控词表内但未定义 enum（语义校验将按词表逐值比对属性值）`);
+          continue;
+        }
+        for (const v of s.enum) {
+          if (typeof v === "string" && !vocab.includes(v)) {
+            warnings.push(`${k} 的枚举值 "${v}" 不在受控词表 [${vocab.join(", ")}] 内（语义候选校验会如实标出）`);
+          }
+        }
+      }
+      return { state: "checked" as const, warnings, hasUnitProps };
+    } catch {
+      return { state: "invalid-json" as const, warnings: [], hasUnitProps: false };
+    }
+  }, [schemaText, unitVocab]);
 
   async function submit() {
     setBusy(true); setError("");
@@ -327,6 +356,20 @@ function RegisterType({ project, types, onDone }: { project: ProjectInfo; types:
       <label>JSON Schema（必填属性放 required；单位词表对应 &lt;name&gt; 或 &lt;name&gt;Unit 属性）
         <textarea rows={6} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} style={{ fontFamily: "monospace", width: "100%" }} />
       </label>
+      {unitCheck.state === "unavailable" && (
+        <div className="hint">单位词表不可用（语义 worker 降级），未做单位在线校验；登记不受影响。</div>
+      )}
+      {unitCheck.state === "invalid-json" && schemaText.trim() !== "" && (
+        <div className="hint">JSON Schema 尚无法解析，未做单位在线校验。</div>
+      )}
+      {unitCheck.state === "checked" && unitCheck.warnings.length > 0 && (
+        <div className="error-text">
+          {unitCheck.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+        </div>
+      )}
+      {unitCheck.state === "checked" && unitCheck.hasUnitProps && unitCheck.warnings.length === 0 && (
+        <div className="ok-text">✓ 单位枚举均在受控词表内</div>
+      )}
       {error && <div className="error-text">{error}</div>}
       <div className="btn-row">
         <button className="primary" disabled={busy || !typeKey || !title} onClick={() => void submit()}>{busy ? "提交中…" : "登记类型"}</button>

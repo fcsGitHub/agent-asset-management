@@ -245,6 +245,124 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "review_prepared": "准备审核快照",
     "release_published": "发布到通道",
     "release_rollback": "通道回滚",
+    "audit.export": "导出审计",
+  };
+
+  // 活动条目（含导出用的精确时间戳文本；列表响应原样携带，额外字段对客户端无害）
+  interface ExportActivityItem {
+    key: string;
+    ts: string;
+    tsExact: string;
+    kind: "audit" | "agent";
+    action: string;
+    summary: string;
+    actor: string;
+    objectId: string | null;
+    project?: string;
+  }
+
+  // 活动流分页查询核心（列表 /activity 与导出 /activity/export 共用，保证同源）：
+  // 合并全序 (ts DESC, kind [audit 先于 agent], id DESC)，游标语义见 /activity 注释。
+  const queryActivityPage = async (
+    client: PoolClient,
+    teamId: string,
+    filterProjectId: string | null,
+    limit: number,
+    cursor: { ts: string | null; auditId: number | null; runId: string | null }
+  ): Promise<{ items: ExportActivityItem[]; next: { before: string; beforeKind: string; beforeId: string } | null }> => {
+    const { rows: audits } = await client.query<{
+      id: string;
+      ts: string;
+      ts_exact: string;
+      action: string;
+      object_kind: string;
+      object_id: string | null;
+      actor: string | null;
+      project_name: string | null;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT a.id::text AS id, a.created_at AS ts, to_jsonb(a.created_at)#>>'{}' AS ts_exact,
+              a.action, a.object_kind, a.object_id, u.display_name AS actor,
+              p.name AS project_name, a.detail
+         FROM audit_events a
+         LEFT JOIN users u ON u.id = a.actor_id
+         LEFT JOIN projects p ON p.team_id = a.team_id AND p.id = a.project_id
+        WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
+          AND (
+            $4::timestamptz IS NULL
+            OR a.created_at < $4::timestamptz
+            OR ($5::bigint IS NOT NULL AND a.created_at = $4::timestamptz AND a.id < $5::bigint)
+          )
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT $2`,
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId]
+    );
+    const { rows: agentRuns } = await client.query<{
+      id: string;
+      ts: string;
+      ts_exact: string;
+      prompt: string;
+      status: string;
+      actor: string | null;
+      project_name: string | null;
+      session_title: string | null;
+    }>(
+      `SELECT r.id::text AS id, r.created_at AS ts, to_jsonb(r.created_at)#>>'{}' AS ts_exact,
+              r.prompt, r.status, u.display_name AS actor,
+              p.name AS project_name, s.title AS session_title
+         FROM agent_runs r
+         LEFT JOIN users u ON u.id = r.created_by
+         LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
+         LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
+        WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
+          AND (
+            $4::timestamptz IS NULL
+            OR r.created_at < $4::timestamptz
+            OR ($5::bigint IS NOT NULL AND r.created_at = $4::timestamptz)
+            OR ($6::uuid IS NOT NULL AND r.created_at = $4::timestamptz AND r.id < $6::uuid)
+          )
+        ORDER BY r.created_at DESC, r.id DESC
+        LIMIT $2`,
+      [teamId, limit + 1, filterProjectId, cursor.ts, cursor.auditId, cursor.runId]
+    );
+    const items: ExportActivityItem[] = [
+      ...audits.map((a): ExportActivityItem => ({
+        key: `audit:${a.id}`,
+        ts: a.ts,
+        tsExact: a.ts_exact,
+        kind: "audit",
+        action: a.action,
+        summary: ACTION_LABELS[a.action] ?? a.action,
+        actor: a.actor ?? "系统",
+        objectId: a.object_id,
+        project: a.project_name ?? undefined,
+      })),
+      ...agentRuns.map((r): ExportActivityItem => ({
+        key: `agent:${r.id}`,
+        ts: r.ts,
+        tsExact: r.ts_exact,
+        kind: "agent",
+        action: `agent.run.${r.status}`,
+        summary: r.prompt.length > 80 ? `${r.prompt.slice(0, 80)}…` : r.prompt,
+        actor: r.actor ?? "Agent",
+        objectId: null,
+        project: r.project_name ?? undefined,
+      })),
+    ]
+      // 全序：ts DESC，同 ts 时 audit 先于 agent（数组构造序 + 稳定排序必须以 0 表相等，
+      // 否则不一致比较器会同 ts 跨源乱序，破坏键集分页的边界语义）
+      .sort((x, y) => (x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : 0))
+      .slice(0, limit);
+    const boundary = items[items.length - 1];
+    const next =
+      items.length === limit && boundary
+        ? {
+            before: boundary.tsExact,
+            beforeKind: boundary.kind,
+            beforeId: boundary.key.split(":")[1] ?? "",
+          }
+        : null;
+    return { items, next };
   };
   // 活动流历史分页（键集分页）：游标 = 页尾条目的（精确时间戳, kind, id）。
   // 合并序为 (ts DESC, kind [audit 先于 agent], id DESC)；同 ts 跨源的边界语义：
@@ -281,108 +399,80 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       else cursorRunId = rawBeforeId;
     }
 
-    return withTeam(teamId, async (client) => {
-      const { rows: audits } = await client.query<{
-        id: string;
-        ts: string;
-        ts_exact: string;
-        action: string;
-        object_kind: string;
-        object_id: string | null;
-        actor: string | null;
-        detail: Record<string, unknown>;
-      }>(
-        `SELECT a.id::text AS id, a.created_at AS ts, to_jsonb(a.created_at)#>>'{}' AS ts_exact,
-                a.action, a.object_kind, a.object_id, u.display_name AS actor, a.detail
-           FROM audit_events a LEFT JOIN users u ON u.id = a.actor_id
-          WHERE a.team_id = $1 AND ($3::uuid IS NULL OR a.project_id = $3::uuid)
-            AND (
-              $4::timestamptz IS NULL
-              OR a.created_at < $4::timestamptz
-              OR ($5::bigint IS NOT NULL AND a.created_at = $4::timestamptz AND a.id < $5::bigint)
-            )
-          ORDER BY a.created_at DESC, a.id DESC
-          LIMIT $2`,
-        [teamId, limit + 1, filterProjectId, cursorTs, cursorAuditId]
+    return withTeam(teamId, async (client) =>
+      queryActivityPage(client, teamId, filterProjectId, limit, {
+        ts: cursorTs,
+        auditId: cursorAuditId,
+        runId: cursorRunId,
+      })
+    );
+  });
+
+  // 审计导出（CSV）：复用与列表完全相同的分页查询（同源），DESC 遍历后按时间正序写出。
+  // 上限 20000 条：达到上限如实附加截断说明行，不静默截断。
+  // 导出本身是敏感可见动作：盖章 audit.export 审计事件（团队级，project_id 为 NULL，
+  // 过滤范围记录在 detail 中）；盖章不进入本次导出内容（先取数后盖章）。
+  app.get("/activity/export", async (req, reply) => {
+    const auth = requireAuth(req);
+    const query = (req.query ?? {}) as { teamId?: string; projectId?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await assertTeamMember(auth.userId, teamId);
+    const filterProjectId = /^[0-9a-f-]{36}$/.test(String(query.projectId ?? "")) ? String(query.projectId) : null;
+
+    const EXPORT_BATCH = 500;
+    const EXPORT_CAP = 20000;
+    const rows: ExportActivityItem[] = [];
+    let cursor: { ts: string | null; auditId: number | null; runId: string | null } = { ts: null, auditId: null, runId: null };
+    let truncated = false;
+    for (;;) {
+      const page = await withTeam(teamId, (client) =>
+        queryActivityPage(client, teamId, filterProjectId, EXPORT_BATCH, cursor)
       );
-      const { rows: agentRuns } = await client.query<{
-        id: string;
-        ts: string;
-        ts_exact: string;
-        prompt: string;
-        status: string;
-        actor: string | null;
-        project_name: string | null;
-        session_title: string | null;
-      }>(
-        `SELECT r.id::text AS id, r.created_at AS ts, to_jsonb(r.created_at)#>>'{}' AS ts_exact,
-                r.prompt, r.status, u.display_name AS actor,
-                p.name AS project_name, s.title AS session_title
-           FROM agent_runs r
-           LEFT JOIN users u ON u.id = r.created_by
-           LEFT JOIN projects p ON p.team_id = r.team_id AND p.id = r.project_id
-           LEFT JOIN sessions s ON s.team_id = r.team_id AND s.id = r.session_id
-          WHERE r.team_id = $1 AND ($3::uuid IS NULL OR r.project_id = $3::uuid)
-            AND (
-              $4::timestamptz IS NULL
-              OR r.created_at < $4::timestamptz
-              OR ($5::bigint IS NOT NULL AND r.created_at = $4::timestamptz)
-              OR ($6::uuid IS NOT NULL AND r.created_at = $4::timestamptz AND r.id < $6::uuid)
-            )
-          ORDER BY r.created_at DESC, r.id DESC
-          LIMIT $2`,
-        [teamId, limit + 1, filterProjectId, cursorTs, cursorAuditId, cursorRunId]
-      );
-      interface ActivityItem {
-        key?: string;
-        ts: string;
-        kind: "audit" | "agent";
-        action: string;
-        summary: string;
-        actor: string;
-        objectId: string | null;
-        project?: string;
+      rows.push(...page.items);
+      if (!page.next) break;
+      cursor = {
+        ts: page.next.before,
+        auditId: page.next.beforeKind === "audit" ? Number(page.next.beforeId) : null,
+        runId: page.next.beforeKind === "agent" ? page.next.beforeId : null,
+      };
+      if (rows.length >= EXPORT_CAP) {
+        truncated = true;
+        break;
       }
-      const tsExactById = new Map<string, string>();
-      for (const a of audits) tsExactById.set(`audit:${a.id}`, a.ts_exact);
-      for (const r of agentRuns) tsExactById.set(`agent:${r.id}`, r.ts_exact);
-      const items: ActivityItem[] = [
-        ...audits.map((a): ActivityItem => ({
-          key: `audit:${a.id}`,
-          ts: a.ts,
-          kind: "audit",
-          action: a.action,
-          summary: ACTION_LABELS[a.action] ?? a.action,
-          actor: a.actor ?? "系统",
-          objectId: a.object_id,
-        })),
-        ...agentRuns.map((r): ActivityItem => ({
-          key: `agent:${r.id}`,
-          ts: r.ts,
-          kind: "agent",
-          action: `agent.run.${r.status}`,
-          summary: r.prompt.length > 80 ? `${r.prompt.slice(0, 80)}…` : r.prompt,
-          actor: r.actor ?? "Agent",
-          objectId: null,
-          project: r.project_name ?? undefined,
-        })),
-      ]
-        // 全序：ts DESC，同 ts 时 audit 先于 agent（数组构造序 + 稳定排序必须以 0 表相等，
-        // 否则不一致比较器会同 ts 跨源乱序，破坏键集分页的边界语义）
-        .sort((x, y) => (x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : 0))
-        .slice(0, limit);
-      // 稳定排序保证同 ts 时 audit 先于 agent；两类来源在 SQL 内再按 id DESC 定序
-      const boundary = items[items.length - 1];
-      const next =
-        items.length === limit && boundary && boundary.key
-          ? {
-              before: tsExactById.get(boundary.key) ?? new Date(boundary.ts).toISOString(),
-              beforeKind: boundary.kind,
-              beforeId: boundary.key.split(":")[1] ?? "",
-            }
-          : null;
-      return { items, next };
+    }
+
+    await withTeam(teamId, async (client) => {
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, detail, project_id)
+         VALUES ($1,$2,'audit.export','audit',$3,NULL)`,
+        [teamId, auth.userId,
+         JSON.stringify({ format: "csv", count: rows.length, truncated, projectId: filterProjectId })]
+      );
     });
+
+    const csvEscape = (v: string): string => `"${v.replace(/"/g, '""')}"`;
+    const lines: string[] = ["ts,kind,entry_id,action,summary,actor,project,object_id"];
+    for (const it of [...rows].reverse()) {
+      lines.push([
+        csvEscape(it.tsExact),
+        csvEscape(it.kind),
+        csvEscape(it.key),
+        csvEscape(it.action),
+        csvEscape(it.summary),
+        csvEscape(it.actor),
+        csvEscape(it.project ?? ""),
+        csvEscape(it.objectId ?? ""),
+      ].join(","));
+    }
+    if (truncated) lines.push(`# 已达导出上限 ${EXPORT_CAP} 条，更早的记录未包含`);
+
+    reply.header("content-type", "text/csv; charset=utf-8");
+    reply.header(
+      "content-disposition",
+      `attachment; filename="taw-audit-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.csv"`
+    );
+    return "\uFEFF" + lines.join("\r\n");
   });
 
   // ---------- 活动流实时推送（SSE） ----------

@@ -283,6 +283,29 @@ export function ActivityPage({
       .finally(() => setLoadingMore(false));
   }, [next, loadingMore, fetchPage]);
 
+  // 审计导出：服务端以与列表相同的分页查询全量遍历（含当前项目过滤），时间正序 CSV
+  async function exportCsv() {
+    if (!project) return;
+    setError("");
+    try {
+      const qs = new URLSearchParams({ teamId: project.teamId });
+      if (filterProjectId) qs.set("projectId", filterProjectId);
+      const res = await fetch(`/api/v1/activity/export?${qs}`, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(`导出失败（HTTP ${res.status}）`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `taw-audit-${project.teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "导出失败");
+    }
+  }
+
   // 实时流：连接期间新事件由服务端推送；断线重连成功后整体刷新对齐（流本身只推实时事件）
   useEffect(() => {
     setLive(false);
@@ -343,6 +366,12 @@ export function ActivityPage({
           <option value={100}>最近 100 条</option>
         </select>
         <button onClick={reload}>刷新</button>
+        <button
+          title={filterProjectId ? "导出当前项目过滤下的全部历史（CSV）" : "导出团队全部历史（CSV）"}
+          onClick={() => void exportCsv()}
+        >
+          导出 CSV
+        </button>
       </div>
       {error && <div className="error-text">{error}</div>}
       {items && <ActivityList items={items} />}
