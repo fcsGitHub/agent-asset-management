@@ -42,7 +42,7 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5175`
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
-4. `npx vitest run` 确认 163 项基线仍绿
+4. `npx vitest run` 确认 165 项基线仍绿
 5. M9 已完成：NL 命令解析（真实 DeepSeek，⌘K 自然语言模式）、语义候选抽取 LLM 增强、
    测试诚实化清零 80 处空断言并修复 4 个被掩盖的产品缺陷（EV-029~031）。
    M10 已完成：NL 写类意图 create_issue（解析零副作用 + 界面预览-确认双重门）、
@@ -107,8 +107,11 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    assetName 解析跨团队复用、unresolved 如实标记、二次回导完全幂等）（EV-050）。
    M29 已完成：回导件兼容 CSV（宽容 RFC 4180 解析、与 JSON 同管线、转义往返）+
    图谱 SVG 快照导出（样式内联、marker 修正）（EV-051）。
+   M30 已完成：按操作者筛选（actorId 与项目×动作×时间三维正交、actors 名单同源
+   下发、导出/盖章/实时守护同口径）+ 图谱 PNG 位图导出（2x 栅格化）。至此审计
+   过滤四维矩阵（项目/动作/时间/操作者）全部与 queryActivityPage 同源（EV-052）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向：图谱 PNG 位图导出、审计条目批量导出筛选扩展（按操作者）。
+   可选后续方向：暂无积压；如继续迭代，建议从实际使用反馈中收集需求。

@@ -204,9 +204,9 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
   // 图谱快照导出（M29）：把当前视图序列化为独立 SVG 文件。CSS 变量在独立文件中
   // 不可解析，注入同值的具体色样式并修正 marker 填充；节点/边的几何与颜色本就
   // 是内联属性，无需转换。
-  function exportSvg() {
+  function buildStandaloneSvg(): string | null {
     const svg = svgRef.current;
-    if (!svg) return;
+    if (!svg) return null;
     const clone = svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
     clone.setAttribute("width", String(W));
@@ -222,15 +222,44 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
     clone.insertBefore(style, clone.firstChild);
     const markerPath = clone.querySelector("marker path");
     if (markerPath) markerPath.setAttribute("fill", "#5f7169");
-    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  function download(blob: Blob, filename: string): void {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `taw-graph-${new Date().toISOString().slice(0, 10)}.svg`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function exportSvg() {
+    const text = buildStandaloneSvg();
+    if (!text) return;
+    download(new Blob([text], { type: "image/svg+xml;charset=utf-8" }), `taw-graph-${new Date().toISOString().slice(0, 10)}.svg`);
+  }
+
+  // PNG 位图导出（M30）：复用独立 SVG，经 Image/canvas 以 2x 分辨率栅格化
+  async function exportPng() {
+    const text = buildStandaloneSvg();
+    if (!text) return;
+    const img = new Image();
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`;
+    await img.decode();
+    const scale = 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = W * scale;
+    canvas.height = H * scale;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#fffefa";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (blob) download(blob, `taw-graph-${new Date().toISOString().slice(0, 10)}.png`);
   }
 
   const svgPoint = (ev: PointerEvent | React.PointerEvent): { x: number; y: number } => {
@@ -308,7 +337,10 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
         )}
         <button onClick={reload}>刷新</button>
         {simNodes.length > 0 && (
-          <button title="把当前图谱视图保存为独立 SVG 文件" onClick={exportSvg}>导出 SVG</button>
+          <>
+            <button title="把当前图谱视图保存为独立 SVG 文件" onClick={exportSvg}>导出 SVG</button>
+            <button title="把当前图谱视图保存为 PNG 位图（2x 分辨率）" onClick={() => void exportPng()}>导出 PNG</button>
+          </>
         )}
       </div>
       {error && <div className="error-text">{error}</div>}

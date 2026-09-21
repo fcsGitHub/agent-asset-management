@@ -290,6 +290,9 @@ export function ActivityPage({
   // 选项由服务端 /activity 响应同源下发（与服务端标签一致，不硬编码副本）。
   const [actionFilter, setActionFilter] = useState("");
   const [actionOptions, setActionOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 操作者过滤（M30）：按团队成员精确筛选其审计动作与运行；选项同源下发
+  const [actorId, setActorId] = useState("");
+  const [actorOptions, setActorOptions] = useState<Array<{ id: string; label: string }>>([]);
   // 时间范围（M26）：闭区间 [since, until]，datetime-local 值（分钟精度），空 = 不约束该侧
   const [sinceLocal, setSinceLocal] = useState("");
   const [untilLocal, setUntilLocal] = useState("");
@@ -335,6 +338,7 @@ export function ActivityPage({
     const query: Record<string, string> = { teamId: project.teamId, limit: String(limitRef.current) };
     if (filterProjectId) query.projectId = filterProjectId;
     if (actionFilter) query.action = actionFilter;
+    if (actorId) query.actorId = actorId;
     if (sinceLocal) query.since = toApiTs(sinceLocal);
     if (untilLocal) query.until = toApiTs(untilLocal);
     if (cursor) {
@@ -342,13 +346,14 @@ export function ActivityPage({
       query.beforeKind = cursor.beforeKind;
       query.beforeId = cursor.beforeId;
     }
-    const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null; actions?: Array<{ value: string; label: string }> }>("/activity", { query });
+    const r = await api<{ items: ActivityItem[]; next: ActivityCursor | null; actions?: Array<{ value: string; label: string }>; actors?: Array<{ id: string; label: string }> }>("/activity", { query });
     if (seq !== fetchSeqRef.current) return null; // 过期响应：不渲染、不更新游标
     if (r.actions) setActionOptions(r.actions);
+    if (r.actors) setActorOptions(r.actors);
     applyItems(r.items, !!cursor);
     setNext(r.next); // 游标由本函数统一管理：只有最新请求才能推进/回收「加载更早」
     return r.next;
-  }, [project, filterProjectId, actionFilter, sinceLocal, untilLocal, applyItems]);
+  }, [project, filterProjectId, actionFilter, actorId, sinceLocal, untilLocal, applyItems]);
 
   const reload = useCallback(() => {
     if (!project) return;
@@ -376,6 +381,7 @@ export function ActivityPage({
       const qs = new URLSearchParams({ teamId: project.teamId });
       if (filterProjectId) qs.set("projectId", filterProjectId);
       if (actionFilter) qs.set("action", actionFilter);
+      if (actorId) qs.set("actorId", actorId);
       if (sinceLocal) qs.set("since", toApiTs(sinceLocal));
       if (untilLocal) qs.set("until", toApiTs(untilLocal));
       qs.set("format", format);
@@ -425,6 +431,10 @@ export function ActivityPage({
       if (!item.key) return;
       if (actionFilter === "agent" && item.kind !== "agent") return;
       if (actionFilter && actionFilter !== "agent" && item.action !== actionFilter) return;
+      if (actorId) {
+        const label = actorOptions.find((o) => o.id === actorId)?.label;
+        if (label && item.actor !== label) return;
+      }
       setItems((prev) => {
         const list = prev ?? [];
         const idx = list.findIndex((x) => x.key === item.key);
@@ -441,7 +451,7 @@ export function ActivityPage({
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [project, filterProjectId, actionFilter, reload]);
+  }, [project, filterProjectId, actionFilter, actorId, actorOptions, reload]);
 
   // 重连成功（live 由 false→true 且已有历史）时重取一次对齐
   const firstLive = useRef(true);
@@ -474,6 +484,13 @@ export function ActivityPage({
           <option value="">全部动作</option>
           {actionOptions.map((o) => (
             <option key={o.value} value={o.value}>{o.value === "agent" ? `${o.label}（全部状态）` : `${o.label}（${o.value}）`}</option>
+          ))}
+        </select>
+        <select aria-label="按操作者过滤" value={actorId} onChange={(e) => setActorId(e.target.value)}
+          title="只看该成员的治理动作与 Agent 运行">
+          <option value="">全部操作者</option>
+          {actorOptions.map((o) => (
+            <option key={o.id} value={o.id}>{o.label}</option>
           ))}
         </select>
         <input
