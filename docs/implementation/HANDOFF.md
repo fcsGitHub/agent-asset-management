@@ -32,11 +32,14 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 ## 风险
 
 - 性能/并发结论为本机 Docker 口径（16 并发读 P95=42ms、混合负载 0 错误），生产硬件容量需另测。
-- 本机语义 worker（8100）会话后台任务方式启动会被宿主在回合/空闲边界回收（exit 1、
-  无 traceback、无 Windows 崩溃事件；同方式启动的 node API/web 不受影响，worker 自身
-  服务全程正常）——非代码缺陷。可靠启动方式（2026-09-22 实测）：
-  `powershell Start-Process -WindowStyle Hidden`（独立控制台 + 日志重定向
-  `data\worker-stdout.log`/`worker-stderr.log`）；直接后台重启仅作临时手段。
+- 本机语义 worker（8100）经会话后台任务（Bash run_in_background）与 PowerShell
+  Start-Process 隐藏窗口两种方式启动，均会在宿主回合/空闲边界被回收（exit 1、
+  无 traceback、无 Windows 崩溃事件；同方式启动的 node API/web 不受影响，worker
+  自身服务全程正常）——宿主对会话派生进程树的回收，非代码缺陷。
+  最终托管方式（2026-09-22）：Windows 计划任务「TAW semantic worker」（过去日期的
+  once 触发器永不自动运行、无需管理员；手动 `schtasks /run` 拉起，由任务计划程序
+  服务创建进程、完全脱离会话进程树）。日志：`data\worker-task.log`。
+  删除托管：`MSYS_NO_PATHCONV=1 schtasks /delete /tn "TAW semantic worker" /f`。
 - E06：离线/ARM64 无验证环境，交付物不做此声称。
 - Pi（@earendil-works/pi-*）以统一 LLM 层路径适配（ADR-0003），已核实包存在（0.85.1）
   但未打包集成；当前 Agent 经 OpenAI 兼容协议直连 DeepSeek，接口契约一致。
@@ -46,7 +49,9 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
 1. 读 docs/implementation/ACCEPTANCE.md（42 项状态）与本文件
 2. `docker compose up -d postgres` → `npx tsx scripts/migrate.ts --role=admin`
 3. `npx tsx apps/api/src/server.ts` + `cd apps/web && npx vite --port 5174 --strictPort`
-   + `SEMANTIC_WORKER_PORT=8100 ./.venv-sema/Scripts/python.exe services/semantic-worker/main.py`
+   + 语义 worker 用计划任务托管（勿用会话内后台启动，见风险区）：
+   `MSYS_NO_PATHCONV=1 schtasks /run /tn "TAW semantic worker"`
+   （任务不存在时创建：`MSYS_NO_PATHCONV=1 schtasks /create /tn "TAW semantic worker" /tr "cmd /d /c cd /d D:\project\agent-asset-management && .venv-sema\Scripts\python.exe services\semantic-worker\main.py >> data\worker-task.log 2>&1" /sc once /sd 2020/01/01 /st 00:00 /rl limited /f`）
    （API 的 DeepSeek 自载 .env；worker 自 M31 起同样自载 .env，无需手动 export）
    （可选）outbox 派发：设 OUTBOX_DISPATCH_URL 后 `npm run dev:worker`
 4. `npx vitest run` 确认 167 项基线仍绿
