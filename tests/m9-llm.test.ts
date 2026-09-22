@@ -142,7 +142,10 @@ const A2_PORT = 4115;
 async function spawnWorker(port: number, opts: { stripKey?: boolean } = {}): Promise<ChildProcess> {
   const env: Record<string, string | undefined> = { ...process.env, SEMANTIC_WORKER_PORT: String(port) };
   if (opts.stripKey) {
-    delete env.DEEPSEEK_API_KEY;
+    // worker 自 M31 起自载 .env（可能带真实 key），仅删环境变量不再构成"无 key"场景。
+    // 改用 worker 公认的未配置哨兵值显式占位：加载器不覆盖已存在的环境变量，
+    // worker 视 replace-me 为未配置 → 走真实的诚实降级路径。
+    env.DEEPSEEK_API_KEY = "replace-me";
   }
   const worker = spawn(join(root, ".venv-sema", "Scripts", "python.exe"), [join(root, "services", "semantic-worker", "main.py")], {
     env: env as NodeJS.ProcessEnv,

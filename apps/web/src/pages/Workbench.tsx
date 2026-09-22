@@ -307,7 +307,10 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               const code = name ? window.prompt("项目代号（小写字母/数字/连字符）：") : null;
               if (name && code && me.teams[0]) {
                 try {
-                  await api("/projects", { method: "POST", body: { teamId: me.teams[0].teamId, name, code } });
+                  // 与「新建会话」同款：创建后立即选中，避免 projectId 仍为空串导致
+                  // select 视觉回落第一项而工作区实际未选中（实测走查 M32 修复）
+                  const created = await api<{ projectId: string }>("/projects", { method: "POST", body: { teamId: me.teams[0].teamId, name, code } });
+                  setProjectId(created.projectId);
                   reloadProjects();
                 } catch (err) {
                   window.alert(err instanceof ApiError ? err.message : "创建失败");
@@ -484,7 +487,22 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
 }
 
 function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
+  const [memberMsg, setMemberMsg] = useState("");
   if (!project) return <div className="state">选择或创建一个项目开始。</div>;
+  const isAdmin = me.teams.find((t) => t.teamId === project.teamId)?.role === "admin";
+  const addMember = async () => {
+    const email = window.prompt("添加项目成员（填写其在本团队的注册邮箱）：");
+    if (!email) return;
+    try {
+      await api(`/projects/${project.projectId}/members`, {
+        method: "POST",
+        body: { teamId: project.teamId, email },
+      });
+      setMemberMsg(`已添加 ${email} 为项目成员。`);
+    } catch (err) {
+      setMemberMsg(err instanceof ApiError ? err.message : "添加失败");
+    }
+  };
   return (
     <>
       <div className="card">
@@ -492,8 +510,14 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
         <div className="kv">
           <span className="k">项目代号</span><span>{project.code}</span>
           <span className="k">状态</span><span>{project.status === "active" ? "进行中" : project.status === "completed" ? "已结题" : "已归档"}</span>
-          <span className="k">我的团队角色</span><span>{me.teams.find((t) => t.teamId === project.teamId)?.role === "admin" ? "团队管理员" : "成员"}</span>
+          <span className="k">我的团队角色</span><span>{isAdmin ? "团队管理员" : "成员"}</span>
         </div>
+        {isAdmin && (
+          <div className="btn-row">
+            <button onClick={addMember}>添加项目成员…</button>
+          </div>
+        )}
+        {memberMsg && <div className="state">{memberMsg}</div>}
       </div>
       <div className="card">
         <h3>下一步</h3>
@@ -980,10 +1004,11 @@ function DraftPanel({
         const up = await uploadFile(teamId, file);
         artifacts = [{ digest: up.digest, role: "implementation", originalName: up.originalName, mediaType: up.mediaType || "application/octet-stream", size: up.size }];
       }
-      const res = await api<{ revisionId: string; seq: number }>(`/branches/${branchId}/revisions`, {
+      const res = await api<{ revisionId: string; seq: number; contentDigest: string }>(`/branches/${branchId}/revisions`, {
         method: "POST", body: { teamId, assetId: asset.id, properties, artifacts },
       });
-      setMsg(`草稿已保存：r${res.seq}（${res.revisionId.slice(0, 8)}…）。可用该分支创建 CR。`);
+      // 与修订历史「内容摘要」同口径展示 contentDigest，而非每次都变的修订 UUID
+      setMsg(`草稿已保存：r${res.seq}（摘要 ${res.contentDigest.slice(0, 8)}…）。可用该分支创建 CR。`);
       setFile(null);
       onSaved();
     } catch (err) {
@@ -1069,6 +1094,36 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
       .then(setCrs).catch(() => setCrs([]));
   }, [project]);
 
+  // 通道回滚（M32 补 UI：端点早已存在但界面无入口）。列出该通道经历过的发布集
+  // （不含当前头），管理员选序号 + 填原因；服务端在同一事务内移动通道头并盖章。
+  async function rollbackChannel(targetChannel: "stable" | "preview") {
+    if (!project || !isAdmin) return;
+    setError(""); setMsg("");
+    try {
+      const hist = await api<{ channelId: string; sets: { id: string; kind: string; created_at: string; item_count: number; is_current: boolean }[] }>(
+        `/projects/${project.projectId}/release-sets`, { query: { teamId: project.teamId, channel: targetChannel } });
+      const usable = hist.sets.filter((s) => !s.is_current);
+      if (usable.length === 0) { setError("该通道没有可回滚到的历史发布集。"); return; }
+      const list = usable.map((s, i) =>
+        `${i + 1}) ${s.kind === "rollback" ? "回滚集" : "发布集"} ${new Date(s.created_at).toLocaleString()}（${s.item_count} 项）`
+      ).join("\n");
+      const pick = window.prompt(`回滚 ${targetChannel} 通道到哪个发布集？输入序号：\n${list}\n（当前通道头不在此列）`);
+      if (!pick) return;
+      const target = usable[Number(pick.trim()) - 1];
+      if (!target) { setError("序号无效，未执行回滚。"); return; }
+      const reason = window.prompt("回滚原因（必填，写入审计与发布事件）：");
+      if (!reason) return;
+      await api(`/channels/${hist.channelId}/rollback`, {
+        method: "POST",
+        body: { teamId: project.teamId, toReleaseSetId: target.id, reason },
+      });
+      setMsg("已回滚：通道头指向目标发布集，同一事务写入发布事件与 release_rollback 审计。");
+      reloadChannels();
+    } catch (err) {
+      setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "回滚失败");
+    }
+  }
+
   useEffect(() => {
     setSelected(null);
     setPrepResult(null);
@@ -1106,11 +1161,13 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
   }
 
   async function publish() {
-    if (!project || !selected || !prepResult) return;
+    // 发布目标与按钮渲染同口径（本地准备结果优先，否则回落服务端有效快照）——
+    // 否则审核他人准备的快照时按钮可点却静默无操作（实测走查 M32 修复）
+    if (!project || !selected || !publishTarget) return;
     setError(""); setMsg("");
     try {
       await api(`/change-requests/${selected.id}/review-and-publish`, {
-        method: "POST", body: { teamId: project.teamId, expectedReviewDigest: prepResult.reviewDigest, note: "界面发布" },
+        method: "POST", body: { teamId: project.teamId, expectedReviewDigest: publishTarget.reviewDigest, note: "界面发布" },
       });
       setMsg("已发布：批准、发布集、通道头与审计在同一事务写入。");
       setSelected(null);
@@ -1157,9 +1214,15 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
             {stableHeads?.map((h) => (
               <div key={h.asset_id} className="kv" style={{ fontSize: 13 }}>
                 <span className="k">{h.asset_name}</span>
-                <span>r{h.revision_seq} · {h.version_label ?? "—"} · <code>{h.revision_id.slice(0, 8)}…</code></span>
+                {/* 修订 id 而非内容摘要：明确标注，避免被误读为绑定的内容摘要 */}
+                <span>r{h.revision_seq} · {h.version_label ?? "—"} · 修订 <code>{h.revision_id.slice(0, 8)}…</code></span>
               </div>
             ))}
+            {isAdmin && stableHeads && stableHeads.length > 0 && (
+              <div className="btn-row" style={{ marginTop: 6 }}>
+                <button onClick={() => void rollbackChannel("stable")}>回滚 stable…</button>
+              </div>
+            )}
           </div>
           <div style={{ flex: 1, minWidth: 260 }}>
             <div className="kv" style={{ marginBottom: 6 }}><span className="k"><strong>preview 预览通道</strong></span><span>{previewHeads === null ? "…" : `${previewHeads.length} 项`}</span></div>
@@ -1167,9 +1230,14 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
             {previewHeads?.map((h) => (
               <div key={h.asset_id} className="kv" style={{ fontSize: 13 }}>
                 <span className="k">{h.asset_name}</span>
-                <span>r{h.revision_seq} · {h.version_label ?? "—"} · <code>{h.revision_id.slice(0, 8)}…</code></span>
+                <span>r{h.revision_seq} · {h.version_label ?? "—"} · 修订 <code>{h.revision_id.slice(0, 8)}…</code></span>
               </div>
             ))}
+            {isAdmin && previewHeads && previewHeads.length > 0 && (
+              <div className="btn-row" style={{ marginTop: 6 }}>
+                <button onClick={() => void rollbackChannel("preview")}>回滚 preview…</button>
+              </div>
+            )}
           </div>
         </div>
       </div>

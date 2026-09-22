@@ -743,6 +743,37 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  // 通道发布集历史（实测走查 M32 补：回滚端点早已存在但 UI 无入口，也无读取
+  // 历史发布集的途径）。按 release_events 还原该通道经历过的发布集，供回滚选择；
+  // 读取对所有团队成员开放（通道头本就可见），回滚动作本身仍是管理员门。
+  app.get("/projects/:projectId/release-sets", async (req) => {
+    const auth = requireAuth(req);
+    const { projectId } = req.params as { projectId: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    const channelName = String((req.query as { channel?: string } | null)?.channel ?? "stable");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows: chan } = await client.query<{ id: string }>(
+        `SELECT id FROM asset_channels WHERE team_id = $1 AND project_id = $2 AND name = $3`,
+        [teamId, projectId, channelName]
+      );
+      if (!chan[0]) throw ERR.NOT_FOUND();
+      const { rows } = await client.query<{ id: string; kind: string; created_at: string; item_count: string; is_current: boolean }>(
+        `SELECT rs.id, re.kind, re.created_at,
+                (SELECT count(*) FROM release_items ri WHERE ri.team_id = $1 AND ri.release_set_id = rs.id) AS item_count,
+                EXISTS (SELECT 1 FROM channel_heads h
+                         WHERE h.team_id = $1 AND h.channel_id = $2 AND h.release_set_id = rs.id) AS is_current
+           FROM release_events re
+           JOIN release_sets rs ON rs.team_id = re.team_id AND rs.id = re.release_set_id
+          WHERE re.team_id = $1 AND re.channel_id = $2
+          ORDER BY re.created_at DESC`,
+        [teamId, chan[0].id]
+      );
+      return { channelId: chan[0].id, sets: rows };
+    });
+  });
+
   // ---------- 变更请求退回 ----------
   app.post("/change-requests/:crId/changes-requested", async (req, reply) => {
     checkCsrf(req);

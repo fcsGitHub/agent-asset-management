@@ -70,6 +70,58 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ teamId: body.teamId, projectId: id, name: body.name, code: body.code });
   });
 
+  // 添加项目成员（实测走查 M32 发现的产品缺口：团队邀请之外，普通成员此前没有任何
+  // UI/API 途径进入项目——project_members 唯一写入点是创建者 lead，各轮实测都以 DB
+  // 播种绕过）。口径：团队管理员或项目 lead 可添加；目标必须是本团队成员；重复添加
+  // 409；添加是治理动作，如实盖章审计。
+  app.post("/projects/:projectId/members", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { projectId } = req.params as { projectId: string };
+    if (!/^[0-9a-f-]{36}$/.test(projectId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        email: z.string().email(),
+        role: z.enum(["lead", "member"]).default("member"),
+      }),
+      req.body
+    );
+    const actorTeamRole = await assertTeamMember(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const { rows: pm } = await client.query<{ role: string }>(
+        `SELECT role FROM project_members WHERE team_id = $1 AND project_id = $2 AND user_id = $3`,
+        [body.teamId, projectId, auth.userId]
+      );
+      if (actorTeamRole !== "admin" && pm[0]?.role !== "lead") throw ERR.FORBIDDEN();
+      const { rows: target } = await client.query<{ id: string; display_name: string }>(
+        `SELECT u.id, u.display_name FROM users u
+           JOIN team_members tm ON tm.team_id = $1 AND tm.user_id = u.id
+          WHERE u.email = $2`,
+        [body.teamId, body.email]
+      );
+      if (!target[0]) throw ERR.INVALID("目标用户不存在或尚未加入本团队，请先邀请其加入团队");
+      const { rows: dupe } = await client.query(
+        `SELECT 1 FROM project_members WHERE team_id = $1 AND project_id = $2 AND user_id = $3`,
+        [body.teamId, projectId, target[0].id]
+      );
+      if (dupe[0]) throw ERR.CONFLICT("ALREADY_MEMBER", "该用户已是项目成员");
+      await client.query(
+        `INSERT INTO project_members (team_id, project_id, user_id, role) VALUES ($1, $2, $3, $4)`,
+        [body.teamId, projectId, target[0].id, body.role]
+      );
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'project.member.add', 'project', $3, $4)`,
+        [body.teamId, auth.userId, projectId,
+         JSON.stringify({ email: body.email, member: target[0].display_name, memberRole: body.role })]
+      );
+      return { userId: target[0].id };
+    }).then((added) => {
+      reply.code(201).send({ teamId: body.teamId, projectId, userId: added.userId, role: body.role });
+    });
+  });
+
   app.get("/projects", async (req) => {
     const auth = requireAuth(req);
     // 服务端从成员关系反查可见项目；RLS 表必须逐团队在租户上下文内查询
@@ -248,6 +300,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "audit.export": "导出审计",
     "semantic.queue.export": "导出语义队列",
     "relation.withdraw": "撤回关系断言",
+    "project.member.add": "添加项目成员",
   };
   // 动态页 action 过滤选项（M24）：Agent 运行是一组（不分状态），其余按审计动作精确匹配。
   // 随 /activity 响应下发，前端下拉与服务端标签同源，不硬编码副本。
