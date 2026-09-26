@@ -35,6 +35,10 @@ async function call(method: string, path: string, opts: { session?: Session; bod
   return { status: res.status, json: text ? JSON.parse(text) : null };
 }
 
+function expectOk(cond: boolean, info: unknown, msg: string): void {
+  if (!cond) throw new Error(`${msg}: ${JSON.stringify(info).slice(0, 400)}`);
+}
+
 describe("C07/C08 补强（真实集成）", () => {
   let app: FastifyInstance;
   let admin: Session, member: Session, other: Session;
@@ -112,13 +116,15 @@ describe("C07/C08 补强（真实集成）", () => {
   });
 
   it("C08：可分享会话——检查通过后分享，第三人可见；检查过期拒绝", async () => {
-    await call("POST", `/sessions/${sessionId}/messages`, {
+    const refMsg = await call("POST", `/sessions/${sessionId}/messages`, {
       session: member, body: { teamId, role: "user", content: "请参考 @并发编辑文档 的最新修订做整理" },
     });
+    expectOk(refMsg.status === 201 || refMsg.status === 200, { status: refMsg.status, json: refMsg.json }, "写入引用消息失败");
     const check = await call("POST", `/sessions/${sessionId}/share-check`, {
       session: member, body: { teamId },
     });
-    expect(check.status === 200 && check.json.shareable === true, "应可分享").toBe(true);
+    expect(check.status === 200 && check.json.shareable === true,
+      `应可分享（status=${check.status} body=${JSON.stringify(check.json)?.slice?.(0, 300)}）`).toBe(true);
 
     // 第三人（非创建者、同团队成员）不能分享他人会话
     const notOwner = await call("POST", `/sessions/${sessionId}/share`, {
@@ -144,14 +150,17 @@ describe("C07/C08 补强（真实集成）", () => {
       body: { teamId, name: `绝密接口说明-${runId}`, typeVersionId: docType.id,
         properties: { docRole: "interface-spec", format: "txt", language: "zh-CN", confidentiality: "secret", scope: "x" } },
     });
-    await call("POST", `/sessions/${secretSessionId}/messages`, {
+    expectOk(secretDoc.status === 201 && !!secretDoc.json?.assetId, { status: secretDoc.status, json: secretDoc.json }, "建密级资产失败");
+    const msgPost = await call("POST", `/sessions/${secretSessionId}/messages`, {
       session: member,
       body: { teamId, role: "user", content: `对照 @绝密接口说明-${runId} 检查：${secretDoc.json.assetId}` },
     });
+    expectOk(msgPost.status === 201 || msgPost.status === 200, { status: msgPost.status, json: msgPost.json }, "写入含密引用消息失败");
     const check = await call("POST", `/sessions/${secretSessionId}/share-check`, {
       session: member, body: { teamId },
     });
-    expect(check.status === 200 && check.json.shareable === false, "含密会话不可分享").toBe(true);
+    expect(check.status === 200 && check.json.shareable === false,
+      `含密会话不可分享（status=${check.status} body=${JSON.stringify(check.json)?.slice?.(0, 300)}）`).toBe(true);
     expect(JSON.stringify(check.json.blockers)).toContain("secret", check.json);
 
     // 绕过检查直接分享 → 403（摘要不匹配或阻断）

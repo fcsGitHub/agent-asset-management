@@ -4,6 +4,7 @@
 // worker 不可达 / LLM 降级均如实展示，不伪造候选。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
+import { refreshBadges } from "../lib/badges";
 import { Empty } from "./Empty";
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
@@ -190,6 +191,8 @@ export function SemanticPanel({ project, onOpenAsset }: { project?: ProjectInfo;
     void api<QueueItem[]>("/semantic/candidates", { query: { teamId: project.teamId, status: qStatus } })
       .then((rows) => {
         setQueue(rows);
+        // 队列即徽标数据源：每次载入（含确认/忽略/入队后的重载）同步顶栏待办计数
+        refreshBadges();
         if (qStatus !== "pending") return;
         // 按资产名自动预映射（可改选）
         setQMapping((prev) => {

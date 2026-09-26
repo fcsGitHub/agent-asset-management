@@ -1,7 +1,7 @@
 // ⌘K 命令栏（吸收 AgentPM CommandBar 双模）：页面跳转 + 资产搜索 + 自然语言意图（真实 LLM）。
 // 键盘优先，Esc 关闭。NL 意图由后端 /nl/parse 解析（规则 L1 / DeepSeek L2，带溯源），
 // 执行只映射到既有界面动作：跳转 / 搜索 / 预填登记表单——不产生新的服务端写权限。
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { PageKey } from "../lib/shortcuts";
 
@@ -9,7 +9,7 @@ interface AssetRow { id: string; name: string; lifecycle: string; type_key: stri
 
 interface Command {
   id: string;
-  icon: string;
+  icon: ReactNode;
   title: string;
   sub: string;
   run: () => void;
@@ -58,7 +58,7 @@ export function CommandBar({
 }: {
   open: boolean;
   onClose: () => void;
-  pages: { key: PageKey; label: string; icon: string }[];
+  pages: { key: PageKey; label: string; icon: ReactNode }[];
   onNavigate: (page: PageKey) => void;
   teamId: string;
   onOpenAsset: (assetId: string) => void;

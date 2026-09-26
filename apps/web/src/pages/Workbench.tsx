@@ -1,22 +1,51 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, uploadFile } from "../api";
+import { refreshBadges } from "../lib/badges";
 import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
 import { RelationGraph } from "../components/RelationGraph";
 import { OntologyPage } from "../components/OntologyPage";
 import { SemanticPanel } from "../components/SemanticPanel";
 import { AgentProposals } from "../components/AgentProposals";
+import { AgentPane } from "../components/AgentPane";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
+import {
+  IconActivity, IconArchive, IconBoard, IconBox, IconCheck, IconChevronRight, IconGraph, IconGrid,
+  IconLayers, IconLock, IconMenu, IconMessage, IconMonitor, IconMoon, IconPencil, IconPlus,
+  IconRefresh, IconSearch, IconSun,
+} from "../components/icons";
+import { CrItemCard, CrComments, type CRComment, type CRItemDiff } from "../components/CrDiff";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
 
-const RAIL_PAGES: { key: PageKey; label: string; icon: string }[] = [
-  { key: "dashboard", label: "总览", icon: "◈" },
-  { key: "workbench", label: "工作台", icon: "▤" },
-  { key: "activity", label: "动态", icon: "≡" },
-  { key: "approvals", label: "审批", icon: "✓" },
-  { key: "graph", label: "图谱", icon: "⚭" },
-  { key: "ontology", label: "本体", icon: "⌗" },
+type ThemeMode = "auto" | "light" | "dark";
+const THEME_LABEL: Record<ThemeMode, string> = { auto: "跟随系统", light: "浅色", dark: "深色" };
+
+function useTheme(): [ThemeMode, () => void] {
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    const t = localStorage.getItem("taw-theme");
+    return t === "light" || t === "dark" ? t : "auto";
+  });
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "auto") delete root.dataset.theme;
+    else root.dataset.theme = theme;
+    localStorage.setItem("taw-theme", theme);
+  }, [theme]);
+  const cycle = useCallback(
+    () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto")),
+    []
+  );
+  return [theme, cycle];
+}
+
+const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
+  { key: "dashboard", label: "总览", icon: <IconGrid size={17} /> },
+  { key: "workbench", label: "工作台", icon: <IconBoard size={17} /> },
+  { key: "activity", label: "动态", icon: <IconActivity size={17} /> },
+  { key: "approvals", label: "审批", icon: <IconCheck size={17} /> },
+  { key: "graph", label: "图谱", icon: <IconGraph size={17} /> },
+  { key: "ontology", label: "本体", icon: <IconLayers size={17} /> },
 ];
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
@@ -53,6 +82,38 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [graphFocus, setGraphFocus] = useState<{ id: string; nonce: number } | null>(null);
   // NL「看归档记录」等意图预置的动态 action 过滤（M26）；nonce 变化即重复应用
   const [activityPreset, setActivityPreset] = useState<{ action: string; nonce: number } | null>(null);
+  const [theme, cycleTheme] = useTheme();
+  // Agent 运行状态（AgentPane 上报）：顶栏药丸如实反映 空闲/运行中
+  const [agentRunning, setAgentRunning] = useState(false);
+  const handleRunState = useCallback((running: boolean) => setAgentRunning(running), []);
+  // Agent 区宽度：拖动分隔条调整（localStorage 记忆，双击复位，←→ 微调）
+  const DEFAULT_PANE_PCT = 44;
+  const [panePct, setPanePct] = useState<number>(() => {
+    const v = Number(localStorage.getItem("taw-pane-pct"));
+    return v >= 25 && v <= 65 ? v : DEFAULT_PANE_PCT;
+  });
+  const mainRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    localStorage.setItem("taw-pane-pct", String(Math.round(panePct * 10) / 10));
+  }, [panePct]);
+  const startPaneDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const main = mainRef.current;
+    if (!main) return;
+    const rect = main.getBoundingClientRect();
+    const onMove = (ev: MouseEvent) => {
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setPanePct(Math.min(65, Math.max(25, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("pane-dragging");
+    };
+    document.body.classList.add("pane-dragging");
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
 
   useEffect(() => {
     if (!flash) return;
@@ -71,12 +132,73 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
 
   const project = useMemo(() => projects?.find((p) => p.projectId === projectId), [projects, projectId]);
 
+  // 待办徽标（M42）：审批 CR / Agent 提案 / 语义候选的待处理计数。
+  // 数据来自与对应页面完全相同的列表端点（口径一致），项目切换时加载 + 30s 轮询。
+  const [badges, setBadges] = useState<{ approvals: number; proposals: number; semantic: number }>({
+    approvals: 0, proposals: 0, semantic: 0,
+  });
+  const reloadBadges = useCallback(() => {
+    if (!project) {
+      setBadges({ approvals: 0, proposals: 0, semantic: 0 });
+      return;
+    }
+    const teamId = project.teamId;
+    void api<CRRow[]>(`/projects/${project.projectId}/change-requests`, { query: { teamId } })
+      .then((rows) => setBadges((b) => ({
+        ...b,
+        approvals: rows.filter((r) => r.status === "awaiting_review" || r.status === "changes_requested").length,
+      })))
+      .catch(() => undefined);
+    void api<unknown[]>(`/projects/${project.projectId}/proposals`, { query: { teamId, status: "pending" } })
+      .then((rows) => setBadges((b) => ({ ...b, proposals: rows.length })))
+      .catch(() => undefined);
+    void api<unknown[]>("/semantic/candidates", { query: { teamId, status: "pending" } })
+      .then((rows) => setBadges((b) => ({ ...b, semantic: rows.length })))
+      .catch(() => undefined);
+  }, [project]);
   useEffect(() => {
+    reloadBadges();
+    const t = window.setInterval(reloadBadges, 30000);
+    // 各面板完成变更动作（确认候选/审提案/发布 CR 等）后派发该事件，徽标立即刷新不等轮询
+    const onRefresh = () => reloadBadges();
+    window.addEventListener("taw:badges-refresh", onRefresh);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("taw:badges-refresh", onRefresh);
+    };
+  }, [reloadBadges]);
+
+  const reloadSessions = useCallback(() => {
     if (!project) return;
     void api<SessionInfo[]>(`/projects/${project.projectId}/sessions`, { query: { teamId: project.teamId } })
       .then(setSessions)
       .catch(() => setSessions([]));
   }, [project]);
+
+  useEffect(() => {
+    reloadSessions();
+  }, [reloadSessions]);
+
+  // 会话维护（改名/归档）：创建者或团队管理员；归档当前会话后自动切到第一个未归档会话
+  const isTeamAdmin = project ? me.teams.find((t) => t.teamId === project.teamId)?.role === "admin" : false;
+  const [showArchived, setShowArchived] = useState(false);
+  const patchSession = useCallback(async (s: SessionInfo, patch: { title?: string; archived?: boolean }) => {
+    if (!project) return;
+    try {
+      await api(`/sessions/${s.sessionId}`, { method: "PATCH", body: { teamId: project.teamId, ...patch } });
+      reloadSessions();
+      if (patch.archived && s.sessionId === sessionId) {
+        const next = sessions.find((x) => x.sessionId !== s.sessionId && !x.archived);
+        setSessionId(next?.sessionId ?? "");
+      }
+      if (!patch.archived && patch.title === undefined) {
+        // 恢复归档：若当前无选中会话则直接选中它
+        if (!sessionId) setSessionId(s.sessionId);
+      }
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.message : "操作失败");
+    }
+  }, [project, reloadSessions, sessionId, sessions]);
 
   useEffect(() => {
     if (!sessions.some((s) => s.sessionId === sessionId)) setSessionId(sessions[0]?.sessionId ?? "");
@@ -226,10 +348,13 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   return (
     <div className="app">
       <header className="topbar">
-        <button aria-label="切换导航抽屉" title="导航抽屉（项目 / Session）" onClick={() => setDrawerOpen(!drawerOpen)}>
-          ☰
+        <button className="icon-btn" aria-label="切换导航抽屉" title="导航抽屉（项目 / Session）" onClick={() => setDrawerOpen(!drawerOpen)}>
+          <IconMenu size={17} />
         </button>
-        <span className="title">工作集</span>
+        <span className="title">
+          <IconBox size={16} />
+          工作集
+        </span>
         <select
           aria-label="选择项目"
           value={projectId}
@@ -245,11 +370,24 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             </option>
           )) ?? <option>加载中…</option>}
         </select>
-        <span className="status">{sessions.find((s) => s.sessionId === sessionId)?.title ?? "未选择会话"}</span>
+        <span className="status session-locator">
+          {sessions.find((s) => s.sessionId === sessionId)?.title ?? "未选择会话"}
+        </span>
         <span className="spacer" />
-        <span className="status">已连接</span>
-        <span className="status">{me.displayName}</span>
-        <button onClick={logout}>退出</button>
+        <span className={`conn-pill${agentRunning ? " running" : ""}`} title="Agent 运行状态（实时）">
+          <span className="conn-dot" aria-hidden="true" />
+          {agentRunning ? "运行中" : "空闲"}
+        </span>
+        <button
+          className="icon-btn"
+          aria-label={`主题：${THEME_LABEL[theme]}（点击切换）`}
+          title={`主题：${THEME_LABEL[theme]}`}
+          onClick={cycleTheme}
+        >
+          {theme === "auto" ? <IconMonitor size={16} /> : theme === "light" ? <IconSun size={16} /> : <IconMoon size={16} />}
+        </button>
+        <span className="status user-name">{me.displayName}</span>
+        <button className="logout-btn" onClick={logout}>退出</button>
       </header>
 
       <div className="body">
@@ -258,16 +396,19 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             <button
               key={p.key}
               className={`rail-item${page === p.key ? " active" : ""}`}
-              title={p.label}
-              aria-label={p.label}
+              title={p.key === "approvals" && badges.approvals > 0 ? `${p.label}（${badges.approvals} 个待处理）` : p.label}
+              aria-label={p.key === "approvals" && badges.approvals > 0 ? `${p.label}，${badges.approvals} 个待处理` : p.label}
               onClick={() => setPage(p.key)}
             >
               <span className="rail-icon" aria-hidden="true">{p.icon}</span>
               <span className="rail-label">{p.label}</span>
+              {p.key === "approvals" && badges.approvals > 0 && (
+                <span className="rail-badge" aria-hidden="true">{badges.approvals > 99 ? "99+" : badges.approvals}</span>
+              )}
             </button>
           ))}
           <button className="rail-item" title="命令栏（Ctrl/⌘+K）" aria-label="打开命令栏" onClick={() => setCmdOpen(true)}>
-            <span className="rail-icon" aria-hidden="true">⌘</span>
+            <span className="rail-icon" aria-hidden="true"><IconSearch size={17} /></span>
             <span className="rail-label">搜索</span>
           </button>
         </nav>
@@ -318,17 +459,27 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               }
             }}
           >
-            ＋ 新建项目
+            <IconPlus size={13} /> 新建项目
           </button>
           {projectsError && <div className="empty">{projectsError}</div>}
           {projects?.length === 0 && <div className="empty">还没有项目。先新建一个项目。</div>}
           {projects?.map((p) => (
-            <div className="project" key={p.projectId}>
-              <div className="project-name">{p.name}</div>
+            <div className={`project${p.projectId === projectId ? " active" : ""}`} key={p.projectId}>
+              <button
+                className="project-name"
+                title={p.projectId === projectId ? "当前项目" : "切换到此项目"}
+                onClick={() => {
+                  setProjectId(p.projectId);
+                  setAssetId("");
+                  setWsView("overview");
+                }}
+              >
+                <IconBox size={13} />
+                <span className="ellipsis">{p.name}</span>
+              </button>
               {p.projectId === projectId && (
                 <button
-                  className="new-btn"
-                  style={{ margin: "2px 4px 6px", padding: "2px" }}
+                  className="new-btn small"
                   onClick={async () => {
                     const title = window.prompt("新会话标题：");
                     if (!title) return;
@@ -348,29 +499,91 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                     }
                   }}
                 >
-                  ＋ 新建会话
+                  <IconPlus size={12} /> 新建会话
                 </button>
               )}
-              {p.projectId === projectId && sessions.length === 0 && <div className="empty">暂无会话</div>}
+              {p.projectId === projectId && sessions.filter((s) => !s.archived).length === 0 && <div className="empty">暂无会话</div>}
               {p.projectId === projectId &&
-                sessions.map((s) => (
-                  <button
-                    key={s.sessionId}
-                    className={`session${s.sessionId === sessionId ? " active" : ""}`}
-                    onClick={() => {
-                      setSessionId(s.sessionId);
-                      setMobileView("chat");
-                    }}
-                  >
-                    {s.visibility === "private" ? "🔒 " : ""}
-                    {s.title}
-                  </button>
+                sessions.filter((s) => !s.archived).map((s) => (
+                  <div key={s.sessionId} className={`session-row${s.sessionId === sessionId ? " active" : ""}`}>
+                    <button
+                      className="session"
+                      onClick={() => {
+                        setSessionId(s.sessionId);
+                        setMobileView("chat");
+                      }}
+                    >
+                      <span className="session-ico" aria-hidden="true">
+                        {s.visibility === "private" ? <IconLock size={12} /> : <IconMessage size={12} />}
+                      </span>
+                      <span className="ellipsis">{s.title}</span>
+                    </button>
+                    {(s.mine || isTeamAdmin) && (
+                      <span className="session-actions">
+                        <button
+                          aria-label={`重命名会话 ${s.title}`}
+                          title="重命名"
+                          onClick={() => {
+                            const title = window.prompt("新会话标题：", s.title);
+                            if (title && title.trim() && title.trim() !== s.title) {
+                              void patchSession(s, { title: title.trim() });
+                            }
+                          }}
+                        >
+                          <IconPencil size={12} />
+                        </button>
+                        <button
+                          aria-label={`归档会话 ${s.title}`}
+                          title="归档（不删除数据）"
+                          onClick={() => {
+                            if (window.confirm(`归档会话「${s.title}」？归档后移出默认列表，可随时恢复。`)) {
+                              void patchSession(s, { archived: true });
+                            }
+                          }}
+                        >
+                          <IconArchive size={12} />
+                        </button>
+                      </span>
+                    )}
+                  </div>
                 ))}
+              {p.projectId === projectId && sessions.some((s) => s.archived) && (
+                <div className="archived-block">
+                  <button className="archived-toggle" onClick={() => setShowArchived((v) => !v)}>
+                    <IconChevronRight size={12} className={showArchived ? "open" : undefined} />
+                    已归档（{sessions.filter((s) => s.archived).length}）
+                  </button>
+                  {showArchived &&
+                    sessions.filter((s) => s.archived).map((s) => (
+                      <div key={s.sessionId} className="session-row archived">
+                        <button className="session" onClick={() => setSessionId(s.sessionId)}>
+                          <span className="session-ico" aria-hidden="true"><IconArchive size={12} /></span>
+                          <span className="ellipsis">{s.title}</span>
+                        </button>
+                        {(s.mine || isTeamAdmin) && (
+                          <span className="session-actions">
+                            <button
+                              aria-label={`恢复会话 ${s.title}`}
+                              title="恢复到列表"
+                              onClick={() => void patchSession(s, { archived: false })}
+                            >
+                              <IconRefresh size={12} />
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
           ))}
         </nav>
 
-        <div className={`main${mobileView === "workspace" ? " show-workspace" : ""}`}>
+        <div
+          ref={mainRef}
+          className={`main${mobileView === "workspace" ? " show-workspace" : ""}`}
+          style={{ "--pane-w": `${panePct}%` } as React.CSSProperties}
+        >
           <div className="mobile-switch" role="tablist" aria-label="窄屏视图切换">
             <button
               className={mobileView === "chat" ? "active" : ""}
@@ -388,6 +601,23 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           <AgentPane
             project={project}
             sessionId={sessionId}
+            sessionTitle={sessions.find((s) => s.sessionId === sessionId)?.title}
+            onOpenAsset={openAssetFromSearch}
+            onRunStateChange={handleRunState}
+          />
+          <div
+            className="pane-divider"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整对话区宽度"
+            title="拖动调整对话区宽度 · ←→ 微调 · 双击复位"
+            tabIndex={0}
+            onMouseDown={startPaneDrag}
+            onDoubleClick={() => setPanePct(DEFAULT_PANE_PCT)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowLeft") { e.preventDefault(); setPanePct((p) => Math.max(25, p - 2)); }
+              if (e.key === "ArrowRight") { e.preventDefault(); setPanePct((p) => Math.min(65, p + 2)); }
+            }}
           />
           <section className="workspace" aria-label="工作区">
             <div className="ws-tabs">
@@ -410,6 +640,12 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                   }}
                 >
                   {label}
+                  {key === "semantic" && badges.semantic > 0 && (
+                    <span className="tab-badge" title={`${badges.semantic} 条候选待审核`}>{badges.semantic > 99 ? "99+" : badges.semantic}</span>
+                  )}
+                  {key === "proposals" && badges.proposals > 0 && (
+                    <span className="tab-badge" title={`${badges.proposals} 条提案待审`}>{badges.proposals > 99 ? "99+" : badges.proposals}</span>
+                  )}
                 </button>
               ))}
               {assetId && (
@@ -424,6 +660,10 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 projectId={project.projectId}
                 assetId={assetId}
                 role={me.teams.find((t) => t.teamId === project.teamId)?.role ?? "member"}
+                onOpenGraph={(id) => {
+                  setGraphFocus({ id, nonce: Date.now() });
+                  setPage("graph");
+                }}
               />
             ) : wsView === "overview" ? (
               <ProjectOverview project={project} me={me} />
@@ -530,236 +770,6 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
   );
 }
 
-interface ToolInvocation { call_id: string; name: string; args: unknown; result: unknown; status: string; error: string }
-interface RunRecord { id: string; status: string; prompt: string; result: unknown; error: string; created_at: string; invocations: ToolInvocation[] }
-interface RunToolBlock { callId: string; name: string; args: unknown; state: "running" | "ok" | "denied" | "error"; result?: unknown; error?: string }
-/** 界面侧的运行视图：事件流实时更新；历史运行从 /sessions/:id/runs 重建。 */
-interface RunView { id: string; status: string; text: string; note: string; streaming: boolean; tools: RunToolBlock[] }
-
-const displayToolName = (wire: string) => wire.replace(/__/g, ".");
-
-function AgentPane({ project, sessionId }: { project?: ProjectInfo; sessionId: string }) {
-  const [msgs, setMsgs] = useState<Msg[] | null>(null);
-  const [runs, setRuns] = useState<RunView[]>([]);
-  const [error, setError] = useState("");
-  const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
-
-  const loadHistory = useCallback((teamId: string, sid: string) => {
-    void api<Msg[]>(`/sessions/${sid}/messages`, { query: { teamId } })
-      .then(setMsgs)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "加载会话失败"));
-    void api<RunRecord[]>(`/sessions/${sid}/runs`, { query: { teamId } })
-      .then((rows) =>
-        setRuns(
-          rows.map((r) => ({
-            id: r.id,
-            status: r.status,
-            text: typeof r.result === "object" && r.result !== null && "finalText" in (r.result as object)
-              ? String((r.result as { finalText?: string }).finalText ?? "")
-              : "",
-            note: r.error,
-            streaming: false,
-            tools: r.invocations.map((i) => ({
-              callId: i.call_id, name: displayToolName(i.name), args: i.args,
-              state: i.status === "ok" ? "ok" : i.status === "denied" ? "denied" : "error",
-              result: i.result, error: i.error,
-            })),
-          }))
-        )
-      )
-      .catch(() => setRuns([]));
-  }, []);
-
-  useEffect(() => {
-    setMsgs(null);
-    setError("");
-    setRuns([]);
-    esRef.current?.close();
-    esRef.current = null;
-    if (!project || !sessionId) return;
-    loadHistory(project.teamId, sessionId);
-    return () => {
-      esRef.current?.close();
-      esRef.current = null;
-    };
-  }, [project, sessionId, loadHistory]);
-
-  function openEventStream(teamId: string, runId: string) {
-    const es = new EventSource(`/api/v1/runs/${runId}/events?teamId=${teamId}`);
-    esRef.current = es;
-    const patch = (fn: (r: RunView) => RunView) =>
-      setRuns((prev) => prev.map((r) => (r.id === runId ? fn(r) : r)));
-    es.addEventListener("tool_call", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { callId: string; name: string; args: unknown };
-      patch((r) => ({ ...r, tools: [...r.tools, { callId: p.callId, name: displayToolName(p.name), args: p.args, state: "running" }] }));
-    });
-    es.addEventListener("tool_result", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { callId: string; status: string; result: unknown; error: string };
-      patch((r) => ({
-        ...r,
-        tools: r.tools.map((t) =>
-          t.callId === p.callId
-            ? { ...t, state: p.status === "ok" ? "ok" : p.status === "denied" ? "denied" : "error", result: p.result, error: p.error }
-            : t
-        ),
-      }));
-    });
-    es.addEventListener("message", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { role: string; text: string };
-      if (p.role === "assistant") patch((r) => ({ ...r, text: p.text }));
-    });
-    es.addEventListener("completed", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { finalText: string };
-      patch((r) => ({ ...r, text: p.finalText, status: "completed", streaming: false }));
-      es.close();
-      if (project) void api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId } }).then(setMsgs).catch(() => undefined);
-    });
-    es.addEventListener("blocked", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { reason: string; limit?: number };
-      const why = p.reason === "budget_tool_calls" ? `工具调用达到预算上限（${p.limit}）`
-        : p.reason === "budget_tokens" ? `token 达到预算上限（${p.limit}）`
-        : p.reason === "max_turns" ? "运行轮数达到上限" : p.reason;
-      patch((r) => ({ ...r, status: "blocked", streaming: false, note: `已暂停等待处置：${why}` }));
-      es.close();
-    });
-    es.addEventListener("cancelled", () => {
-      patch((r) => ({ ...r, status: "cancelled", streaming: false, note: "已被用户取消。" }));
-      es.close();
-    });
-    es.addEventListener("failed", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { error: string };
-      patch((r) => ({ ...r, status: "failed", streaming: false, note: `运行失败：${p.error}` }));
-      es.close();
-    });
-    es.addEventListener("unknown_reconcile", (e) => {
-      const p = JSON.parse((e as MessageEvent).data) as { tool: string; detail: string };
-      patch((r) => ({ ...r, status: "unknown_reconcile", streaming: false, note: `外部副作用结果未知（${p.tool}），已进入对账，不盲目重试。` }));
-      es.close();
-    });
-    es.addEventListener("done", () => {
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    });
-    es.onerror = () => { /* EventSource 自动按 Last-Event-ID 重连续传 */ };
-  }
-
-  async function send() {
-    if (!project || !sessionId || !text.trim()) return;
-    setSending(true);
-    setError("");
-    const content = text.trim();
-    setText("");
-    try {
-      // 真实 LLM 运行：创建运行（同时持久化用户消息），SSE 流式接工具事件与回复
-      const created = await api<{ runId: string }>(`/sessions/${sessionId}/runs`, {
-        method: "POST",
-        body: { teamId: project.teamId, prompt: content },
-      });
-      setRuns((prev) => [...prev, { id: created.runId, status: "running", text: "", note: "", streaming: true, tools: [] }]);
-      openEventStream(project.teamId, created.runId);
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 503 || err.code.startsWith("LLM_"))) {
-        // 模型不可用：诚实降级为普通消息持久化，不伪造 Agent 回复
-        try {
-          await api(`/sessions/${sessionId}/messages`, { method: "POST", body: { teamId: project.teamId, role: "user", content } });
-          setMsgs(await api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId: project.teamId } }));
-          setError("模型未配置或不可用，本条已保存为普通消息（未触发 Agent）。");
-        } catch {
-          setError("发送失败：模型不可用且消息保存失败。");
-        }
-      } else {
-        setError(err instanceof ApiError ? err.message : "发送失败");
-      }
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function cancelRun(runId: string) {
-    if (!project) return;
-    try {
-      await api(`/runs/${runId}/cancel`, { method: "POST", body: { teamId: project.teamId, reason: "用户在界面取消" } });
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "取消失败");
-    }
-  }
-
-  const anyStreaming = runs.some((r) => r.streaming);
-  return (
-    <aside className="agent-pane" aria-label="Agent 对话区">
-      <div className="pane-label">AGENT · {project?.name ?? "未选择项目"}</div>
-      <div className="messages">
-        {msgs === null && !error && <div className="state">{sessionId ? "加载会话…" : "从左侧选择一个会话。"}</div>}
-        {error && <div className="state error">{error}</div>}
-        {msgs?.length === 0 && runs.length === 0 && (
-          <div className="state">开始这段会话。发送任务给 Agent（真实模型执行，工具调用全程可见），或先在右侧登记资产。</div>
-        )}
-        {msgs?.map((m) => (
-          <div key={m.id} className={`msg ${m.role}`}>
-            <div className="who">{m.role === "user" ? "我" : m.role === "assistant" ? "Agent" : "系统"}</div>
-            <div className="bubble">{m.content}</div>
-          </div>
-        ))}
-        {runs.map((r) => (
-          <div key={r.id} className="msg assistant" data-run-status={r.status}>
-            <div className="who">
-              Agent 运行
-              <span className="badge" style={{ marginLeft: 6 }}>{
-                r.status === "running" ? "运行中" : r.status === "completed" ? "已完成"
-                : r.status === "blocked" ? "已暂停" : r.status === "cancelled" ? "已取消"
-                : r.status === "failed" ? "失败" : "对账中"
-              }</span>
-            </div>
-            {r.tools.length > 0 && (
-              <div className="run-tools">
-                {r.tools.map((t) => (
-                  <details key={t.callId} className="run-tool">
-                    <summary>
-                      <span className={`tool-state ${t.state}`}>
-                        {t.state === "running" ? "…" : t.state === "ok" ? "✓" : t.state === "denied" ? "⛔" : "✗"}
-                      </span>
-                      <code>{t.name}</code>
-                      <span className="tool-summary">
-                        {t.state === "running" ? "执行中" : t.state === "denied" ? "权限网关拒绝" : t.state === "error" ? `出错：${t.error}` : "完成"}
-                      </span>
-                    </summary>
-                    <pre className="run-tool-detail">{JSON.stringify(t.args, null, 2)}</pre>
-                    {t.state === "ok" && t.result != null && (
-                      <pre className="run-tool-detail">{JSON.stringify(t.result, null, 2).slice(0, 800)}</pre>
-                    )}
-                  </details>
-                ))}
-              </div>
-            )}
-            {r.text && <div className="bubble">{r.text}</div>}
-            {r.streaming && !r.text && <div className="bubble">正在思考并调用工具…</div>}
-            {r.note && <div className="bubble" style={{ color: "var(--muted)" }}>{r.note}</div>}
-            {r.streaming && (
-              <button style={{ marginTop: 6 }} onClick={() => void cancelRun(r.id)}>取消运行</button>
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="chat-input">
-        <textarea
-          placeholder="给 Agent 派任务（真实模型 + 工具：资产检索 / 建提案 / 建 Issue）…"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send();
-          }}
-        />
-        <button onClick={() => void send()} disabled={sending || anyStreaming || !text.trim() || !sessionId}>
-          {sending ? "发送中" : anyStreaming ? "运行中" : "发送"}
-        </button>
-      </div>
-      <div className="hint">Ctrl+Enter 发送 · Agent 仅草稿写入权限，发布等高权动作必须由人类执行</div>
-    </aside>
-  );
-}
-
 function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onOpen: (id: string) => void; onRegister: () => void }) {
   const [assets, setAssets] = useState<AssetRow[] | null>(null);
   const [error, setError] = useState("");
@@ -784,8 +794,8 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           登记新资产
         </button>
       </h3>
-      <div className="field" style={{ display: "flex", gap: 8 }}>
-        <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} style={{ flex: 1 }} />
+      <div className="field field-row">
+        <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
         <select aria-label="生命周期过滤" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
           <option value="active">进行中</option>
           <option value="archived">已归档</option>
@@ -837,12 +847,13 @@ interface CRRow { id: string; title: string; status: string; created_at: string;
 interface CRSnap { id: string; candidate_digest: string; review_digest: string; channel: string; superseded: boolean; created_at: string }
 interface CRDetail {
   id: string; title: string; status: string; branch_name: string; created_by_name: string;
-  motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number }[];
+  motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number; diff?: CRItemDiff }[];
   snapshots: CRSnap[];
+  comments: CRComment[];
 }
 interface ChannelHead { asset_id: string; asset_name: string; revision_id: string; revision_seq: number; version_label: string | null; updated_at: string }
 
-function AssetDetailPanel({ teamId, projectId, assetId, role }: { teamId: string; projectId: string; assetId: string; role: string }) {
+function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph }: { teamId: string; projectId: string; assetId: string; role: string; onOpenGraph?: (assetId: string) => void }) {
   const [detail, setDetail] = useState<AssetDetail | null>(null);
   const [rels, setRels] = useState<Relations | null>(null);
   const [error, setError] = useState("");
@@ -911,6 +922,11 @@ function AssetDetailPanel({ teamId, projectId, assetId, role }: { teamId: string
             <button onClick={() => void changeLifecycle("restore")}>恢复资产</button>
           ) : (
             <button onClick={() => void changeLifecycle("archive")}>归档资产…</button>
+          )}
+          {onOpenGraph && (
+            <button onClick={() => onOpenGraph(detail.id)} title="在关系图谱中以该资产为中心查看">
+              在图谱中查看
+            </button>
           )}
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>
@@ -1091,7 +1107,12 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
   const reloadCrs = useCallback(() => {
     if (!project) return;
     void api<CRRow[]>(`/projects/${project.projectId}/change-requests`, { query: { teamId: project.teamId } })
-      .then(setCrs).catch(() => setCrs([]));
+      .then((rows) => {
+        setCrs(rows);
+        // CR 列表即审批徽标数据源：每次载入同步待办计数（发布/退回后即时生效）
+        refreshBadges();
+      })
+      .catch(() => setCrs([]));
   }, [project]);
 
   // 通道回滚（M32 补 UI：端点早已存在但界面无入口）。列出该通道经历过的发布集
@@ -1274,18 +1295,9 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
             <span className="k">分支</span><span><code>{selected.branch_name}</code> · 作者 {selected.created_by_name}</span>
             <span className="k">动机</span><span>{selected.motivation}</span>
           </div>
-          <table className="list" style={{ marginTop: 8 }}>
-            <thead><tr><th>资产</th><th>基线</th><th>候选</th></tr></thead>
-            <tbody>
-              {selected.items.map((i) => (
-                <tr key={i.asset_id}>
-                  <td>{i.asset_name}</td>
-                  <td>r{i.base_seq}</td>
-                  <td>r{i.candidate_seq}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="cr-items">
+            {selected.items.map((i) => <CrItemCard key={i.asset_id} item={i} />)}
+          </div>
           {selected.snapshots.length > 0 && (
             <div className="kv" style={{ marginTop: 8 }}>
               <span className="k">审核快照</span>
@@ -1296,6 +1308,12 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
                   </div>
                 ))}
               </span>
+            </div>
+          )}
+          {selected.comments.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div className="cr-diff-label">评审留痕（{selected.comments.length}）</div>
+              <CrComments comments={selected.comments} />
             </div>
           )}
           {msg && <div className="ok-text">{msg}</div>}

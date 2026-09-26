@@ -205,6 +205,43 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }));
   });
 
+  // 会话维护：改名 / 归档（创建者或团队管理员；归档不删除数据，仅移出默认列表）
+  app.patch("/sessions/:sessionId", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { sessionId } = req.params as { sessionId: string };
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        title: z.string().min(1).max(200).optional(),
+        archived: z.boolean().optional(),
+      }).refine((b) => b.title !== undefined || b.archived !== undefined, { message: "至少提供 title 或 archived" }),
+      req.body
+    );
+    const role = await assertTeamMember(auth.userId, body.teamId);
+    return withTeam(body.teamId, async (client) => {
+      const { rows } = await client.query<{ title: string; archived: boolean; created_by: string }>(
+        `SELECT title, archived, created_by FROM sessions WHERE team_id = $1 AND id = $2 FOR UPDATE`,
+        [body.teamId, sessionId]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      if (rows[0].created_by !== auth.userId && role !== "admin") {
+        throw ERR.FORBIDDEN("只有会话创建者或团队管理员可以修改会话");
+      }
+      const sets: string[] = [];
+      const vals: unknown[] = [body.teamId, sessionId];
+      if (body.title !== undefined) { sets.push(`title = $${vals.length + 1}`); vals.push(body.title); }
+      if (body.archived !== undefined) { sets.push(`archived = $${vals.length + 1}`); vals.push(body.archived); }
+      await client.query(`UPDATE sessions SET ${sets.join(", ")} WHERE team_id = $1 AND id = $2`, vals);
+      return {
+        teamId: body.teamId,
+        sessionId,
+        title: body.title ?? rows[0].title,
+        archived: body.archived ?? rows[0].archived,
+      };
+    });
+  });
+
   // ---------- 项目总览（仪表盘统计，一次聚合查询；AgentPM Dashboard 范式） ----------
   app.get("/projects/:projectId/overview", async (req) => {
     const auth = requireAuth(req);

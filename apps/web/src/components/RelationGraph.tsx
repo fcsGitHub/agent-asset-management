@@ -19,7 +19,7 @@ interface SimNode {
   x: number; y: number; vx: number; vy: number;
   degree: number;
 }
-interface SimEdge { id: string; typeKey: string; status: string; source: number; target: number; label: string }
+interface SimEdge { id: string; typeKey: string; status: string; source: number; target: number; label: string; lane: number; lanes: number }
 
 const W = 1000;
 const H = 620;
@@ -137,8 +137,23 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
     const edgeList: SimEdge[] = kept.map((e) => ({
       id: e.id, typeKey: e.type_key, status: e.status,
       source: index.get(e.source_asset_id)!, target: index.get(e.target_asset_id)!,
-      label: e.type_key,
+      label: e.type_key, lane: 0, lanes: 1,
     }));
+    // 平行边分车道（M46）：同一对节点间的多条关系按组分配对称车道，
+    // 渲染时各自弯开（控制点沿法线偏移），线与标签都不再叠合
+    const groups = new Map<string, SimEdge[]>();
+    for (const e of edgeList) {
+      const key = e.source < e.target ? `${e.source}|${e.target}` : `${e.target}|${e.source}`;
+      const g = groups.get(key) ?? [];
+      g.push(e);
+      groups.set(key, g);
+    }
+    for (const g of groups.values()) {
+      g.forEach((e, i) => {
+        e.lane = i - (g.length - 1) / 2;
+        e.lanes = g.length;
+      });
+    }
     return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size };
   }, [edges, assets, typeFilter, statusFilter, focusId, focusHops]);
 
@@ -214,8 +229,8 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
     const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
     style.textContent = [
       "svg { background: #fffefa; font-family: sans-serif; }",
-      ".edge line { stroke: #5f7169; stroke-width: 1.4; opacity: 0.65; }",
-      ".edge.proposed line { stroke-dasharray: 5 4; opacity: 0.55; }",
+      ".edge path { stroke: #5f7169; stroke-width: 1.4; opacity: 0.65; }",
+      ".edge.proposed path { stroke-dasharray: 5 4; opacity: 0.55; }",
       ".edge-label { font-size: 11px; fill: #5f7169; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
       ".node-label { font-size: 12px; fill: #1c2b26; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
     ].join("\n");
@@ -378,11 +393,31 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
               {simEdges.map((e) => {
                 const a = simNodes[e.source], b = simNodes[e.target];
                 if (!a || !b) return null;
-                const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+                // 平行边（lanes>1）：二次贝塞尔沿弦法线弯开；lane=0 或单边保持直线
+                let d = `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+                let lx = (a.x + b.x) / 2, ly = (a.y + b.y) / 2;
+                if (e.lanes > 1 && e.lane !== 0) {
+                  // 法线/锚点按无向规范向（小编号→大编号）计算：双向平行边
+                  // 共享同一套车道几何，箭头仍按真实 source→target 方向绘制
+                  const flip = e.source > e.target;
+                  const p0 = flip ? b : a, p1 = flip ? a : b;
+                  const dx = p1.x - p0.x, dy = p1.y - p0.y;
+                  const len = Math.hypot(dx, dy) || 1;
+                  const off = e.lane * 30;
+                  const cx = (p0.x + p1.x) / 2 + (-dy / len) * off;
+                  const cy = (p0.y + p1.y) / 2 + (dx / len) * off;
+                  d = `M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`;
+                  // 标签锚点沿规范向随车道切向错开（幅度收敛，不贴近节点），再折回真实方向
+                  const tc = 0.5 + e.lane * 0.11;
+                  const t = flip ? 1 - tc : tc;
+                  const u = 1 - t;
+                  lx = u * u * a.x + 2 * u * t * cx + t * t * b.x;
+                  ly = u * u * a.y + 2 * u * t * cy + t * t * b.y;
+                }
                 return (
                   <g key={e.id} className={e.status === "proposed" ? "edge proposed" : "edge"}>
-                    <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} markerEnd="url(#arrow)" strokeDasharray={e.status === "proposed" ? "5 4" : undefined} />
-                    <text x={mx} y={my - 4} className="edge-label">{e.label}</text>
+                    <path d={d} fill="none" markerEnd="url(#arrow)" strokeDasharray={e.status === "proposed" ? "5 4" : undefined} />
+                    <text x={lx} y={ly - 4} className="edge-label">{e.label}</text>
                   </g>
                 );
               })}

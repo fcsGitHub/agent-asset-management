@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Me } from "../App";
 import { Empty } from "./Empty";
+import { CrItemCard, CrComments, type CRComment, type CRItemDiff } from "./CrDiff";
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 
@@ -40,8 +41,9 @@ interface CRRow { id: string; title: string; status: string; created_at: string;
 interface IssueRow { id: string; title: string; status: string; created_at: string; asset_name: string | null }
 interface CRDetail {
   id: string; title: string; status: string; branch_name: string; created_by_name: string;
-  motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number }[];
+  motivation: string; items: { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number; diff?: CRItemDiff }[];
   snapshots: { id: string; candidate_digest: string; review_digest: string; channel: string; superseded: boolean; created_at: string }[];
+  comments: CRComment[];
 }
 
 export function fmtTime(ts: string): string {
@@ -611,11 +613,9 @@ export function ApprovalsPage({ project, onOpenRelease }: { project?: ProjectInf
               <h4>动机</h4>
               <p className="prewrap">{detail.motivation || "（未填写）"}</p>
               <h4>变更项（{detail.items.length}）</h4>
-              <ul>
-                {detail.items.map((it) => (
-                  <li key={it.asset_id}>{it.asset_name}（修订 {it.base_seq} → {it.candidate_seq}）</li>
-                ))}
-              </ul>
+              <div className="cr-items">
+                {detail.items.map((it) => <CrItemCard key={it.asset_id} item={it} />)}
+              </div>
               <h4>审核快照</h4>
               {detail.snapshots.length === 0 ? (
                 <p className="hint">尚未生成审核快照。进入发布流程生成后再发布。</p>
@@ -627,6 +627,12 @@ export function ApprovalsPage({ project, onOpenRelease }: { project?: ProjectInf
                     </li>
                   ))}
                 </ul>
+              )}
+              {detail.comments.length > 0 && (
+                <>
+                  <h4>评审留痕（{detail.comments.length}）</h4>
+                  <CrComments comments={detail.comments} />
+                </>
               )}
               <div className="btn-row">
                 <button className="primary" onClick={onOpenRelease}>进入发布流程处理 →</button>

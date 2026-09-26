@@ -11,6 +11,7 @@ import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { canonicalDigest, reviewDigest as computeReviewDigest, POLICY_VERSION, stableStringify } from "@taw/domain/digest";
+import { diffRevisions, type RevisionDiff } from "@taw/domain/diff";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
 
 interface CRRow {
@@ -134,7 +135,10 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
         [teamId, crId]
       );
       if (!rows[0]) throw ERR.NOT_FOUND();
-      const { rows: items } = await client.query(
+      const { rows: itemRows } = await client.query<{
+        asset_id: string; asset_name: string; base_revision_id: string; candidate_revision_id: string;
+        base_seq: number; candidate_seq: number;
+      }>(
         `SELECT i.asset_id, a.name AS asset_name, i.base_revision_id, i.candidate_revision_id,
                 fr.seq AS base_seq, tr.seq AS candidate_seq
            FROM change_request_items i
@@ -149,7 +153,53 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
            FROM review_snapshots WHERE team_id = $1 AND change_request_id = $2 ORDER BY created_at DESC`,
         [teamId, crId]
       );
-      return { ...rows[0], items, snapshots: snaps };
+      // 逐项冻结差异（M43）：diff 绑定 CR 固化的 base/candidate 修订（而非分支活头），
+      // 与审批摘要的冻结语义一致；复用 @taw/domain/diff 的 diffRevisions（属性/制品/关系/文本行）。
+      const loadRev = async (revisionId: string) => {
+        const { rows: rp } = await client.query<{ properties: Record<string, unknown> }>(
+          `SELECT properties FROM asset_revisions WHERE team_id = $1 AND id = $2`, [teamId, revisionId]
+        );
+        const arts = await client.query<{ role: string; original_name: string; blob_digest: string; media_type: string }>(
+          `SELECT artifact_role AS role, original_name, blob_digest, media_type
+             FROM revision_artifacts WHERE team_id = $1 AND revision_id = $2`,
+          [teamId, revisionId]
+        );
+        const rels = await client.query<{ type_key: string; target: string }>(
+          `SELECT rt.type_key, ta.name AS target FROM relation_assertions ra
+             JOIN relation_type_versions rt ON rt.team_id = ra.team_id AND rt.id = ra.relation_type_version_id
+             JOIN assets ta ON ta.team_id = ra.team_id AND ta.id = ra.target_asset_id
+            WHERE ra.team_id = $1 AND ra.source_revision_id = $2 AND ra.status <> 'withdrawn'`,
+          [teamId, revisionId]
+        );
+        return {
+          properties: rp[0]?.properties ?? {},
+          artifacts: arts.rows.map((a) => ({ role: a.role, originalName: a.original_name, digest: a.blob_digest, mediaType: a.media_type })),
+          relations: rels.rows.map((r) => ({ typeKey: r.type_key, target: r.target })),
+        };
+      };
+      const items: Array<(typeof itemRows)[number] & { diff: RevisionDiff }> = [];
+      for (const it of itemRows) {
+        const [from, to] = await Promise.all([loadRev(it.base_revision_id), loadRev(it.candidate_revision_id)]);
+        const diff = await diffRevisions({
+          from, to,
+          fetchText: async (digest: string) => {
+            try {
+              return (await store.get(teamId, digest)).toString("utf8");
+            } catch {
+              return "<二进制或不可读内容>";
+            }
+          },
+        });
+        items.push({ ...it, diff });
+      }
+      const { rows: comments } = await client.query(
+        `SELECT c.id, c.content, c.created_at, u.display_name AS author_name
+           FROM comments c JOIN users u ON u.id = c.author_id
+          WHERE c.team_id = $1 AND c.target_kind = 'change_request' AND c.target_id = $2
+          ORDER BY c.created_at`,
+        [teamId, crId]
+      );
+      return { ...rows[0], items, snapshots: snaps, comments };
     });
   });
 

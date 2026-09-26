@@ -60,25 +60,33 @@ export const READONLY_TOOLS: ToolDef[] = [
   {
     name: "asset.getRevision",
     tier: "read",
-    description: "查看本团队资产某修订的属性与制品摘要。",
+    description: "查看本团队资产某修订的属性与制品摘要；不传 revisionId 时读取最新修订（head）。",
     parameters: {
       type: "object",
       properties: {
         assetId: { type: "string" },
-        revisionId: { type: "string" },
+        revisionId: { type: "string", description: "可选；缺省读取该资产最新修订" },
       },
-      required: ["assetId", "revisionId"],
+      required: ["assetId"],
     },
     async execute(client, ctx, args) {
-      const { rows } = await client.query(
-        `SELECT r.id, r.seq, r.properties, r.content_digest, r.created_at
-           FROM asset_revisions r WHERE r.team_id = $1 AND r.asset_id = $2 AND r.id = $3`,
-        [ctx.teamId, String(args.assetId), String(args.revisionId)]
-      );
+      const assetId = String(args.assetId ?? "");
+      const revisionId = String(args.revisionId ?? "");
+      const { rows } = revisionId
+        ? await client.query(
+            `SELECT r.id, r.seq, r.properties, r.content_digest, r.created_at
+               FROM asset_revisions r WHERE r.team_id = $1 AND r.asset_id = $2 AND r.id = $3`,
+            [ctx.teamId, assetId, revisionId]
+          )
+        : await client.query(
+            `SELECT r.id, r.seq, r.properties, r.content_digest, r.created_at
+               FROM asset_revisions r WHERE r.team_id = $1 AND r.asset_id = $2 ORDER BY seq DESC LIMIT 1`,
+            [ctx.teamId, assetId]
+          );
       if (!rows[0]) throw new Error("修订不存在或与资产不匹配");
       const arts = await client.query(
         `SELECT blob_digest, artifact_role, original_name FROM revision_artifacts WHERE team_id = $1 AND revision_id = $2`,
-        [ctx.teamId, String(args.revisionId)]
+        [ctx.teamId, String(rows[0].id)]
       );
       return { ...rows[0], artifacts: arts.rows };
     },
@@ -255,10 +263,16 @@ export async function invokeTool(
   if (!tool) {
     return record("denied", null, `工具 ${name} 不在本次运行允许清单内`);
   }
+  // SAVEPOINT 隔离：工具内 SQL 失败（如非法 UUID 参数）会中止整个事务，
+  // 若直接 record 会因事务已中止而连带失败、整轮运行被拖死（实测走查发现）。
+  // 回滚到保存点后再如实记录 error，运行继续、模型拿到错误反馈可自行修正。
+  await client.query("SAVEPOINT tool_exec");
   try {
     const result = await tool.execute(client, ctx, args);
+    await client.query("RELEASE SAVEPOINT tool_exec");
     return record("ok", result);
   } catch (err) {
+    await client.query("ROLLBACK TO SAVEPOINT tool_exec").catch(() => undefined);
     if (err instanceof UnknownOutcomeError) {
       // 副作用已发生但结果未知：先留审计记录，再抛给运行器进入 unknown_reconcile（D06），
       // 不作为普通工具错误回喂模型（模型不得据此盲目重试）。

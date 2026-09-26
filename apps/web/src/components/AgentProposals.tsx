@@ -3,6 +3,7 @@
 // asset_registration 可一键按提案预填登记表单（人工完成真实登记）。
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
+import { refreshBadges } from "../lib/badges";
 import { Empty } from "./Empty";
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
@@ -98,7 +99,11 @@ export function AgentProposals({ project, onPrefillRegister }: {
     const query: Record<string, string> = { teamId: project.teamId };
     if (status !== "all") query.status = status;
     void api<ProposalRow[]>(`/projects/${project.projectId}/proposals`, { query })
-      .then(setRows)
+      .then((rows) => {
+        setRows(rows);
+        // 提案列表即徽标数据源：每次载入（含评审后重载）同步待办计数
+        refreshBadges();
+      })
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载提案失败"));
   }, [project, status]);
 

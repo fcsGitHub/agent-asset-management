@@ -15,7 +15,10 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       z.object({ teamId: z.string().uuid(), role: z.enum(["user", "system"]).default("user"), content: z.string().min(1).max(16000) }),
       req.body
     );
-    return withTeam(body.teamId, async (client) => {
+    // 响应必须在事务提交之后发出：在 withTeam 处理器内调用 reply.send() 会让
+    // Fastify 立即开始响应（不等 COMMIT），紧跟着的读请求可能读不到刚写入的行
+    // （read-your-writes 竞态，C08 含密分享检查曾因此偶发漏检）。
+    const created = await withTeam(body.teamId, async (client) => {
       const { rows: sess } = await client.query<{ created_by: string; visibility: string }>(
         `SELECT created_by, visibility FROM sessions WHERE team_id = $1 AND id = $2`,
         [body.teamId, sessionId]
@@ -27,12 +30,14 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
         [body.teamId, sessionId]
       );
       const id = newId();
+      const seq = Number(last[0]!.seq) + 1;
       await client.query(
         `INSERT INTO messages (team_id, id, session_id, role, content, seq) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [body.teamId, id, sessionId, body.role, body.content, Number(last[0]!.seq) + 1]
+        [body.teamId, id, sessionId, body.role, body.content, seq]
       );
-      return reply.code(201).send({ messageId: id, seq: Number(last[0]!.seq) + 1 });
+      return { messageId: id, seq };
     });
+    return reply.code(201).send(created);
   });
 
   app.get("/sessions/:sessionId/messages", async (req) => {

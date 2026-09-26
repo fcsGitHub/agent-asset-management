@@ -1,0 +1,163 @@
+/* ==========================================================================
+   设计令牌 · Design Tokens
+   「纸 + 松绿」品牌方向，对齐 kimi-front-design 原型与 Kimi Code Desktop 的
+   工作区观感。浅色默认；深色跟随系统，亦可由顶栏主题开关强制（html[data-theme]）。
+   保留旧变量名（--paper/--wash/--soft/--danger 等）作为别名，平滑过渡。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas,
+    "Noto Sans Mono CJK SC", monospace;
+
+  /* 表面 */
+  --bg: #f4f6f3;
+  --surface: #ffffff;
+  --surface-2: #eef2ec;
+  --surface-3: #e5ece3;
+
+  /* 文字 */
+  --ink: #1a2420;
+  --ink-2: #45564d;
+  --muted: #74847b;
+  --faint: #9aa89f;
+
+  /* 线条 */
+  --line: #dde5dd;
+  --line-strong: #c5d2c7;
+
+  /* 主色：松绿 */
+  --accent: #1e6b52;
+  --accent-strong: #14523e;
+  --accent-soft: #e2efe8;
+  --accent-line: #bcd6c9;
+  --on-accent: #ffffff;
+
+  /* 语义色 */
+  --amber: #8a5d12;
+  --amber-soft: #faf2de;
+  --amber-line: #e7d3a4;
+  --red: #ab3325;
+  --red-soft: #faece9;
+  --red-line: #ecc8c2;
+  --blue: #2b5ea8;
+  --blue-soft: #e9f0fa;
+  --blue-line: #c3d4ec;
+  --green: #2e7d32;
+
+  /* 阴影 / 圆角 */
+  --shadow-1: 0 1px 2px rgba(26, 36, 32, 0.05);
+  --shadow-2: 0 6px 24px rgba(26, 36, 32, 0.1);
+  --shadow-3: 0 16px 48px rgba(26, 36, 32, 0.16);
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 18px;
+
+  /* 布局 */
+  --topbar-h: 52px;
+  --drawer-w: 288px;
+  --pane-default: 44%;
+  --pane-min: 320px;
+
+  /* 动效 */
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+  /* 深松绿壳（顶栏 / icon rail，两主题通用） */
+  --shell-bg: #17382d;
+  --shell-bg-2: #1e463a;
+  --shell-bg-deep: #122c24;
+  --shell-line: #2c5345;
+  --shell-ink: #dcebe2;
+  --shell-ink-dim: #9db8ab;
+
+  /* ---- 旧变量别名（随主题自动翻转） ---- */
+  --paper: var(--surface);
+  --wash: var(--bg);
+  --soft: var(--surface-2);
+  --danger: var(--red);
+}
+
+/* 深色令牌（两处选择器保持同步）：手动强制深色，或跟随系统且未被手动浅色覆盖 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0f1412;
+  --surface: #161c18;
+  --surface-2: #1b231e;
+  --surface-3: #222b25;
+
+  --ink: #e3eae4;
+  --ink-2: #b4c2b8;
+  --muted: #87988d;
+  --faint: #5f6f65;
+
+  --line: #27332c;
+  --line-strong: #36453b;
+
+  --accent: #46bb90;
+  --accent-strong: #63d2a7;
+  --accent-soft: #173227;
+  --accent-line: #28513f;
+  --on-accent: #08120d;
+
+  --amber: #d9a94a;
+  --amber-soft: #32270f;
+  --amber-line: #57431b;
+  --red: #e07766;
+  --red-soft: #3a1712;
+  --red-line: #5e241c;
+  --blue: #7ea9ea;
+  --blue-soft: #182540;
+  --blue-line: #2c4066;
+  --green: #6dbf73;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-3: 0 18px 52px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg: #0f1412;
+    --surface: #161c18;
+    --surface-2: #1b231e;
+    --surface-3: #222b25;
+
+    --ink: #e3eae4;
+    --ink-2: #b4c2b8;
+    --muted: #87988d;
+    --faint: #5f6f65;
+
+    --line: #27332c;
+    --line-strong: #36453b;
+
+    --accent: #46bb90;
+    --accent-strong: #63d2a7;
+    --accent-soft: #173227;
+    --accent-line: #28513f;
+    --on-accent: #08120d;
+
+    --amber: #d9a94a;
+    --amber-soft: #32270f;
+    --amber-line: #57431b;
+    --red: #e07766;
+    --red-soft: #3a1712;
+    --red-line: #5e241c;
+    --blue: #7ea9ea;
+    --blue-soft: #182540;
+    --blue-line: #2c4066;
+    --green: #6dbf73;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.42);
+    --shadow-3: 0 18px 52px rgba(0, 0, 0, 0.5);
+  }
+}

@@ -36,3 +36,6 @@ coverage/
 
 .venv-sema/
 tmp/
+
+# 嵌套的独立设计演练项目（自带 package.json/node_modules，非本仓产物）
+kimi-front-design/

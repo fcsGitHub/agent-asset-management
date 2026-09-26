@@ -31,10 +31,11 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
         teamId: z.string().uuid(),
         prompt: z.string().min(1).max(8000),
         contextRefs: z.array(z.string().max(400)).max(20).default([]),
+        // 不用 .partial()：它会把字段包成 optional 使内层 default 失效（存量运行为证：budget 落库 {}，
+        // 预算闸门实际被绕过）。注意 ZodDefault 不解析默认值本身，故对象级默认必须给完整值。
         budget: z
           .object({ maxToolCalls: z.number().int().min(1).max(50).default(8), maxTokens: z.number().int().min(200).max(200000).default(20000) })
-          .partial()
-          .default({}),
+          .default({ maxToolCalls: 8, maxTokens: 20000 }),
       }),
       req.body
     );
@@ -119,7 +120,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!sess[0]) throw ERR.NOT_FOUND();
       const { rows: runs } = await client.query(
-        `SELECT id, status, prompt, result, error, used, created_at
+        `SELECT id, status, prompt, result, error, used, budget, created_at, context_refs
            FROM agent_runs WHERE team_id = $1 AND session_id = $2 ORDER BY created_at DESC LIMIT 20`,
         [teamId, sessionId]
       );

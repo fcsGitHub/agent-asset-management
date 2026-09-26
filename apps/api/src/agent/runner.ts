@@ -116,7 +116,15 @@ async function runLoop(runId: string): Promise<void> {
 
     let usedToolCalls = 0;
     let usedTokens = 0;
-    const budget = meta.budget as { maxToolCalls: number; maxTokens: number };
+    // 存量运行的 budget 可能是 {}（创建端 .partial() 曾使默认失效）；读取处兜底与创建端默认值同口径
+    const budgetRaw = meta.budget as { maxToolCalls?: number; maxTokens?: number };
+    const budget = { maxToolCalls: budgetRaw.maxToolCalls ?? 8, maxTokens: budgetRaw.maxTokens ?? 20000 };
+    // 用量实时可见（M40）：随 SSE 推送，界面据此渲染预算进度；终态以 agent_runs.used 为准
+    const emitUsage = (): Promise<number> =>
+      appendEvent(teamId, runId, "usage", {
+        toolCalls: usedToolCalls, tokens: usedTokens,
+        maxToolCalls: budget.maxToolCalls, maxTokens: budget.maxTokens,
+      });
 
     // 终态时序不变量的取消侧收尾：先事件后状态（见文件头注释）
     const finishCancelled = async (): Promise<void> => {
@@ -141,6 +149,7 @@ async function runLoop(runId: string): Promise<void> {
       }));
       const chat = await provider.chat(messages, specs, controller.signal);
       usedTokens += chat.totalTokens;
+      await emitUsage();
       const msg = chat.message;
       if (msg.content) {
         await appendEvent(teamId, runId, "message", { role: "assistant", text: msg.content });
@@ -195,6 +204,7 @@ async function runLoop(runId: string): Promise<void> {
           result: invokeResult.status === "ok" ? invokeResult.result : null,
           error: invokeResult.error ?? "",
         });
+        await emitUsage();
         messages.push({
           role: "tool",
           tool_call_id: call.id,
