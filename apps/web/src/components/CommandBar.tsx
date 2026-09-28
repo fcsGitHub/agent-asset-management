@@ -16,8 +16,8 @@ interface Command {
 }
 
 export interface NlIntentPayload {
-  intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue";
-  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; activityAction?: string; title?: string; body?: string };
+  intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue" | "graph_path";
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; activityAction?: string; fromName?: string; toName?: string; title?: string; body?: string };
   parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
 }
 
@@ -41,6 +41,7 @@ export function describeIntent(i: NlIntentPayload): string {
     return `跳转到「${names[i.params.page ?? "dashboard"]}」`;
   }
   if (i.intent === "search_assets") return `搜索资产：${i.params.query ?? ""}`;
+  if (i.intent === "graph_path") return `查询「${i.params.fromName ?? ""}」与「${i.params.toName ?? ""}」的关联路径`;
   if (i.intent === "create_issue") return `起草问题工单（确认后才创建）`;
   return `预填登记表单${i.params.typeKeyHint ? `（类型含 "${i.params.typeKeyHint}"）` : ""}${i.params.name ? `，名称 "${i.params.name}"` : ""}`;
 }

@@ -39,11 +39,22 @@ function loadFocusHops(): number {
 // 类型着色：按 type_key 排序后取调色板（确定性，同类型同色）
 const PALETTE = ["#3b6ea5", "#2e6b4f", "#8a5a9e", "#b0703c", "#4f7d9e", "#7d6a3b", "#a54a6f", "#4a8a7a", "#6b6b9e", "#8a7a4a"];
 
-export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
+export interface GraphPathRequest { fromId: string; toId: string; nonce: number }
+
+interface PathChainNode { id: string; name: string; via: string | null; forward: boolean }
+type PathView =
+  | { status: "loading" }
+  | { status: "found"; hops: number; chain: PathChainNode[]; edgeIds: Set<string>; nodeIds: Set<string> }
+  | { status: "not-found" }
+  | { status: "error"; message: string };
+
+export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPath }: {
   project?: ProjectInfo;
   onOpenAsset: (assetId: string) => void;
   /** NL「聚焦 X 的图谱」等入口预置的聚焦资产（M21）；仅注入状态，用户仍可自由改选 */
   initialFocusId?: string;
+  /** NL「A 和 B 怎么关联」入口预置的路径查询（M51）：拉取 /graph/path 并高亮链路 */
+  initialPath?: GraphPathRequest | null;
 }) {
   const [edges, setEdges] = useState<RelEdge[] | null>(null);
   const [assets, setAssets] = useState<AssetRow[]>([]);
@@ -61,6 +72,43 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
   useEffect(() => {
     if (initialFocusId) setFocusId(initialFocusId);
   }, [initialFocusId]);
+
+  const [pathView, setPathView] = useState<PathView | null>(null);
+  const pathNonceRef = useRef(0);
+  useEffect(() => {
+    if (!initialPath || !project) return;
+    if (initialPath.nonce === pathNonceRef.current) return;
+    pathNonceRef.current = initialPath.nonce;
+    setPathView({ status: "loading" });
+    void api<{ found: boolean; hops?: number; nodes?: { assetId: string; name: string }[]; edges?: { relId: string; relKey: string; source: string; target: string }[] }>(
+      "/graph/path",
+      { query: { teamId: project.teamId, from: initialPath.fromId, to: initialPath.toId } }
+    )
+      .then((r) => {
+        if (!r.found || !r.nodes || !r.edges) {
+          setPathView({ status: "not-found" });
+          return;
+        }
+        // 链条渲染：edges[i] 连接 nodes[i]—nodes[i+1]；箭头按真实方向标注
+        const chain: PathChainNode[] = r.nodes.map((n, i) => {
+          const e = i > 0 ? r.edges![i - 1] : undefined;
+          return {
+            id: n.assetId,
+            name: n.name,
+            via: e?.relKey ?? null,
+            forward: e ? e.source === r.nodes![i - 1]!.assetId : true,
+          };
+        });
+        setPathView({
+          status: "found",
+          hops: r.edges.length,
+          chain,
+          edgeIds: new Set(r.edges.map((e) => e.relId)),
+          nodeIds: new Set(r.nodes.map((n) => n.assetId)),
+        });
+      })
+      .catch((e) => setPathView({ status: "error", message: e instanceof Error ? e.message : "路径查询失败" }));
+  }, [initialPath, project]);
 
   const reload = useCallback(() => {
     if (!project) return;
@@ -92,7 +140,10 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
         (!statusFilter || e.status === statusFilter)
     );
     let kept = base;
-    if (focusId && byId.has(focusId)) {
+    if (pathView?.status === "found") {
+      // 路径模式（M51）：只保留链路上的关系边——链条节点天然带度，不会消失
+      kept = base.filter((e) => pathView.edgeIds.has(e.id));
+    } else if (focusId && byId.has(focusId)) {
       // 邻域集合：从聚焦资产沿边 BFS focusHops 跳
       const adjacency = new Map<string, string[]>();
       for (const e of base) {
@@ -155,7 +206,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
       });
     }
     return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size };
-  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops]);
+  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops, pathView]);
 
   nodesRef.current = simNodes;
 
@@ -230,6 +281,8 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
     style.textContent = [
       "svg { background: #fffefa; font-family: sans-serif; }",
       ".edge path { stroke: #5f7169; stroke-width: 1.4; opacity: 0.65; }",
+      ".edge.path-edge path { stroke: #1e6b52; stroke-width: 2.6; opacity: 1; }",
+      ".edge.path-edge .edge-label { fill: #1e6b52; font-weight: 600; }",
       ".edge.proposed path { stroke-dasharray: 5 4; opacity: 0.55; }",
       ".edge-label { font-size: 11px; fill: #5f7169; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
       ".node-label { font-size: 12px; fill: #1c2b26; text-anchor: middle; paint-order: stroke; stroke: #fffefa; stroke-width: 3px; }",
@@ -367,7 +420,33 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
       )}
       {simNodes.length > 0 && (
         <>
-          {focusId && simNodes.length > 0 && (
+          {pathView && (
+            <div className="graph-path-banner" role="status" aria-label="关联路径查询结果">
+              {pathView.status === "loading" && <span className="hint">正在查询关联路径…</span>}
+              {pathView.status === "not-found" && (
+                <span className="hint">两资产在当前关系图中没有关联路径（图库边集内不可达）。</span>
+              )}
+              {pathView.status === "error" && <span className="error-text">{pathView.message}</span>}
+              {pathView.status === "found" && (
+                <>
+                  <span className="chip chip-ok">关联路径 · {pathView.hops} 跳</span>
+                  {pathView.chain.map((c) => (
+                    <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                      <span className="path-arrow" title={c.via ?? ""} style={{ display: c.via ? undefined : "none" }}>
+                        {c.forward ? `${c.via} →` : `← ${c.via}`}
+                      </span>
+                      <button className="badge" title={c.name} onClick={() => onOpenAsset(c.id)}>
+                        {c.name.length > 16 ? `${c.name.slice(0, 15)}…` : c.name}
+                      </button>
+                    </span>
+                  ))}
+                </>
+              )}
+              <span style={{ flex: 1 }} />
+              <button onClick={() => setPathView(null)}>退出路径高亮</button>
+            </div>
+          )}
+          {focusId && simNodes.length > 0 && pathView?.status !== "found" && (
             <p className="hint" style={{ marginTop: 0 }}>
               聚焦模式：显示聚焦资产 {focusHops} 跳邻域（{simNodes.length} 节点 / {simEdges.length} 关系）。
             </p>
@@ -380,7 +459,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
           <div className="graph-wrap card">
             <svg
               ref={svgRef}
-              className="rel-graph"
+              className={`rel-graph${pathView?.status === "found" ? " has-path" : ""}`}
               viewBox={`0 0 ${W} ${H}`}
               role="img"
               aria-label={`关系图谱：${simNodes.length} 个资产，${simEdges.length} 条关系`}
@@ -414,8 +493,9 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
                   lx = u * u * a.x + 2 * u * t * cx + t * t * b.x;
                   ly = u * u * a.y + 2 * u * t * cy + t * t * b.y;
                 }
+                const onPath = pathView?.status === "found" && pathView.edgeIds.has(e.id);
                 return (
-                  <g key={e.id} className={e.status === "proposed" ? "edge proposed" : "edge"}>
+                  <g key={e.id} className={onPath ? "edge path-edge" : e.status === "proposed" ? "edge proposed" : "edge"}>
                     <path d={d} fill="none" markerEnd="url(#arrow)" strokeDasharray={e.status === "proposed" ? "5 4" : undefined} />
                     <text x={lx} y={ly - 4} className="edge-label">{e.label}</text>
                   </g>
@@ -425,11 +505,12 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
                 const r = 13 + Math.min(n.degree, 8);
                 const color = colorOf.get(n.typeKey) ?? "#666";
                 const isFocus = n.id === focusId;
+                const onPathNode = pathView?.status === "found" && pathView.nodeIds.has(n.id);
                 return (
                   <g
                     key={n.id}
                     transform={`translate(${n.x},${n.y})`}
-                    className="node"
+                    className={`node${onPathNode ? " path-node" : ""}`}
                     onPointerDown={(ev) => {
                       ev.preventDefault();
                       dragRef.current = { index: i, moved: false };
@@ -444,6 +525,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId }: {
                     }}
                   >
                     {isFocus && <circle r={r + 6} fill="none" stroke="var(--accent)" strokeWidth={2} strokeDasharray="5 4" />}
+                    {onPathNode && <circle r={r + 4} fill="none" stroke="var(--accent)" strokeWidth={2.5} />}
                     <circle r={r} fill={color} stroke={isFocus ? "var(--accent)" : n.lifecycle === "archived" ? "var(--muted)" : "#fff"} strokeDasharray={n.lifecycle === "archived" ? "4 3" : undefined} strokeWidth={isFocus ? 3 : 2} opacity={0.92} />
                     <text y={r + 13} className="node-label">{n.name.length > 14 ? `${n.name.slice(0, 13)}…` : n.name}</text>
                     <title>{`${n.name}（${n.typeKey}）${n.lifecycle === "archived" ? "· 已归档" : ""} · 度 ${n.degree}`}</title>

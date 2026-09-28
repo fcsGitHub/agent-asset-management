@@ -80,6 +80,8 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [flash, setFlash] = useState<{ text: string; tone: "ok" | "error"; nonce: number } | null>(null);
   // NL「聚焦 X 的图谱」解析出的聚焦资产（已聚焦同一资产时无需重复注入）
   const [graphFocus, setGraphFocus] = useState<{ id: string; nonce: number } | null>(null);
+  // NL「A 和 B 怎么关联」（M51）：解析出的路径查询请求，图谱页据此拉取 /graph/path 并高亮
+  const [graphPathReq, setGraphPathReq] = useState<{ fromId: string; toId: string; nonce: number } | null>(null);
   // NL「看归档记录」等意图预置的动态 action 过滤（M26）；nonce 变化即重复应用
   const [activityPreset, setActivityPreset] = useState<{ action: string; nonce: number } | null>(null);
   const [theme, cycleTheme] = useTheme();
@@ -283,6 +285,36 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
       setPage(payload.params.page);
       return true;
     }
+    if (payload.intent === "graph_path") {
+      const p = project;
+      const fromName = payload.params.fromName ?? "";
+      const toName = payload.params.toName ?? "";
+      if (!p || !fromName || !toName) return true;
+      void (async () => {
+        // 名称 → id：精确名优先，唯一模糊命中可用；解析失败如实 flash，不静默装作查过
+        const resolve = async (name: string): Promise<AssetRow | undefined> => {
+          try {
+            const hits = await api<AssetRow[]>("/assets/search", {
+              query: { teamId: p.teamId, q: name, lifecycle: "all", limit: "10" },
+            });
+            return hits.find((a) => a.name === name) ?? (hits.length === 1 ? hits[0] : undefined);
+          } catch {
+            return undefined;
+          }
+        };
+        const [from, to] = await Promise.all([resolve(fromName), resolve(toName)]);
+        if (!from || !to) {
+          setFlash({ text: `未找到资产「${!from ? fromName : toName}」，无法查询关联路径`, tone: "error", nonce: Date.now() });
+        } else if (from.id === to.id) {
+          setFlash({ text: `「${fromName}」与「${toName}」解析为同一资产`, tone: "error", nonce: Date.now() });
+        } else {
+          setGraphPathReq({ fromId: from.id, toId: to.id, nonce: Date.now() });
+        }
+        setPage("graph");
+        setMobileView("workspace");
+      })();
+      return true;
+    }
     if (payload.intent === "search_assets") {
       // 保持命令栏打开：回填解析出的关键词，直接呈现资产结果
       setCmdSeed({ query: payload.params.query ?? "", nonce: Date.now() });
@@ -431,7 +463,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           </main>
         ) : page === "graph" ? (
           <main className="page-main" aria-label="关系图谱">
-            <RelationGraph project={project} onOpenAsset={openAssetFromSearch} initialFocusId={graphFocus?.id} />
+            <RelationGraph project={project} onOpenAsset={openAssetFromSearch} initialFocusId={graphFocus?.id} initialPath={graphPathReq} />
           </main>
         ) : page === "ontology" ? (
           <main className="page-main" aria-label="本体治理">

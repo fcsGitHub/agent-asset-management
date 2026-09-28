@@ -101,6 +101,7 @@ const STARTER_PROMPTS = [
   "检索团队资产目录，用 Markdown 表格总结（列：名称、类型、状态）",
   "找一个缺少说明制品的资产，为它提交一条整理提案",
   "检查现有资产之间的关系，指出两处可能缺失的依赖或文档关系",
+  "挑两个有间接关系的资产，用关联路径查询讲清它们是怎么连起来的（每步的关系类型）",
 ];
 
 function ToolCard({ tool, onOpenAsset }: { tool: RunToolBlock; onOpenAsset?: (assetId: string) => void }) {

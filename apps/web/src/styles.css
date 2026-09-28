@@ -904,6 +904,19 @@ kbd {
 }
 .rel-graph .edge path { stroke: var(--muted); stroke-width: 1.4; opacity: 0.65; }
 .rel-graph .edge.proposed path { stroke-dasharray: 5 4; opacity: 0.55; }
+/* 路径高亮（M51）：命中的边加粗提色，未命中的边与节点整体退后 */
+.rel-graph.has-path .edge:not(.path-edge) path { opacity: 0.18; }
+.rel-graph.has-path .edge:not(.path-edge) .edge-label { opacity: 0.25; }
+.rel-graph .edge.path-edge path { stroke: var(--accent); stroke-width: 2.6; opacity: 1; }
+.rel-graph .edge.path-edge .edge-label { fill: var(--accent); font-weight: 600; }
+.rel-graph.has-path .node:not(.path-node) { opacity: 0.22; }
+.graph-path-banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 8px 12px; margin-bottom: 8px;
+  border: 1px solid var(--accent-line); border-radius: 10px;
+  background: var(--accent-soft);
+}
+.graph-path-banner .path-arrow { color: var(--accent); font-weight: 600; margin: 0 2px; }
 .rel-graph .edge-label {
   font-size: 11px; fill: var(--muted); text-anchor: middle;
   paint-order: stroke; stroke: var(--surface); stroke-width: 3px;

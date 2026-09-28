@@ -20,7 +20,7 @@ const ACTIVITY_ACTIONS = ["agent", "asset.archive", "asset.restore", "review_pre
 
 export const NlIntent = z
   .object({
-    intent: z.enum(["navigate", "search_assets", "fill_register_form", "create_issue"]),
+    intent: z.enum(["navigate", "search_assets", "fill_register_form", "create_issue", "graph_path"]),
     params: z.object({
       page: z.enum(PAGES).optional(),
       query: z.string().max(120).optional(),
@@ -30,14 +30,21 @@ export const NlIntent = z
       assetName: z.string().max(120).optional(),
       // 动态过滤目标（M26）：page=activity 时可选，直达对应 action 过滤视图
       activityAction: z.enum(ACTIVITY_ACTIONS).optional(),
+      // 关联路径两端（M51）：graph_path 意图必填，界面解析为资产后直达图谱路径高亮
+      fromName: z.string().max(120).optional(),
+      toName: z.string().max(120).optional(),
       title: z.string().max(200).optional(),
       body: z.string().max(4000).optional(),
     }).default({}),
   })
-  // 写类意图必须有明确标题：模型只给意图不给标题时视为未通过白名单校验（走诚实回退）
   .superRefine((v, ctx) => {
+    // 写类意图必须有明确标题：模型只给意图不给标题时视为未通过白名单校验（走诚实回退）
     if (v.intent === "create_issue" && !(v.params.title ?? "").trim()) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["params", "title"], message: "create_issue 需要 title" });
+    }
+    // 路径意图必须两端齐全：缺端视为未通过白名单校验（不猜测）
+    if (v.intent === "graph_path" && (!(v.params.fromName ?? "").trim() || !(v.params.toName ?? "").trim())) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["params", "fromName"], message: "graph_path 需要 fromName 与 toName" });
     }
   });
 export type NlIntent = z.infer<typeof NlIntent>;
@@ -83,6 +90,25 @@ export function ruleParse(text: string): NlIntent | null {
   if (act && act[1] && ACTION_WORDS[act[1]]) {
     return { intent: "navigate", params: { page: "activity", activityAction: ACTION_WORDS[act[1]] } };
   }
+  // 关联路径（M51）：「A和B怎么关联」「A与B有什么关系」「从A到B的路径」等。
+  // 放在搜索兜底之前；引号容错、容忍「查一下/看一下」前缀；两端非空且不同才命中，
+  // 否则落空交给 L2（含 graph_path 白名单）或最终搜索回退——不猜测。
+  const stripQuotes = (s: string) => s.replace(/^[“「'"\s]+|[”」'"\s]+$/g, "").trim();
+  const pathPatterns = [
+    /^(?:查(?:一下|看)?|看|找)?\s*[“「]?(.+?)[”」]?\s*[和与][“「]?(.+?)[”」]?\s*(?:怎么|如何|怎样)(?:关联|相连|连接|连通)$/,
+    /^(?:查(?:一下|看)?|看|找)?\s*[“「]?(.+?)[”」]?\s*[和与][“「]?(.+?)[”」]?\s*(?:有(?:什么|啥|何)(?:关系|关联)|(?:之间)?的(?:关系|关联|关联路径))$/,
+    /^(?:查(?:一下|看)?|看|找)?\s*(?:从|由)?\s*[“「]?(.+?)[”」]?\s*(?:到|至|→|->)[“「]?(.+?)[”」]?\s*的(?:关联)?(?:路径|链路|连线)$/,
+  ];
+  for (const re of pathPatterns) {
+    const m = t.match(re);
+    if (m) {
+      const fromName = stripQuotes(m[1]!);
+      const toName = stripQuotes(m[2]!);
+      if (fromName && toName && fromName !== toName && fromName.length <= 120 && toName.length <= 120) {
+        return { intent: "graph_path", params: { fromName, toName } };
+      }
+    }
+  }
   const search = t.match(/^(?:搜索|查找|找一下?|查一下?)(?:资产|相关资产)?[：:\s]*(.+)$/);
   if (search && search[1]!.trim()) {
     return { intent: "search_assets", params: { query: search[1]!.trim().slice(0, 120) } };
@@ -121,11 +147,12 @@ function buildLlmMessages(text: string, page: string) {
       role: "system" as const,
       content:
         "你是团队资产工作台的界面命令解析器。把用户的中文指令解析为一个 JSON 对象，只输出 JSON，不要输出任何解释。" +
-        `可选意图（白名单，四选一）：\n` +
+        `可选意图（白名单，五选一）：\n` +
         `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals","assetName":"<仅 page=graph 且用户想聚焦某资产时填写资产名>","activityAction":"<仅 page=activity 且用户想看特定类别动态时填写，七选一：agent|asset.archive|asset.restore|review_prepared|release_published|release_rollback|audit.export>"}} —— 跳转页面（proposals 是 Agent 提案审核页；graph+assetName 进入聚焦模式；activity+activityAction 直达对应动作过滤视图）\n` +
         `2) {"intent":"search_assets","params":{"query":"<搜索关键词>"}} —— 搜索资产\n` +
         `3) {"intent":"fill_register_form","params":{"typeKeyHint":"<类型键，可选：${TYPE_KEYS_HINT}>","name":"<资产名，可选>"}} —— 预填登记表单\n` +
         `4) {"intent":"create_issue","params":{"title":"<问题标题，必填>","body":"<问题详情，可选>"}} —— 起草问题工单（界面会先预览，用户确认后才创建）\n` +
+        `5) {"intent":"graph_path","params":{"fromName":"<起点资产名>","toName":"<终点资产名>"}} —— 用户想知道两个资产之间怎么关联/有什么关系/看关联路径时使用（两端缺一不可）\n` +
         "规则：指令含糊时优先 search_assets；用户只是描述问题而非明确要求建工单时，用 search_assets；" +
         "不要发明白名单之外的意图；不要编造属性值。",
     },
