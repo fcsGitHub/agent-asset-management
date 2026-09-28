@@ -31,8 +31,14 @@ playwright-report/
 test-results/
 coverage/
 
+# OS 杂物（Windows / macOS）
+Thumbs.db
+Desktop.ini
+.DS_Store
+
 .playwright-mcp/
-*.png
+# 仅忽略仓库根目录的走查截图；docs/evidence/ 证据图允许入库
+/*.png
 
 .venv-sema/
 tmp/

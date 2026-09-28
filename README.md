@@ -7,7 +7,7 @@
 设计基线：`team_asset_design.html`（29 章）+ `team_asset_goal.md`（目标正文）。
 实施台账：`docs/implementation/`（PLAN / CAPABILITY_MATRIX / ACCEPTANCE / EVIDENCE / HANDOFF）。
 
-## 当前状态（2026-09-20）
+## 当前状态（2026-09-28）
 
 M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 
@@ -53,8 +53,24 @@ M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 | M30 操作者筛选+PNG 导出 | 按操作者过滤（与项目×动作×时间正交同源、actors 同源下发、导出/盖章/实时同口径）、图谱 PNG 位图导出（2x） | EV-052，tests/m30-* |
 | M31 实测走查修复 | 关系断言防重（API 守卫+0022 唯一索引+存量清理）、关系撤回端点（权限口径+审计盖章+动作标签同源）、worker .env 加载器（防 LLM 环境丢失）、走查发现的过时文案修正 | EV-053，tests/m31-* |
 | M32 生命周期走查修复 | 项目成员添加（端点+UI+盖章）、发布快照兜底、回滚 UI（release-sets 历史+管理员按钮）、摘要口径修正；作者分离/成员禁发实测确认；worker 计划任务托管 | EV-054，tests/m32-* |
+| M33 UI 全面翻新 | 设计令牌双主题（浅/暗、跟随系统+手动覆盖、首帧防闪烁）、Agent 对话区对标 kimi-code desktop 重写（气泡/状态药丸/工具卡渐进展开/流式 Markdown/贴底滚动/输入法保护）、自研零依赖安全 Markdown 渲染器（无 dangerouslySetInnerHTML）、SVG 图标集；修复历史运行正文丢失与时间线倒序 | lib/markdown 单测 7 项，详见 HANDOFF |
+| M34 @ 引用+工具网关健壮性 | Composer @ 资产检索引用（chips 随运行落库 context_refs、历史时间线重建）；工具调用 SAVEPOINT 隔离（单工具 SQL 失败不再毒化整轮事务）；asset.getRevision 缺省读 head | tests/m33 三项 |
+| M35 全页面视觉走查 | 全部页面 × 亮/暗双主题真实用户走查；修复资产目录搜索行被挤压缺陷 | 全量保持全绿 |
+| M36 会话管理 | PATCH /sessions/:id 改名/归档（创建者或管理员、FOR UPDATE 防竞态）、已归档会话折叠区可恢复、回复复制按钮、SSE 断线重连如实提示 | tests/m34 五项 |
+| M37 运行状态药丸 | 顶栏静态「已连接」替换为真实运行状态药丸（空闲绿点/流式琥珀脉冲）；「提交整理提案」真实链路与深色主题走查 | 浏览器实测 |
+| M38 思考过程可视化 | 多轮运行的中间 assistant 文本收入可折叠「思考过程（N 轮）」块；发布与通道带真实数据走查（作者分离确认） | 浏览器实测 |
+| M39 布局自主调节+语义候选走查 | 对话/工作区可拖拽分隔条（持久化、键盘微调、双击复位）；语义候选真实抽取→确认/忽略全链路走查 | 浏览器实测 |
+| M40 运行预算实时可视化 | 修复预算默认值从未生效（zod `.partial()` 吞 default，存量运行预算闸门形同虚设）；usage 事件实时用量条（工具次数/tokens/阈值变色）；历史端点补 budget | tests/m40 三项 |
+| M41 工具卡资产直达 | lib/toolRefs 从工具参数/结果解析资产引用，工具卡展开区「相关资产」chips 点击直达详情 | lib 单测 4 项 |
+| M42 待办徽标 | 审批导航琥珀角标、「语义候选」「Agent 提案」标签待处理计数徽标（与列表端点同源，轮询+变更事件即时刷新） | 浏览器实测 |
+| M43 CR 冻结差异视图 | CR 详情变更项携带 base/candidate 固化修订 diff（复用 domain diffRevisions），发布/通道 CR 详情可展开差异卡片 | tests/m43 |
+| M44 正文资产名链接化 | Markdown 渲染器 renderText 钩子 + lib/linkifyAssets：回复正文/思考过程命中资产名渲染为行内链接；修复消息先响应后提交的 read-your-writes 竞态（C08 偶发失败根因） | lib 单测 6 项 + m5-c7c8 加固 |
+| M45 审批队列复用差异视图 | 差异组件抽为共享 CrDiff.tsx，审批队列与发布/通道同一组件同一数据源，无第二份实现 | 浏览器实测 |
+| M46 用量汇总+图谱平行边 | 顶栏会话用量药丸（近 20 次运行 Σ tokens）；资产详情「在图谱中查看」补齐导航闭环；平行边车道分配修复边与标签全部叠合 | 浏览器实测 |
+| M47 CR 评审留痕 | CR 详情补 comments（退回原因自 M2 落库但一直无端点无界面可见），共享留痕区在审批队列与发布/通道两处展示 | tests/m43 增项 |
+| M48 空会话引导提示词 | 空态三张可点击任务卡（检索总结/整理提案/关系缺口检查）经 send(override) 直达真实运行 | 浏览器实测 |
 
-当前测试基线：38 套件 169 项全部通过（M28～M30 提交信息中的"套件"数曾多记 1，M31 起以 vitest 文件数为准）。
+当前测试基线：45 套件 199 项全部通过（42 个 `tests/` 集成套件 + 3 个前端 lib 单测套件；M31 起以 vitest 文件数为准）。M33–M48 迭代明细见 `docs/implementation/HANDOFF.md`。
 
 ## 环境要求
 
@@ -76,7 +92,7 @@ cp .env.example .env
 # 3) 启动 PostgreSQL（端口 5437，数据在 docker 卷 taw_pgdata）
 docker compose up -d postgres
 
-# 4) 数据库迁移（0001–0013，幂等）
+# 4) 数据库迁移（0001–0022，幂等）
 npx tsx scripts/migrate.ts --role=admin
 
 # 5) 启动后端 API（127.0.0.1:4000）
@@ -97,7 +113,7 @@ python -m venv .venv-sema
 
 ```bash
 npx tsc -b tsconfig.json          # 类型检查（TS strict）
-npx vitest run                    # 全量集成测试（62 项，需 PostgreSQL 运行中）
+npx vitest run                    # 全量测试（45 套件 199 项：tests/ 集成 + lib 单测，需 PostgreSQL 运行中）
 npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 token）
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）
@@ -118,9 +134,9 @@ packages/domain/     类型定义默认值、JSON Schema 校验、摘要规范�
 packages/storage/    本地内容寻址 BlobStore（<root>/<teamId>/<sha256>）
 packages/agent-adapter/  DeepSeek Provider（OpenAI 兼容）+ env 加载
 services/semantic-worker/  Python 语义服务（真实 semantica 0.6.8 适配）
-migrations/          0001–0013 SQL 迁移（含 RLS 与受限应用角色）
+migrations/          0001–0022 SQL 迁移（含 RLS 与受限应用角色）
 scripts/             迁移、冒烟、端到端、恢复演练、性能
-tests/               62 项 vitest 集成测试（真实 PG/HTTP/LLM）
+tests/               vitest 集成测试 + 前端 lib 单测（真实 PG/HTTP/LLM）
 docs/implementation/ 计划、能力矩阵、验收台账、证据、交接
 docs/ops/            管理员手册、备份恢复手册、配置说明
 ```
