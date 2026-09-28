@@ -435,7 +435,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
           </main>
         ) : page === "ontology" ? (
           <main className="page-main" aria-label="本体治理">
-            <OntologyPage project={project} me={me} />
+            <OntologyPage project={project} me={me} onOpenAsset={openAssetFromSearch} />
           </main>
         ) : (
         <>

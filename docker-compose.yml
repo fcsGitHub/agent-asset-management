@@ -16,5 +16,15 @@ services:
       timeout: 3s
       retries: 20
 
+  # 图数据库（M49）：本体检索投影库。可再生投影——数据源是 PostgreSQL，
+  # 丢失/漂移由 worker 对账重建，故不挂数据卷。
+  graphdb:
+    image: memgraph/memgraph:2.19.0
+    container_name: taw-graphdb
+    # 查询超时兜底：变长路径展开在病态图上可能长时间占用（查询限深 ≤3，此处双保险）
+    command: ["--query-execution-timeout-sec=10"]
+    ports:
+      - "127.0.0.1:7687:7687"
+
 volumes:
   taw_pgdata:

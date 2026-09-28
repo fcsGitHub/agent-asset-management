@@ -69,13 +69,15 @@ M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 | M46 用量汇总+图谱平行边 | 顶栏会话用量药丸（近 20 次运行 Σ tokens）；资产详情「在图谱中查看」补齐导航闭环；平行边车道分配修复边与标签全部叠合 | 浏览器实测 |
 | M47 CR 评审留痕 | CR 详情补 comments（退回原因自 M2 落库但一直无端点无界面可见），共享留痕区在审批队列与发布/通道两处展示 | tests/m43 增项 |
 | M48 空会话引导提示词 | 空态三张可点击任务卡（检索总结/整理提案/关系缺口检查）经 send(override) 直达真实运行 | 浏览器实测 |
+| M49 图数据库本体检索层 | Memgraph 投影（类型层次/资产/存活关系）+ worker 脏标记对账重建；类闭包/按类检索（图引擎，离线回落 SQL 并如实标注）、多跳邻域、两资产最短路径（图库边集+应用 BFS）；本体页检索卡（状态徽标/手动同步/资产直达），写路径同事务盖脏标记（0023） | tests/m49 十项 + worker 漂移对账实测（1859 团队/293 重建/0 失败） |
 
-当前测试基线：45 套件 199 项全部通过（42 个 `tests/` 集成套件 + 3 个前端 lib 单测套件；M31 起以 vitest 文件数为准）。M33–M48 迭代明细见 `docs/implementation/HANDOFF.md`。
+当前测试基线：46 套件 209 项全部通过（43 个 `tests/` 集成套件 + 3 个前端 lib 单测套件；M31 起以 vitest 文件数为准）。M33–M49 迭代明细见 `docs/implementation/HANDOFF.md`。
 
 ## 环境要求
 
 - Node ≥ 22（开发使用 v24.11.1）、npm 11
 - Docker（Linux 容器）+ `pgvector/pgvector:pg16` 镜像
+- 图数据库（可选，M49 本体检索）：`memgraph/memgraph:2.19.0` 镜像；不启动时系统诚实降级（闭包检索回落 SQL，多跳/路径端点 503）
 - Python 3.11 + `services/semantic-worker/requirements.txt`（可选：语义增强关闭不影响核心流程）
 - DeepSeek API key（可选：Agent 功能需要；其余功能不需要）
 
@@ -89,10 +91,10 @@ npm install
 cp .env.example .env
 #   编辑 .env：DEEPSEEK_API_KEY=你的 key；其余开发默认值可直接用
 
-# 3) 启动 PostgreSQL（端口 5437，数据在 docker 卷 taw_pgdata）
-docker compose up -d postgres
+# 3) 启动 PostgreSQL（端口 5437，数据在 docker 卷 taw_pgdata）与图数据库（可选，本体检索 7687）
+docker compose up -d postgres graphdb
 
-# 4) 数据库迁移（0001–0022，幂等）
+# 4) 数据库迁移（0001–0023，幂等）
 npx tsx scripts/migrate.ts --role=admin
 
 # 5) 启动后端 API（127.0.0.1:4000）
@@ -113,7 +115,7 @@ python -m venv .venv-sema
 
 ```bash
 npx tsc -b tsconfig.json          # 类型检查（TS strict）
-npx vitest run                    # 全量测试（45 套件 199 项：tests/ 集成 + lib 单测，需 PostgreSQL 运行中）
+npx vitest run                    # 全量测试（46 套件 209 项：tests/ 集成 + lib 单测，需 PostgreSQL 运行中）
 npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 token）
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）
@@ -133,6 +135,7 @@ apps/web/            React + Vite 两区工作台
 packages/domain/     类型定义默认值、JSON Schema 校验、摘要规范化、差异
 packages/storage/    本地内容寻址 BlobStore（<root>/<teamId>/<sha256>）
 packages/agent-adapter/  DeepSeek Provider（OpenAI 兼容）+ env 加载
+packages/graph/     图数据库投影与检索（Memgraph/Bolt；闭包·邻域·路径·对账）
 services/semantic-worker/  Python 语义服务（真实 semantica 0.6.8 适配）
 migrations/          0001–0022 SQL 迁移（含 RLS 与受限应用角色）
 scripts/             迁移、冒烟、端到端、恢复演练、性能

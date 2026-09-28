@@ -16,6 +16,7 @@ export default defineConfig({
       exact("@taw/storage", "./packages/storage/src/index.ts"),
       exact("@taw/storage/local-cas", "./packages/storage/src/local-cas.ts"),
       exact("@taw/domain", "./packages/domain/src/index.ts"),
+      exact("@taw/graph", "./packages/graph/src/index.ts"),
       exact("@taw/domain/defaults", "./packages/domain/src/defaults.ts"),
       exact("@taw/domain/validate", "./packages/domain/src/validate.ts"),
       exact("@taw/agent-adapter", "./packages/agent-adapter/src/index.ts"),

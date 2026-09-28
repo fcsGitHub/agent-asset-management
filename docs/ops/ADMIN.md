@@ -42,6 +42,15 @@
 - 候选关系只能以 `status='proposed'` 进入 `relation_assertions`；不参与发布、依赖解析与结题判断。
 - worker 停机时 `/api/v1/semantic/*` 返回 503 `DEPENDENCY_UNAVAILABLE`；其余功能不受影响。
 
+## 图投影（M49）
+
+- 图库（Memgraph，`docker compose up -d graphdb`）只保存可再生投影；PostgreSQL 是唯一事实源。
+- API 写路径（类型/资产/关系变更）同事务盖脏标记，worker 周期重建；启动时自动全团队漂移对账，
+  图库容器重建（内存态丢失）后无需人工干预。
+- 本体治理页「本体检索」卡可看同步状态（在线/离线/待同步/漂移/上次错误）；管理员可点「立即同步」
+  或 `POST /api/v1/graph/sync`（幂等全量重建，团队级毫秒级）。
+- 图库停机不影响任何核心流程：闭包检索回落 SQL（engine 标注），邻域/路径端点 503 如实降级。
+
 ## 升级与迁移
 
 1. 备份（见 BACKUP.md）。

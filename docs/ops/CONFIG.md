@@ -38,6 +38,18 @@
 | --- | --- |
 | `SEMANTIC_WORKER_URL` | `http://127.0.0.1:8100`（每请求读取，可热切换做降级测试） |
 
+## 图数据库（可选，M49 本体检索投影）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `GRAPHDB_URL` | `bolt://127.0.0.1:7687` | Memgraph（Bolt）连接串；`docker compose up -d graphdb` 启动 |
+| `GRAPH_RECONCILE_MS` | `5000` | worker 图投影对账周期（毫秒，≥1000） |
+
+图库是 PostgreSQL 的可再生投影（类型层次 / 资产 / 存活关系），不挂数据卷——
+丢失或漂移由 worker 对账重建。图库不启动时：类闭包/按类检索自动回落 SQL
+（响应 `engine=sql-fallback` 如实标注），多跳邻域与路径端点返回 503
+`DEPENDENCY_UNAVAILABLE`，其余功能不受影响。
+
 ## 生产注意
 
 - 更换 `taw_app` / `taw_admin` 口令（口令在 migrations/0002 中为开发默认值，生产环境

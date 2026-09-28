@@ -2,6 +2,8 @@
 // 从 API 提供给人类管理员。数据全部来自真实端点（GET /types、GET /relation-types、
 // POST /types、POST /relation-types、POST /types|relation-types/migration-preview）。
 // 登记与预演仅管理员可用（服务端二次校验角色，界面隐藏只是第一道门）。
+// M49 起新增「本体检索」卡：图数据库（Memgraph）投影上的类闭包资产检索与
+// 两资产关联路径；图库离线时端点诚实降级，界面如实展示 engine 标注与 503。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Me } from "../App";
@@ -49,7 +51,7 @@ async function downloadOntology(project: ProjectInfo, format: "turtle" | "json")
   URL.revokeObjectURL(url);
 }
 
-export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me }) {
+export function OntologyPage({ project, me, onOpenAsset }: { project?: ProjectInfo; me: Me; onOpenAsset?: (assetId: string) => void }) {
   const [types, setTypes] = useState<TypeInfo[] | null>(null);
   const [relTypes, setRelTypes] = useState<RelTypeInfo[] | null>(null);
   const [error, setError] = useState("");
@@ -110,6 +112,8 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
       </div>
       {notice && <div className="ok-text">{notice}</div>}
 
+      <GraphRetrievalCard project={project} types={types ?? []} isAdmin={isAdmin} onOpenAsset={onOpenAsset} />
+
       <ClassTree roots={roots} childrenOf={childrenOf} />
 
       <RelationTypes relTypes={relTypes} />
@@ -126,6 +130,224 @@ export function OntologyPage({ project, me }: { project?: ProjectInfo; me: Me })
       )}
       {!types && !error && <div className="state">正在加载本体…</div>}
     </div>
+  );
+}
+
+/** M49 本体检索卡：图库状态（在线/离线/待同步/漂移/错误如实展示）+
+ *  按类闭包检索（引擎标注 graph / sql-fallback）+ 两资产关联路径。
+ *  worker 周期对账重建投影；管理员可手动立即同步。 */
+interface GraphStatus {
+  graphDb: { reachable: boolean };
+  projection: {
+    markedAt: string; lastSyncedAt: string | null; nodeCount: number | null; edgeCount: number | null;
+    lastError: string | null; lastErrorAt: string | null; pendingSync: boolean;
+  } | null;
+  drift: {
+    pg: { assets: number; types: number; relations: number };
+    graph: { nodes: number; edges: number } | null;
+    inSync: boolean;
+  };
+}
+interface ClosureSearch {
+  typeKey: string; engine: string; keys: string[];
+  assets: { id: string; name: string; lifecycle: string; type_key: string; type_title: string }[];
+}
+interface PathResult {
+  found: boolean;
+  nodes?: { assetId: string; name: string; typeKey: string }[];
+  edges?: { relId: string; relKey: string; source: string; target: string }[];
+}
+interface AssetLite { id: string; name: string; type_key: string }
+
+function GraphRetrievalCard({ project, types, isAdmin, onOpenAsset }: {
+  project: ProjectInfo;
+  types: TypeInfo[];
+  isAdmin: boolean;
+  onOpenAsset?: (assetId: string) => void;
+}) {
+  const [status, setStatus] = useState<GraphStatus | null>(null);
+  const [statusErr, setStatusErr] = useState("");
+  const [typeKey, setTypeKey] = useState("");
+  const [q, setQ] = useState("");
+  const [search, setSearch] = useState<ClosureSearch | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState("");
+  const [assets, setAssets] = useState<AssetLite[] | null>(null);
+  const [fromId, setFromId] = useState("");
+  const [toId, setToId] = useState("");
+  const [path, setPath] = useState<PathResult | null>(null);
+  const [pathing, setPathing] = useState(false);
+  const [pathErr, setPathErr] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
+
+  const reloadStatus = useCallback(() => {
+    setStatusErr("");
+    api<GraphStatus>("/graph/status", { query: { teamId: project.teamId } })
+      .then(setStatus)
+      .catch((e) => setStatusErr(errorText(e)));
+  }, [project.teamId]);
+
+  useEffect(() => {
+    reloadStatus();
+    void api<AssetLite[]>("/assets/search", { query: { teamId: project.teamId, lifecycle: "all", limit: "200" } })
+      .then(setAssets)
+      .catch(() => setAssets([]));
+  }, [reloadStatus, project.teamId]);
+
+  async function doSync() {
+    setSyncing(true); setSyncMsg("");
+    try {
+      const r = await api<{ nodes: number; edges: number; durationMs: number }>("/graph/sync", {
+        method: "POST", body: { teamId: project.teamId },
+      });
+      setSyncMsg(`已同步：${r.nodes} 节点 · ${r.edges} 边（${r.durationMs}ms）`);
+      reloadStatus();
+    } catch (err) {
+      setSyncMsg(errorText(err));
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function doSearch() {
+    setSearching(true); setSearchErr("");
+    try {
+      setSearch(await api<ClosureSearch>("/ontology/assets-by-type", {
+        query: { teamId: project.teamId, typeKey, lifecycle: "all", limit: "200", ...(q ? { q } : {}) },
+      }));
+    } catch (err) {
+      setSearchErr(errorText(err));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function doPath() {
+    setPathing(true); setPathErr(""); setPath(null);
+    try {
+      setPath(await api<PathResult>("/graph/path", { query: { teamId: project.teamId, from: fromId, to: toId } }));
+    } catch (err) {
+      setPathErr(errorText(err));
+    } finally {
+      setPathing(false);
+    }
+  }
+
+  const activeKeys = [...new Set(types.filter((t) => t.status === "active").map((t) => t.type_key))].sort();
+  const proj = status?.projection ?? null;
+  const assetOptions = (assets ?? []).map((a) => (
+    <option key={a.id} value={a.id}>{a.name.length > 28 ? `${a.name.slice(0, 28)}…` : a.name}（{a.type_key}）</option>
+  ));
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>本体检索（图数据库投影）</h3>
+        {status && (
+          <span className={`chip ${status.graphDb.reachable ? "chip-ok" : "chip-dim"}`}>
+            {status.graphDb.reachable ? "图库在线" : "图库离线 · 闭包检索回落 SQL"}
+          </span>
+        )}
+        {proj?.pendingSync && <span className="chip chip-warn">有变更待同步</span>}
+        {status && status.graphDb.reachable && !status.drift.inSync && <span className="chip chip-warn">投影漂移</span>}
+        {isAdmin && <button disabled={syncing} onClick={() => void doSync()}>{syncing ? "同步中…" : "立即同步"}</button>}
+      </div>
+      <p className="hint" style={{ padding: 0 }}>
+        PostgreSQL 是唯一事实源；图库（Memgraph）保存类型层次 / 资产 / 存活关系的可再生投影，
+        worker 周期对账重建。图库离线时：类闭包检索自动回落 SQL（engine 如实标注），
+        多跳邻域与路径检索暂不可用（503）。
+      </p>
+      {statusErr && <div className="error-text">图库状态不可得：{statusErr}</div>}
+      {proj && (
+        <div className="hint" style={{ padding: 0 }}>
+          上次同步：{proj.lastSyncedAt ? new Date(proj.lastSyncedAt).toLocaleString() : "尚未同步"}
+          {proj.nodeCount !== null && ` · 投影 ${proj.nodeCount} 节点 / ${proj.edgeCount} 边`}
+          {status && ` · 目录源 ${status.drift.pg.assets} 资产 / ${status.drift.pg.types} 类 / ${status.drift.pg.relations} 关系`}
+        </div>
+      )}
+      {proj?.lastError && <div className="error-text">上次同步失败：{proj.lastError}</div>}
+      {syncMsg && <div className="ok-text">{syncMsg}</div>}
+
+      <div className="onto-grid" style={{ marginTop: 8 }}>
+        <label>按类检索（含全部子类，类闭包）
+          <select value={typeKey} onChange={(e) => { setTypeKey(e.target.value); setSearch(null); setSearchErr(""); }}>
+            <option value="">选择类型…</option>
+            {activeKeys.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </label>
+        <label>名称过滤（可空）
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="资产名包含…" disabled={!typeKey} />
+        </label>
+      </div>
+      <div className="btn-row">
+        <button className="primary" disabled={searching || !typeKey} onClick={() => void doSearch()}>{searching ? "检索中…" : "检索资产"}</button>
+      </div>
+      {searchErr && <div className="error-text">{searchErr}</div>}
+      {search && (
+        <>
+          <div className="hint" style={{ padding: 0 }}>
+            闭包引擎：<span className={`chip ${search.engine === "graph" ? "chip-ok" : "chip-dim"}`}>{search.engine === "graph" ? "图数据库" : "SQL 回落"}</span>
+            {" · 闭包类键："}{search.keys.map((k) => <span key={k} className="badge" style={{ marginRight: 4 }}>{k}</span>)}
+          </div>
+          {search.assets.length === 0 && <div className="hint">闭包内没有匹配的资产。</div>}
+          {search.assets.length > 0 && (
+            <table className="list">
+              <thead><tr><th>资产</th><th>类型</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                {search.assets.map((a) => (
+                  <tr key={a.id}>
+                    <td>{a.name}</td>
+                    <td><span className="badge">{a.type_key}</span> {a.type_title}</td>
+                    <td><span className={`chip ${a.lifecycle === "active" ? "chip-ok" : "chip-dim"}`}>{a.lifecycle}</span></td>
+                    <td>{onOpenAsset && <button onClick={() => onOpenAsset(a.id)}>打开</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      <div className="onto-grid" style={{ marginTop: 12 }}>
+        <label>路径起点
+          <select value={fromId} onChange={(e) => { setFromId(e.target.value); setPath(null); setPathErr(""); }}>
+            <option value="">选择资产…</option>
+            {assetOptions}
+          </select>
+        </label>
+        <label>路径终点
+          <select value={toId} onChange={(e) => { setToId(e.target.value); setPath(null); setPathErr(""); }}>
+            <option value="">选择资产…</option>
+            {assetOptions}
+          </select>
+        </label>
+      </div>
+      <div className="btn-row">
+        <button className="primary" disabled={pathing || !fromId || !toId || fromId === toId} onClick={() => void doPath()}>{pathing ? "查找中…" : "查询关联路径"}</button>
+      </div>
+      {pathErr && <div className="error-text">{pathErr}</div>}
+      {path && !path.found && <div className="hint">两资产在当前关系图中没有关联路径（图库边集内不可达）。</div>}
+      {path?.found && path.nodes && path.edges && (
+        <div className="onto-path">
+          {path.nodes.map((n, i) => {
+            const prevEdge = i > 0 ? path.edges![i - 1] : undefined;
+            return (
+              <span key={n.assetId}>
+                {i > 0 && prevEdge && (
+                  <span className="onto-parent" style={{ margin: "0 6px" }}>
+                    {prevEdge.source === path.nodes![i - 1]!.assetId ? `${prevEdge.relKey} →` : `← ${prevEdge.relKey}`}
+                  </span>
+                )}
+                <button className="badge" title={`${n.name}（${n.typeKey}）`} onClick={() => onOpenAsset?.(n.assetId)}>{n.name}</button>
+              </span>
+            );
+          })}
+          <span className="hint" style={{ marginLeft: 8 }}>({path.edges!.length} 跳)</span>
+        </div>
+      )}
+      {assets === null && <div className="state">加载资产列表…</div>}
+    </section>
   );
 }
 

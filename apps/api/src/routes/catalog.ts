@@ -18,6 +18,7 @@ import {
   inheritanceViolations,
 } from "@taw/domain/validate";
 import { stableStringify } from "@taw/domain/digest";
+import { markGraphDirty } from "@taw/graph";
 import {
   DEFAULT_RELATION_TYPES,
   DEFAULT_TYPE_DEFINITIONS,
@@ -224,6 +225,8 @@ export async function createRelationAssertion(
       }
       throw err;
     }
+    // 图投影脏标记（M49）：与断言写入同事务提交，worker 周期重建图库
+    await markGraphDirty(client, teamId);
   };
   if (existingClient) await run(existingClient);
   else await withTeam(teamId, run);
@@ -304,6 +307,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [body.teamId, id, body.typeKey, body.version, body.title, JSON.stringify(body.jsonSchema), JSON.stringify(body.unitVocabularies), body.parentTypeVersionId ?? null, auth.userId]
       );
+      // 图投影脏标记（M49）：类层次 SUBCLASS_OF 边可能变化
+      await markGraphDirty(client, body.teamId);
     });
     return reply.code(201).send({ teamId: body.teamId, typeVersionId: id, typeKey: body.typeKey, version: body.version });
   });
@@ -998,6 +1003,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
           [body.teamId, assetId, label]
         );
       }
+      // 图投影脏标记（M49）：新增资产节点
+      await markGraphDirty(client, body.teamId);
     });
     return reply.code(201).send({ teamId: body.teamId, assetId, revisionId });
   });
@@ -1154,6 +1161,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1, $2, 'asset.archive', 'asset', $3, $4)`,
         [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
       );
+      // 图投影脏标记（M49）：lifecycle 变更
+      await markGraphDirty(client, body.teamId);
     });
     return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "archived" });
   });
@@ -1185,6 +1194,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1, $2, 'asset.restore', 'asset', $3, $4)`,
         [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
       );
+      // 图投影脏标记（M49）：lifecycle 变更
+      await markGraphDirty(client, body.teamId);
     });
     return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "active" });
   });
@@ -1292,6 +1303,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
          JSON.stringify({ reason: body.reason, relationType: rel.type_key,
            source: rel.source_name, target: rel.target_name })]
       );
+      // 图投影脏标记（M49）：存活边移除
+      await markGraphDirty(client, body.teamId);
     });
     return reply.code(200).send({ teamId: body.teamId, relationId, status: "withdrawn" });
   });
