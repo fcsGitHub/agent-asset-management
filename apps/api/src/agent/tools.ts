@@ -1,8 +1,11 @@
 // 受控工具网关（设计 17/18 章）。
 // 分级：read（授权范围内自动执行）/ draft（草稿写入）/ human（人类高权动作，永不注册给 Agent）。
 // 每次调用：校验主体与租户、重新鉴权、预算、持久化调用记录（含 denied）。
+// M50 起含图数据库检索工具（graph.*）：类闭包资产检索、关联路径、多跳邻域——
+// 全部显式携带 ctx.teamId 查询，租户隔离与图投影一致。
 import type { PoolClient } from "pg";
 import { canonicalDigest } from "@taw/domain/digest";
+import { GraphUnavailableError, findShortestPath, neighborhood, resolveTypeClosure } from "@taw/graph";
 
 export type ToolTier = "read" | "draft";
 
@@ -118,7 +121,167 @@ export const READONLY_TOOLS: ToolDef[] = [
       return { outgoing: out.rows, incoming: inc.rows };
     },
   },
+  {
+    name: "graph.assetsByType",
+    tier: "read",
+    description:
+      "按资产类型检索资产（本体检索：默认包含该类型及其全部子类的类闭包，如检索 analysis.asset 会同时命中其子类 sim.report 下的资产）。" +
+      "图数据库驱动；图库不可用时自动回落 SQL 并在 engine 字段如实标注（graph / sql-fallback / sql）。只返回 active 资产，最多 20 条。",
+    parameters: {
+      type: "object",
+      properties: {
+        typeKey: { type: "string", description: "资产类型键（type_key），如 simulation.model" },
+        q: { type: "string", description: "名称关键词（可选）" },
+        includeSubclasses: { type: "boolean", description: "是否包含全部子类，默认 true" },
+      },
+      required: ["typeKey"],
+    },
+    async execute(client, ctx, args) {
+      const typeKey = String(args.typeKey ?? "").trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9.\-]{0,63}$/.test(typeKey)) {
+        throw new Error("typeKey 非法：字母开头，仅含字母/数字/点/连字符，如 simulation.model");
+      }
+      const includeSubclasses = args.includeSubclasses === undefined ? true : Boolean(args.includeSubclasses);
+      const q = String(args.q ?? "").slice(0, 100);
+      let engine: "graph" | "sql-fallback" | "sql" = "sql";
+      let keys = [typeKey];
+      if (includeSubclasses) {
+        const r = await resolveTypeClosure((sql, params) => client.query(sql, params as never[]), ctx.teamId, typeKey);
+        engine = r.engine;
+        keys = r.keys;
+      }
+      const { rows } = await client.query(
+        `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.title AS type_title
+           FROM assets a
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE a.team_id = $1 AND tv.type_key = ANY($2::text[])
+            AND ($3 = '' OR a.name ILIKE '%' || $3 || '%') AND a.lifecycle = 'active'
+          ORDER BY a.name LIMIT 20`,
+        [ctx.teamId, keys, q]
+      );
+      return { engine, keys, count: rows.length, assets: rows };
+    },
+  },
+  {
+    name: "graph.path",
+    tier: "read",
+    description:
+      "查询两个资产之间的最短关联路径（沿已确认关系，无向）。两端均可传 assetId 或 name（名称精确匹配优先，唯一模糊命中可用，多命中会列出候选要求改用 id）。" +
+      "找不到路径时如实返回 found=false；图数据库不可用时如实报错（不做降级猜测）。",
+    parameters: {
+      type: "object",
+      properties: {
+        fromAssetId: { type: "string", description: "起点资产 id（与 fromName 二选一）" },
+        fromName: { type: "string", description: "起点资产名（与 fromAssetId 二选一）" },
+        toAssetId: { type: "string", description: "终点资产 id（与 toName 二选一）" },
+        toName: { type: "string", description: "终点资产名（与 toAssetId 二选一）" },
+      },
+      required: [],
+    },
+    async execute(client, ctx, args) {
+      const from = await resolveAssetRef(client, ctx.teamId, { assetId: args.fromAssetId, name: args.fromName }, "from");
+      const to = await resolveAssetRef(client, ctx.teamId, { assetId: args.toAssetId, name: args.toName }, "to");
+      if (from.id === to.id) throw new Error("from 与 to 是同一资产");
+      let path;
+      try {
+        path = await findShortestPath(ctx.teamId, from.id, to.id);
+      } catch (err) {
+        if (err instanceof GraphUnavailableError) {
+          throw new Error(`图数据库不可用，路径检索暂不可用：${err.message}`);
+        }
+        throw err;
+      }
+      if (!path) return { found: false, from, to };
+      return {
+        found: true,
+        hops: path.edges.length,
+        from,
+        to,
+        nodes: path.nodes.map((n) => ({ assetId: n.assetId, name: n.name, typeKey: n.typeKey })),
+        edges: path.edges.map((e) => ({ relKey: e.relKey, source: e.source, target: e.target })),
+      };
+    },
+  },
+  {
+    name: "graph.neighbors",
+    tier: "read",
+    description:
+      "查看某资产的多跳关系邻域（图数据库；深度 1–3，默认 2）。返回邻域内的资产与关系边（不含类型层次边）。可传 assetId 或 name。",
+    parameters: {
+      type: "object",
+      properties: {
+        assetId: { type: "string", description: "资产 id（与 name 二选一）" },
+        name: { type: "string", description: "资产名（与 assetId 二选一）" },
+        depth: { type: "number", description: "跳数 1–3，默认 2" },
+      },
+      required: [],
+    },
+    async execute(client, ctx, args) {
+      const asset = await resolveAssetRef(client, ctx.teamId, { assetId: args.assetId, name: args.name }, "asset");
+      const depth = args.depth === undefined ? 2 : Math.min(Math.max(Math.trunc(Number(args.depth)), 1), 3);
+      let sub;
+      try {
+        sub = await neighborhood(ctx.teamId, asset.id, depth);
+      } catch (err) {
+        if (err instanceof GraphUnavailableError) {
+          throw new Error(`图数据库不可用，邻域检索暂不可用：${err.message}`);
+        }
+        throw err;
+      }
+      if (!sub.seed) {
+        return { found: false, reason: "projection-stale", hint: "该资产尚未同步进图库投影，请稍候重试", assetId: asset.id, name: asset.name };
+      }
+      return {
+        found: true,
+        depth,
+        assetId: asset.id,
+        name: asset.name,
+        nodes: sub.nodes.map((n) => ({ assetId: n.assetId, name: n.name, typeKey: n.typeKey })),
+        edges: sub.edges.map((e) => ({ relKey: e.relKey, source: e.source, target: e.target })),
+      };
+    },
+  },
 ];
+
+/** 资产端点解析（graph.path / graph.neighbors 共用）：assetId 优先；name 精确匹配优先，
+ *  唯一模糊命中可用，多命中列出候选让模型改用 id。租户内解析（RLS 上下文由调用方事务决定）。 */
+async function resolveAssetRef(
+  client: PoolClient,
+  teamId: string,
+  ref: { assetId?: unknown; name?: unknown },
+  side: string
+): Promise<{ id: string; name: string }> {
+  const assetId = typeof ref.assetId === "string" ? ref.assetId.trim() : "";
+  const name = typeof ref.name === "string" ? ref.name.trim() : "";
+  if (assetId) {
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw new Error(`${side}.assetId 不是合法 UUID`);
+    const { rows } = await client.query<{ id: string; name: string }>(
+      `SELECT id, name FROM assets WHERE team_id = $1 AND id = $2`,
+      [teamId, assetId]
+    );
+    if (!rows[0]) throw new Error(`${side}.assetId 不存在于本团队`);
+    return { id: rows[0].id, name: rows[0].name };
+  }
+  if (name) {
+    if (name.length > 256) throw new Error(`${side}.name 过长`);
+    const exact = await client.query<{ id: string; name: string }>(
+      `SELECT id, name FROM assets WHERE team_id = $1 AND name = $2 LIMIT 2`,
+      [teamId, name]
+    );
+    if (exact.rows.length === 1) return { id: exact.rows[0].id, name: exact.rows[0].name };
+    const like = await client.query<{ id: string; name: string }>(
+      `SELECT id, name FROM assets WHERE team_id = $1 AND name ILIKE '%' || $2 || '%' ORDER BY name LIMIT 6`,
+      [teamId, name]
+    );
+    if (like.rows.length === 1) return { id: like.rows[0].id, name: like.rows[0].name };
+    if (like.rows.length === 0) throw new Error(`${side}.name「${name}」未命中任何本团队资产`);
+    throw new Error(
+      `${side}.name「${name}」命中多个资产，请改用 assetId：` +
+        like.rows.map((r) => `${r.name}(${r.id.slice(0, 8)}…)`).join("、")
+    );
+  }
+  throw new Error(`${side} 须提供 assetId 或 name`);
+}
 
 export const DRAFT_TOOLS: ToolDef[] = [
   {

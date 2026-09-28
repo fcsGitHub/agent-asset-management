@@ -20,24 +20,31 @@ function fromArgs(args: unknown, refs: ToolAssetRef[], seen: Set<string>): void 
   pushRef(refs, seen, a.assetId ?? a.asset_id, a.assetName ?? a.asset_name);
 }
 
+/** 资产条目数组扫描（M50 泛化）：命中项须带 name 且带 type_key/head_revision_id 形态——
+ *  id 是资产 id 才可作为跳转目标（修订 id 等一律不取）。 */
+function scanAssetItems(list: unknown[], refs: ToolAssetRef[], seen: Set<string>): void {
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.name === "string" && ("type_key" in o || "head_revision_id" in o)) {
+      pushRef(refs, seen, o.id, o.name);
+    }
+  }
+}
+
 /** 从工具结果提取：数组取每项 {id,name}（asset.search 命中列表）；
  *  对象取自身 {id,name}（单资产/修订读取结果不映射——修订 id 不是资产 id，
- *  仅当对象带 asset_id/assetId 字段时才取）。 */
+ *  仅当对象带 asset_id/assetId 字段时才取）；对象带 assets 数组时扫描之
+ *  （graph.assetsByType 检索结果的「相关资产」chips，M50）。 */
 function fromResult(result: unknown, refs: ToolAssetRef[], seen: Set<string>): void {
   if (Array.isArray(result)) {
-    for (const item of result) {
-      if (typeof item !== "object" || item === null) continue;
-      const o = item as Record<string, unknown>;
-      // 搜索结果项：id 是资产 id（带 name 且带 type_key/head_revision_id 形态）
-      if (typeof o.name === "string" && ("type_key" in o || "head_revision_id" in o)) {
-        pushRef(refs, seen, o.id, o.name);
-      }
-    }
+    scanAssetItems(result, refs, seen);
     return;
   }
   if (typeof result === "object" && result !== null) {
     const o = result as Record<string, unknown>;
     pushRef(refs, seen, o.assetId ?? o.asset_id, o.assetName ?? o.asset_name);
+    if (Array.isArray(o.assets)) scanAssetItems(o.assets, refs, seen);
   }
 }
 

@@ -17,8 +17,8 @@ import {
   graphPing,
   neighborhood,
   recordSyncFailure,
+  resolveTypeClosure,
   syncTeamAndRecord,
-  typeClosureKeys,
 } from "@taw/graph";
 
 async function teamRole(userId: string, teamId: string): Promise<string> {
@@ -126,15 +126,10 @@ export async function graphRoutes(app: FastifyInstance): Promise<void> {
     if (!isUuid(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     if (!/^[a-zA-Z][a-zA-Z0-9.\-]{0,63}$/.test(typeKey)) throw ERR.INVALID("typeKey 查询参数缺失");
     await teamRole(auth.userId, teamId);
-    try {
-      const keys = await typeClosureKeys(teamId, typeKey);
-      if (keys) return { teamId, typeKey, engine: "graph", keys };
-      // 图可达但该类不在投影中：如实回落 SQL，避免"图中无此类"被当成"无子类"
-    } catch (err) {
-      if (!(err instanceof GraphUnavailableError)) throw err;
-    }
-    const keys = await sqlClosure(teamId, typeKey);
-    return { teamId, typeKey, engine: "sql-fallback", keys };
+    const { engine, keys } = await withTeam(teamId, (client) =>
+      resolveTypeClosure((sql, params) => client.query(sql, params as never[]), teamId, typeKey)
+    );
+    return { teamId, typeKey, engine, keys };
   });
 
   // ---------- 按类检索资产（含闭包） ----------
@@ -149,16 +144,10 @@ export async function graphRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
 
-    let engine = "graph";
-    let keys: string[] | null = null;
-    try {
-      keys = await typeClosureKeys(teamId, typeKey);
-      if (!keys) engine = "sql-fallback";
-    } catch (err) {
-      if (!(err instanceof GraphUnavailableError)) throw err;
-      engine = "sql-fallback";
-    }
-    if (!keys) keys = await sqlClosure(teamId, typeKey);
+    const closure = await withTeam(teamId, (client) =>
+      resolveTypeClosure((sql, params) => client.query(sql, params as never[]), teamId, typeKey)
+    );
+    const { engine, keys } = closure;
 
     const rows = await withTeam(teamId, async (client) =>
       client.query(
@@ -230,22 +219,5 @@ export async function graphRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
     return { teamId, from, to, found: path !== null, ...(path ?? {}) };
-  });
-}
-
-/** SQL 闭包（图库离线的诚实回落）：版本级递归 + type_key 去重。 */
-async function sqlClosure(teamId: string, typeKey: string): Promise<string[]> {
-  return withTeam(teamId, async (client) => {
-    const { rows } = await client.query<{ type_key: string }>(
-      `WITH RECURSIVE tree AS (
-         SELECT id, type_key FROM asset_type_versions
-          WHERE team_id = $1 AND type_key = $2 AND status = 'active'
-         UNION
-         SELECT c.id, c.type_key FROM asset_type_versions c
-          JOIN tree t ON c.team_id = $1 AND c.parent_type_version_id = t.id
-       ) SELECT DISTINCT type_key FROM tree`,
-      [teamId, typeKey]
-    );
-    return rows.map((r) => r.type_key);
   });
 }

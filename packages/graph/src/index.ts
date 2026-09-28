@@ -26,3 +26,8 @@ export {
   type GraphEdge,
 } from "./queries.js";
 export { markGraphDirty, type SqlClient } from "./state.js";
+export {
+  sqlTypeClosure,
+  resolveTypeClosure,
+  type ClosureResolution,
+} from "./fallback.js";

@@ -32,6 +32,23 @@ describe("toolAssetRefs", () => {
       .toEqual([{ id: B, name: undefined }]);
   });
 
+  it("graph.assetsByType 对象结果的 assets 数组提取为 chips；无 type_key 形态的数组不误提", () => {
+    const result = {
+      engine: "graph",
+      keys: ["analysis.asset", "sim.report"],
+      count: 2,
+      assets: [
+        { id: A, name: "轨道传播模型 A", type_key: "sim.report", lifecycle: "active" },
+        { id: B, name: "转移轨道分析报告", type_key: "sim.report", lifecycle: "active" },
+      ],
+    };
+    expect(toolAssetRefs({ name: "graph.assetsByType", args: { typeKey: "analysis.asset" }, result }))
+      .toEqual([{ id: A, name: "轨道传播模型 A" }, { id: B, name: "转移轨道分析报告" }]);
+    // graph.path 的 nodes 用 assetId 键且无 type_key 形态——不满足资产条目契约，不误提
+    const path = { found: true, hops: 1, nodes: [{ assetId: A, name: "轨道传播模型 A" }], edges: [] };
+    expect(toolAssetRefs({ name: "graph.path", args: {}, result: path })).toEqual([]);
+  });
+
   it("非法 id / 非对象结果 / 空参数一律如实为空", () => {
     expect(toolAssetRefs({ name: "asset.search", args: { assetId: "not-a-uuid" } })).toEqual([]);
     expect(toolAssetRefs({ name: "external.notify", args: null, result: "ok" })).toEqual([]);
