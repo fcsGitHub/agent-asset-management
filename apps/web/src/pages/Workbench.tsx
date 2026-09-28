@@ -5,6 +5,7 @@ import type { Me } from "../App";
 import { DashboardPage, ActivityPage, ApprovalsPage } from "../components/ProjectPages";
 import { RelationGraph } from "../components/RelationGraph";
 import { OntologyPage } from "../components/OntologyPage";
+import { NeighborhoodCard } from "../components/NeighborhoodCard";
 import { SemanticPanel } from "../components/SemanticPanel";
 import { AgentProposals } from "../components/AgentProposals";
 import { AgentPane } from "../components/AgentPane";
@@ -692,6 +693,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 projectId={project.projectId}
                 assetId={assetId}
                 role={me.teams.find((t) => t.teamId === project.teamId)?.role ?? "member"}
+                onOpenAsset={openAssetFromSearch}
                 onOpenGraph={(id) => {
                   setGraphFocus({ id, nonce: Date.now() });
                   setPage("graph");
@@ -885,7 +887,7 @@ interface CRDetail {
 }
 interface ChannelHead { asset_id: string; asset_name: string; revision_id: string; revision_seq: number; version_label: string | null; updated_at: string }
 
-function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph }: { teamId: string; projectId: string; assetId: string; role: string; onOpenGraph?: (assetId: string) => void }) {
+function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpenAsset }: { teamId: string; projectId: string; assetId: string; role: string; onOpenGraph?: (assetId: string) => void; onOpenAsset?: (assetId: string) => void }) {
   const [detail, setDetail] = useState<AssetDetail | null>(null);
   const [rels, setRels] = useState<Relations | null>(null);
   const [error, setError] = useState("");
@@ -992,6 +994,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph }: { t
           </div>
         </div>
       )}
+      <NeighborhoodCard teamId={teamId} assetId={assetId} onOpenAsset={onOpenAsset} />
     </>
   );
 }

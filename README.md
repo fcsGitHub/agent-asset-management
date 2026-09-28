@@ -72,8 +72,9 @@ M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 | M49 图数据库本体检索层 | Memgraph 投影（类型层次/资产/存活关系）+ worker 脏标记对账重建；类闭包/按类检索（图引擎，离线回落 SQL 并如实标注）、多跳邻域、两资产最短路径（图库边集+应用 BFS）；本体页检索卡（状态徽标/手动同步/资产直达），写路径同事务盖脏标记（0023） | tests/m49 十项 + worker 漂移对账实测（1859 团队/293 重建/0 失败） |
 | M50 Agent 图检索工具 | 工具网关新增三只读工具：graph.assetsByType（类闭包检索，离线回落 SQL 如实标注 engine）、graph.path（两资产关联路径，assetId/名称两用，歧义列候选）、graph.neighbors（多跳邻域）；闭包解析抽为 @taw/graph resolveTypeClosure 与 API 路由同源；toolRefs 泛化使图工具卡带「相关资产」chips | tests/m50 八项 + 真实 DeepSeek 走查（问出 2 跳关联链与闭包检索，引擎标注如实） |
 | M51 NL 关联路径直达图谱 | ⌘K 说「A和B怎么关联/A与B有什么关系/从A到B的路径」→ L1 规则（引号/查一下前缀容错）或 L2 白名单（新增第五意图 graph_path，缺端不通过）→ 图谱页路径模式：横幅链条（relKey 箭头按真实方向、节点可点）+ 链上边加粗提色/其余暗化 + 退出按钮；未找到/图库离线如实横幅提示；空会话任务卡新增关联路径示例 | tests/m51 八项 + 浏览器实测（一句话直达高亮 2 跳链路） |
+| M52 资产详情多跳关联 | 资产详情新增「多跳关联（图数据库）」卡：跳数 1–3 可选，graph.neighbors 邻域 + 前端 BFS（lib/hopChains 纯函数）为每个关联资产生成从本资产出发的最短关联链（relKey 箭头按真实方向，终点可点直达）；图库停机 503/投影滞后如实提示、恢复自愈 | lib 单测 4 项 + 浏览器实测（含 docker stop 图库降级→恢复自愈） |
 
-当前测试基线：48 套件 226 项全部通过（45 个 `tests/` 集成套件 + 3 个前端 lib 单测套件；M31 起以 vitest 文件数为准）。M33–M51 迭代明细见 `docs/implementation/HANDOFF.md`。
+当前测试基线：49 套件 230 项全部通过（45 个 `tests/` 集成套件 + 4 个前端 lib 单测套件；M31 起以 vitest 文件数为准）。M33–M52 迭代明细见 `docs/implementation/HANDOFF.md`。
 
 ## 环境要求
 
@@ -117,7 +118,7 @@ python -m venv .venv-sema
 
 ```bash
 npx tsc -b tsconfig.json          # 类型检查（TS strict）
-npx vitest run                    # 全量测试（48 套件 226 项：tests/ 集成 + lib 单测，需 PostgreSQL 运行中）
+npx vitest run                    # 全量测试（49 套件 230 项：tests/ 集成 + lib 单测，需 PostgreSQL 运行中）
 npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 token）
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）
