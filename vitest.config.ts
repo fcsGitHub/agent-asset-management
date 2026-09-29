@@ -22,6 +22,7 @@ export default defineConfig({
       exact("@taw/agent-adapter", "./packages/agent-adapter/src/index.ts"),
       exact("@taw/api/server", "./apps/api/src/server.ts"),
       exact("@taw/api", "./apps/api/src/server.ts"),
+      exact("@taw/api/routes/catalog", "./apps/api/src/routes/catalog.ts"),
       exact("@taw/worker/dispatcher", "./apps/worker/src/dispatcher.ts"),
       exact("@taw/worker", "./apps/worker/src/worker.ts"),
     ],

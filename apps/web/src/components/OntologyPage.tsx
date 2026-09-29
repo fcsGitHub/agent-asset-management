@@ -524,11 +524,46 @@ function RegisterType({ project, types, unitVocab, onDone }: {
   const [sampleText, setSampleText] = useState("");
   const [inferNotes, setInferNotes] = useState<string[]>([]);
   const [inferring, setInferring] = useState(false);
+  // M61 自然语言草稿：真实 LLM 产出属性行填入表单（人工确认微调后才登记）
+  const [describeText, setDescribeText] = useState("");
+  const [describing, setDescribing] = useState(false);
+  const [draftMeta, setDraftMeta] = useState("");
   const built = useMemo(() => fieldsToSchema(fields), [fields]);
 
   useEffect(() => {
     if (mode === "form") setSchemaText(JSON.stringify(built.jsonSchema, null, 2));
   }, [mode, built]);
+
+  async function runDescribe(): Promise<void> {
+    setError(""); setDraftMeta("");
+    if (describeText.trim().length < 4) { setError("请先描述类型（至少 4 个字），如「仿真报告：坐标系枚举 ECI/ECEF，报告编号必填」"); return; }
+    setDescribing(true);
+    try {
+      const res = await api<{
+        typeKey?: string; title?: string;
+        fields: SchemaFieldDraft[];
+        jsonSchema: object; problems: string[];
+        model: string; tokens: number;
+      }>("/types/describe-schema", {
+        method: "POST",
+        body: { teamId: project.teamId, description: describeText.trim() },
+      });
+      setFields(res.fields.map((f) => ({
+        key: f.key, type: f.type, required: f.required,
+        ...(f.enumValues !== undefined ? { enumValues: f.enumValues } : {}),
+        ...(f.minimum !== undefined ? { minimum: f.minimum } : {}),
+        ...(f.maximum !== undefined ? { maximum: f.maximum } : {}),
+        ...(f.items !== undefined ? { items: f.items } : {}),
+      })));
+      if (res.typeKey && !typeKey) setTypeKey(res.typeKey);
+      if (res.title) setTitle((cur) => cur || res.title!);
+      setDraftMeta(`AI 草稿已填入（${res.model} · ${res.tokens} tokens）——请人工确认微调后再登记`);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setDescribing(false);
+    }
+  }
 
   /** 样例文本解析：整体 JSON（对象或数组）优先，失败按行逐个解析（每行一个对象）。 */
   function parseSamples(): { samples: unknown[]; parseError: string } {
@@ -656,6 +691,21 @@ function RegisterType({ project, types, unitVocab, onDone }: {
       </label>
       {mode === "form" && (
         <div style={{ marginBottom: 8 }}>
+          <label>
+            用一句话描述类型（M61，AI 草稿——只填表单不落库，人工确认后登记）
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <textarea
+                rows={2}
+                value={describeText}
+                onChange={(e) => { setDescribeText(e.target.value); setDraftMeta(""); }}
+                placeholder="如：仿真报告类型：坐标系枚举 ECI/ECEF/LVLH，报告编号必填字符串，评审评分 0-10 整数"
+                aria-label="类型描述"
+                style={{ flex: 1, resize: "vertical" }}
+              />
+              <button disabled={describing} onClick={() => void runDescribe()}>{describing ? "生成中…" : "AI 生成草稿"}</button>
+            </div>
+          </label>
+          {draftMeta && <div className="ok-text" style={{ marginTop: 4 }}>{draftMeta}</div>}
           <table className="list">
             <thead>
               <tr><th>属性名</th><th>类型</th><th>必填</th><th>约束</th><th></th></tr>

@@ -620,15 +620,34 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    1/2 个样例中出现」未设必填、validStepSeconds.min 类型冲突如实回落宽松+注明、
    嵌套 required 展开正确 → 登记m60.inferred 成功。截图：m60-ui-form-builder、
    m60-ui-infer。
+   M61 已完成（自然语言生成 schema 草稿，M60 候选首位；调研笔记
+   research-M61-describe-schema.md）。POST /types/describe-schema（成员可用、零
+   写入）：真实 DeepSeek 严格 JSON → SchemaDraft 白名单（zod strictObject：未知
+   字段拒绝、类型六枚举、1..24 行、长度上限）→ fieldsToSchema 键约束复核 →
+   compileTypeSchema 防御复核，四层防线；key 未配置 503 如实降级不伪造（Agent
+   无 key 不 mock 同口径）。UI：表单构建模式顶部「用一句话描述类型」+「AI 生成
+   草稿」——回填属性行与 typeKey/title 建议（只填空位不覆盖已填）、meta 显示
+   模型与 tokens、「请人工确认微调后再登记」常驻。三通道（表单/样例推断/自然
+   语言）汇于同一表单与质量门。vitest alias 补 @taw/api/routes/catalog。
+   tests/m61 四项：白名单五类拒绝（未知字段/坏类型/空行/超 24 行/required 非
+   boolean）、真实 DeepSeek 草稿（结构+可编译+枚举识别+零写入：types 列表前后
+   不变）、replace-me 哨兵 503（stubEnv，M31 口径）、越权 404/短描述 422。
+   浏览器实测全链路：「热控仿真报告：坐标系枚举 ECI/ECEF/LVLH 必填；报告编号
+   必填；温度上限 0-500 整数；标签字符串数组」→ 331 tokens 草稿四属性全对
+   （coordinateSystem 枚举/reportNo 必填/temperatureLimit 0-500/tags array）→
+   LLM 建议 typeKey sim.report 与既有类型撞名（正好验证人工确认环节）→ 改
+   m61.ai.report → 登记成功入类型树。截图：m61-ui-ai-draft。schema 生命周期
+   四段就此齐备：便捷设定（M60+M61）→ 入库/更新强制（M59）→ 测试门禁（M58）
+   → 发布复核（M59/M58）。
+   全量 61 套件 300 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M60 后，按性价比排序）：自然语言生成 schema（对 Agent/⌘K 说
-   「我要一个 XX 类型」→ LLM 意图产出草稿 schema 进表单模式，人工确认后登记——
-   LLM 只产草稿不落库，权限语义与 NL 命令栏一致）；schema 约束的前端预填（登记
-   表单按 min/max/pattern 输入前提示）；bundle 离线校验/回导工具；门禁类型 UI
-   提示前移；调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
+   可选后续方向（M61 后，按性价比排序）：AI 草稿质量反馈环（登记后「AI 草稿微调
+   了哪些」轻量回传，反哺 prompt——需先攒真实使用样本）；schema 约束的前端预填
+   （登记表单按 min/max/pattern 输入前提示）；bundle 离线校验/回导工具；门禁类型
+   UI 提示前移；调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
    lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
    （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
    BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。

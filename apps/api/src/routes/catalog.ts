@@ -19,7 +19,31 @@ import {
 } from "@taw/domain/validate";
 import { stableStringify } from "@taw/domain/digest";
 import { buildSnippets } from "@taw/domain/snippets";
-import { inferSchemaFromSamples } from "@taw/domain/schema-builder";
+import { inferSchemaFromSamples, fieldsToSchema } from "@taw/domain/schema-builder";
+import { DeepSeekProvider } from "@taw/agent-adapter/deepseek";
+import { extractJson } from "./nl.js";
+
+/** M61 LLM 草稿白名单：未知字段拒绝（strict）、形状与 SchemaFieldDraft 对齐、数量与长度上限。 */
+export const SchemaDraft = z
+  .object({
+    typeKey: z.string().regex(/^[a-z][a-z0-9.\-]{0,63}$/).optional().or(z.literal("")),
+    title: z.string().min(1).max(64).optional().or(z.literal("")),
+    fields: z
+      .array(
+        z.strictObject({
+          key: z.string().min(1).max(64),
+          type: z.enum(["string", "number", "integer", "boolean", "object", "array"]),
+          required: z.boolean(),
+          enumValues: z.string().max(500).optional(),
+          minimum: z.number().optional(),
+          maximum: z.number().optional(),
+          items: z.enum(["string", "number", "integer", "boolean"]).optional(),
+        })
+      )
+      .min(1)
+      .max(24),
+  })
+  .strict();
 import { markGraphDirty } from "@taw/graph";
 import {
   DEFAULT_RELATION_TYPES,
@@ -430,6 +454,73 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       throw ERR.INVALID("推断产物不可编译，请检查样例结构");
     }
     return { jsonSchema: inferred.jsonSchema, notes: inferred.notes };
+  });
+
+  // 自然语言生成 schema 草稿（M61）：真实 DeepSeek 结构化输出 → 表单属性行草稿。
+  // LLM 只产草稿不落库：zod 白名单校验（未知字段拒绝、枚举仅 string、数量上限），
+  // fieldsToSchema 键约束复核，最终登记仍走 POST /types 全部质量门与 M59 关卡。
+  // key 未配置/LLM 不可用 → 如实 503 降级，不伪造草稿。
+  app.post("/types/describe-schema", async (req) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        description: z.string().min(4).max(500),
+      }),
+      req.body
+    );
+    await teamRole(auth.userId, body.teamId);
+    let provider: InstanceType<typeof DeepSeekProvider>;
+    try {
+      provider = new DeepSeekProvider();
+    } catch {
+      throw ERR.DEPENDENCY("DEEPSEEK_API_KEY 未配置，自然语言生成草稿不可用（可继续使用表单构建或样例推断）");
+    }
+    const chat = await provider.chat(
+      [
+        {
+          role: "system" as const,
+          content:
+            "你是资产类型定义助手。把用户的中文描述转成一个 JSON 对象（只输出 JSON，不要解释），形状：" +
+            '{"typeKey":"<小写字母开头，仅小写字母/数字/点/连字符，如 sim.report，可为空串>","title":"<中文标题>","fields":[{"key":"<英文 camelCase 属性名>","type":"string|number|integer|boolean|object|array","required":true,"enumValues":"<仅 type=string 时：逗号分隔枚举值，可省略>","minimum":0,"maximum":10,"items":"<仅 type=array 时元素类型 string|number|integer|boolean，可省略>"}]}' +
+            "。规则：属性名必须是英文 camelCase；数值范围仅在描述提及区间时填写；枚举仅在描述明确列出可选值时填写；fields 最多 24 行。",
+        },
+        { role: "user" as const, content: body.description },
+      ] as never,
+      [],
+      AbortSignal.timeout(30000)
+    );
+    const raw = extractJson(chat.message.content ?? "");
+    const parsed = SchemaDraft.safeParse(raw);
+    if (!parsed.success) {
+      throw ERR.CONFLICT(
+        "LLM_DRAFT_INVALID",
+        "模型输出未通过结构校验，未生成草稿（可换更明确的描述重试，或使用表单构建/样例推断）",
+        parsed.error.issues.slice(0, 6).map((i) => `${i.path.join(".")}: ${i.message}`)
+      );
+    }
+    const draft = parsed.data;
+    const built = fieldsToSchema(
+      draft.fields.map((f) => ({
+        key: f.key,
+        type: f.type,
+        required: f.required,
+        ...(f.enumValues !== undefined ? { enumValues: f.enumValues } : {}),
+        ...(f.minimum !== undefined ? { minimum: f.minimum } : {}),
+        ...(f.maximum !== undefined ? { maximum: f.maximum } : {}),
+        ...(f.items !== undefined ? { items: f.items } : {}),
+      }))
+    );
+    return {
+      typeKey: draft.typeKey || undefined,
+      title: draft.title || undefined,
+      fields: draft.fields,
+      jsonSchema: built.jsonSchema,
+      problems: built.problems,
+      model: provider.modelName,
+      tokens: chat.totalTokens,
+    };
   });
 
   const entityKindSchema = z.enum(ENTITY_KINDS);
