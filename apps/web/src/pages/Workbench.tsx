@@ -110,11 +110,11 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [sessionId, setSessionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  // 可分享视图（M54）：URL ?view=assets 直达目录（与筛选参数一并恢复）；非法值回落总览
+  // 可分享视图（M54）：URL ?view=assets 直达目录（与筛选参数一并恢复）；M56 起集合页同样可直达；非法值回落总览
   const initialViewParam = useMemo(() => new URLSearchParams(window.location.search).get("view"), []);
-  const initialViewValid = ["assets", "register", "semantic", "proposals", "release"].includes(initialViewParam ?? "");
-  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "proposals" | "release">(
-    initialViewValid ? (initialViewParam as "assets" | "register" | "semantic" | "proposals" | "release") : "overview"
+  const initialViewValid = ["assets", "register", "semantic", "proposals", "release", "collections"].includes(initialViewParam ?? "");
+  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "proposals" | "release" | "collections">(
+    initialViewValid ? (initialViewParam as "assets" | "register" | "semantic" | "proposals" | "release" | "collections") : "overview"
   );
   const [assetId, setAssetId] = useState("");
   const [page, setPage] = useState<PageKey>(initialViewValid ? "workbench" : "dashboard");
@@ -169,9 +169,9 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
     return () => window.clearTimeout(t);
   }, [flash]);
 
-  // 离开可分享视图（目录）时清掉筛选参数，避免陈旧 ?view=assets 误导下次进入
+  // 离开可分享视图（目录/集合）时清掉查询参数，避免陈旧 ?view=… 误导下次进入
   useEffect(() => {
-    if ((page !== "workbench" || wsView !== "assets") && window.location.search) {
+    if ((page !== "workbench" || (wsView !== "assets" && wsView !== "collections")) && window.location.search) {
       window.history.replaceState(null, "", window.location.pathname);
     }
   }, [page, wsView]);
@@ -411,6 +411,47 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
         } catch (err) {
           setFlash({
             text: `创建工单失败：${err instanceof ApiError ? err.message : "网络错误"}`,
+            tone: "error",
+            nonce: Date.now(),
+          });
+        }
+      })();
+      return true;
+    }
+    if (payload.intent === "add_to_collection") {
+      const p = project;
+      const assetName = (payload.params.assetName ?? "").trim();
+      const collectionName = (payload.params.collectionName ?? "").trim();
+      if (!p) return true;
+      if (!assetName || !collectionName) {
+        setFlash({ text: "未加入集合：资产与集合缺一不可", tone: "error", nonce: Date.now() });
+        return true;
+      }
+      void (async () => {
+        // 两端名称 → id：精确名优先，唯一模糊命中可用；解析失败如实 flash，不静默装作加入
+        try {
+          const [hits, cols] = await Promise.all([
+            api<AssetRow[]>("/assets/search", { query: { teamId: p.teamId, q: assetName, lifecycle: "all", limit: "10" } }),
+            api<{ id: string; name: string }[]>("/collections", { query: { teamId: p.teamId } }),
+          ]);
+          const asset = hits.find((a) => a.name === assetName) ?? (hits.length === 1 ? hits[0] : undefined);
+          const col = cols.find((c) => c.name === collectionName);
+          if (!asset) {
+            setFlash({ text: `未找到资产「${assetName}」，未加入集合`, tone: "error", nonce: Date.now() });
+            return;
+          }
+          if (!col) {
+            setFlash({ text: `未找到集合「${collectionName}」，可在工作台「集合」页新建`, tone: "error", nonce: Date.now() });
+            return;
+          }
+          await api(`/collections/${col.id}/items`, {
+            method: "POST",
+            body: { teamId: p.teamId, assetId: asset.id },
+          });
+          setFlash({ text: `已把「${asset.name}」加入集合「${col.name}」`, tone: "ok", nonce: Date.now() });
+        } catch (err) {
+          setFlash({
+            text: `加入集合失败：${err instanceof ApiError ? err.message : "网络错误"}`,
             tone: "error",
             nonce: Date.now(),
           });
@@ -710,6 +751,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 [
                   ["overview", "项目概况"],
                   ["assets", "资产目录"],
+                  ["collections", "集合"],
                   ["register", "登记资产"],
                   ["semantic", "语义候选"],
                   ["proposals", "Agent 提案"],
@@ -775,6 +817,13 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               />
             ) : wsView === "release" ? (
               <ReleasePanel project={project} me={me} />
+            ) : wsView === "collections" ? (
+              <CollectionsPanel
+                project={project}
+                userId={me.userId}
+                role={me.teams.find((t) => t.teamId === project?.teamId)?.role ?? "member"}
+                onOpenAsset={openAssetFromSearch}
+              />
             ) : (
               <AssetRegister
                 project={project}
@@ -809,6 +858,251 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
       />
       <ShortcutsOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
+  );
+}
+
+// 集合（M56，HF Collections 思想）：人工策展的跨类型资产组——权威榜单、新人入门包、
+// 评审材料包。管理权（改名/删除）=创建者或管理员（服务端强制），条目增删改备注=全员协作。
+interface CollectionRow { id: string; name: string; description: string; item_count: number; contains_asset: boolean | null }
+interface CollectionItem {
+  asset_id: string; asset_name: string; type_key: string; type_version: string;
+  lifecycle: string; note: string; added_at: string; added_by_name: string;
+}
+interface CollectionDetail {
+  id: string; name: string; description: string; created_by: string; created_by_name: string; created_at: string;
+  items: CollectionItem[];
+}
+
+function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: ProjectInfo; userId: string; role: string; onOpenAsset: (id: string) => void }) {
+  const [cols, setCols] = useState<CollectionRow[] | null>(null);
+  const [selId, setSelId] = useState("");
+  const [detail, setDetail] = useState<CollectionDetail | null>(null);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [msg, setMsg] = useState("");
+  const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
+  const isAdmin = role === "admin";
+  const canManage = (d: CollectionDetail) => isAdmin || d.created_by === userId;
+
+  const loadCols = useCallback(async (teamId: string) => {
+    try {
+      const rows = await api<CollectionRow[]>("/collections", { query: { teamId } });
+      setCols(rows);
+      setSelId((cur) => (cur && rows.some((r) => r.id === cur) ? cur : rows[0]?.id ?? ""));
+    } catch (e) {
+      setCols([]);
+      setMsg(e instanceof ApiError ? e.message : "加载集合失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    setCols(null);
+    setDetail(null);
+    setSelId("");
+    setMsg("");
+    if (project) void loadCols(project.teamId);
+  }, [project?.teamId, loadCols, project]);
+
+  useEffect(() => {
+    setDetail(null);
+    setNoteDraft({});
+    if (!project || !selId) return;
+    void api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } })
+      .then(setDetail)
+      .catch((e) => setMsg(e instanceof ApiError ? e.message : "加载集合详情失败"));
+  }, [selId, project?.teamId, project]);
+
+  async function createCollection() {
+    if (!project || !newName.trim()) return;
+    try {
+      const res = await api<{ collectionId: string }>("/collections", {
+        method: "POST",
+        body: { teamId: project.teamId, name: newName.trim(), description: newDesc.trim() },
+      });
+      setNewName("");
+      setNewDesc("");
+      setMsg("");
+      await loadCols(project.teamId);
+      setSelId(res.collectionId);
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "创建失败");
+    }
+  }
+
+  async function renameCollection() {
+    if (!project || !detail) return;
+    const name = window.prompt("新的集合名称：", detail.name);
+    if (!name || !name.trim() || name.trim() === detail.name) return;
+    try {
+      await api(`/collections/${detail.id}`, { method: "PATCH", body: { teamId: project.teamId, name: name.trim() } });
+      setMsg("");
+      await loadCols(project.teamId);
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "改名失败");
+    }
+  }
+
+  async function deleteCollection() {
+    if (!project || !detail) return;
+    if (!window.confirm(`删除集合「${detail.name}」？条目随集合删除，资产本身不受影响。`)) return;
+    try {
+      await api(`/collections/${detail.id}`, { method: "DELETE", query: { teamId: project.teamId } });
+      setDetail(null);
+      setSelId("");
+      await loadCols(project.teamId);
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "删除失败");
+    }
+  }
+
+  async function removeItem(assetId: string) {
+    if (!project || !detail) return;
+    try {
+      await api(`/collections/${detail.id}/items/${assetId}`, { method: "DELETE", query: { teamId: project.teamId } });
+      setMsg("");
+      await Promise.all([loadCols(project.teamId), reloadDetail()]);
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "移除失败");
+    }
+  }
+
+  async function saveNote(assetId: string) {
+    if (!project || !detail) return;
+    const note = (noteDraft[assetId] ?? "").trim();
+    try {
+      await api(`/collections/${detail.id}/items/${assetId}`, { method: "PATCH", body: { teamId: project.teamId, note } });
+      setMsg("");
+      setNoteDraft((d) => { const n = { ...d }; delete n[assetId]; return n; });
+      await reloadDetail();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "备注保存失败");
+    }
+  }
+
+  async function reloadDetail() {
+    if (!project || !selId) return;
+    setDetail(await api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } }));
+  }
+
+  if (!project) return <div className="state">选择或创建一个项目开始。</div>;
+  return (
+    <>
+      <div className="card">
+        <h3>新建集合</h3>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) { e.preventDefault(); void createCollection(); } }}
+            placeholder="集合名称（如：新人入门包）"
+            aria-label="集合名称"
+            style={{ width: 220 }}
+          />
+          <input
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            placeholder="用途说明（可选）"
+            aria-label="集合说明"
+            style={{ width: 280 }}
+          />
+          <button className="primary" onClick={() => void createCollection()} disabled={!newName.trim()}>创建</button>
+        </div>
+        {msg && <div className="error-text" style={{ marginTop: 6 }}>{msg}</div>}
+      </div>
+      {cols === null ? (
+        <div className="state">加载中…</div>
+      ) : cols.length === 0 ? (
+        <div className="state">还没有集合。集合是人工策展的跨类型资产组（权威榜单、入门包、评审材料包）——先把上面的表填好创建一个。</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 12, alignItems: "start" }}>
+          <div className="card" style={{ padding: 8 }}>
+            {cols.map((c) => (
+              <button
+                key={c.id}
+                className="link-btn"
+                style={{
+                  display: "block", width: "100%", textAlign: "left", padding: "6px 8px", borderRadius: 6,
+                  background: c.id === selId ? "color-mix(in srgb, var(--accent, #4a7dff) 14%, transparent)" : "transparent",
+                  fontWeight: c.id === selId ? 600 : 400,
+                }}
+                onClick={() => setSelId(c.id)}
+              >
+                {c.name}
+                <span className="chip-dim" style={{ marginLeft: 6 }}>{c.item_count} 项</span>
+                {c.description && <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 400 }}>{c.description}</div>}
+              </button>
+            ))}
+          </div>
+          {detail ? (
+            <div className="card">
+              <h3>
+                {detail.name}
+                <span className="chip-dim" style={{ marginLeft: 8, fontSize: 12 }}>
+                  {detail.items.length} 项 · 由 {detail.created_by_name} 创建
+                </span>
+                {canManage(detail) && (
+                  <span style={{ float: "right", display: "flex", gap: 6 }}>
+                    <button onClick={() => void renameCollection()} title="改名（创建者或管理员）">改名…</button>
+                    <button style={{ color: "var(--red)" }} onClick={() => void deleteCollection()} title="删除集合（创建者或管理员）">删除集合</button>
+                  </span>
+                )}
+              </h3>
+              {detail.description && <p style={{ margin: "4px 0 10px", opacity: 0.8 }}>{detail.description}</p>}
+              {detail.items.length === 0 ? (
+                <div className="state">集合为空——在资产详情页点「加入集合」，或对 Agent 说「把 X 加入集合 {detail.name}」。</div>
+              ) : (
+                <table className="list">
+                  <thead>
+                    <tr><th>资产</th><th>类型</th><th>生命周期</th><th>收录备注</th><th>收录人</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {detail.items.map((it) => (
+                      <tr key={it.asset_id}>
+                        <td>
+                          <button className="link-btn" onClick={() => onOpenAsset(it.asset_id)}>{it.asset_name}</button>
+                        </td>
+                        <td><span className="badge">{it.type_key}</span>v{it.type_version}</td>
+                        <td>{it.lifecycle === "archived" ? "已归档" : it.lifecycle === "deprecated" ? "已弃用" : "进行中"}</td>
+                        <td>
+                          {noteDraft[it.asset_id] !== undefined ? (
+                            <span style={{ display: "inline-flex", gap: 4 }}>
+                              <input
+                                value={noteDraft[it.asset_id] ?? ""}
+                                onChange={(e) => setNoteDraft((d) => ({ ...d, [it.asset_id]: e.target.value }))}
+                                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void saveNote(it.asset_id); } }}
+                                aria-label="编辑收录备注"
+                                style={{ width: 180, padding: "1px 6px", fontSize: 12.5 }}
+                              />
+                              <button onClick={() => void saveNote(it.asset_id)}>存</button>
+                              <button onClick={() => setNoteDraft((d) => { const n = { ...d }; delete n[it.asset_id]; return n; })}>×</button>
+                            </span>
+                          ) : (
+                            <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                              {it.note || <span style={{ opacity: 0.5 }}>—</span>}
+                              <button
+                                className="link-btn"
+                                title="编辑备注"
+                                onClick={() => setNoteDraft((d) => ({ ...d, [it.asset_id]: it.note }))}
+                              >
+                                改
+                              </button>
+                            </span>
+                          )}
+                        </td>
+                        <td>{it.added_by_name}</td>
+                        <td><button className="link-btn" onClick={() => void removeItem(it.asset_id)}>移除</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ) : (
+            <div className="state">左侧选择一个集合。</div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1026,6 +1320,11 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
   const [lifecycleMsg, setLifecycleMsg] = useState("");
   const [newAlias, setNewAlias] = useState("");
   const [aliasMsg, setAliasMsg] = useState("");
+  // 集合（M56）：本资产所在的集合 + 可加入集合下拉（列表端点带 assetId 时返回 contains_asset）
+  const [cols, setCols] = useState<CollectionRow[] | null>(null);
+  const [addToId, setAddToId] = useState("");
+  const [colNote, setColNote] = useState("");
+  const [colMsg, setColMsg] = useState("");
 
   async function reload() {
     try {
@@ -1035,18 +1334,54 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
     }
   }
 
+  async function reloadCols() {
+    try {
+      setCols(await api<CollectionRow[]>("/collections", { query: { teamId, assetId } }));
+    } catch {
+      setCols(null);
+    }
+  }
+
   useEffect(() => {
     setDetail(null);
     setError("");
     setLifecycleMsg("");
     setAliasMsg("");
     setNewAlias("");
+    setCols(null);
+    setAddToId("");
+    setColNote("");
+    setColMsg("");
     void reload();
+    void reloadCols();
     void api<Relations>("/relations", { query: { teamId, assetId } })
       .then(setRels)
       .catch(() => setRels(undefined as unknown as Relations));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, assetId]);
+
+  async function addToCollection() {
+    if (!addToId) return;
+    try {
+      await api(`/collections/${addToId}/items`, { method: "POST", body: { teamId, assetId, note: colNote.trim() } });
+      setAddToId("");
+      setColNote("");
+      setColMsg("");
+      await reloadCols();
+    } catch (err) {
+      setColMsg(err instanceof ApiError ? err.message : "加入失败");
+    }
+  }
+
+  async function removeFromCollection(collectionId: string) {
+    try {
+      await api(`/collections/${collectionId}/items/${assetId}`, { method: "DELETE", query: { teamId } });
+      setColMsg("");
+      await reloadCols();
+    } catch (err) {
+      setColMsg(err instanceof ApiError ? err.message : "移除失败");
+    }
+  }
 
   async function addAlias() {
     const alias = newAlias.trim().toLowerCase();
@@ -1183,6 +1518,50 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               ——本资产可能受影响，请核查（血缘传播提示；归档/弃用等治理动作仍由人执行）。
             </span>
           </div>
+        )}
+      </div>
+      <div className="card">
+        <h3>集合</h3>
+        {cols === null ? (
+          <div className="state" style={{ padding: 0 }}>加载中…</div>
+        ) : (
+          <>
+            {cols.filter((c) => c.contains_asset).length === 0 ? (
+              <div style={{ opacity: 0.75, marginBottom: 8 }}>尚未加入任何集合。</div>
+            ) : (
+              <div style={{ marginBottom: 8 }}>
+                {cols.filter((c) => c.contains_asset).map((c) => (
+                  <span key={c.id} className="picked-ref" style={{ display: "inline-flex", marginRight: 6 }}>
+                    {c.name}
+                    <button aria-label={`从集合 ${c.name} 移除`} title={`从集合「${c.name}」移除`} onClick={() => void removeFromCollection(c.id)}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={addToId}
+                onChange={(e) => { setAddToId(e.target.value); setColMsg(""); }}
+                aria-label="选择要加入的集合"
+                style={{ maxWidth: 240 }}
+              >
+                <option value="">选择集合…</option>
+                {cols.filter((c) => !c.contains_asset).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              <input
+                value={colNote}
+                onChange={(e) => setColNote(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && addToId) { e.preventDefault(); void addToCollection(); } }}
+                placeholder="收录备注（可选，如「权威起点」）"
+                aria-label="收录备注"
+                style={{ width: 200, padding: "1px 6px", fontSize: 12.5 }}
+              />
+              <button onClick={() => void addToCollection()} disabled={!addToId}>加入</button>
+            </div>
+            {colMsg && <div className="error-text" style={{ marginTop: 6 }}>{colMsg}</div>}
+          </>
         )}
       </div>
       {headArtifacts.length > 0 && (

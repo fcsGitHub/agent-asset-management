@@ -20,7 +20,7 @@ const ACTIVITY_ACTIONS = ["agent", "asset.archive", "asset.restore", "review_pre
 
 export const NlIntent = z
   .object({
-    intent: z.enum(["navigate", "search_assets", "fill_register_form", "create_issue", "graph_path"]),
+    intent: z.enum(["navigate", "search_assets", "fill_register_form", "create_issue", "graph_path", "add_to_collection"]),
     params: z.object({
       page: z.enum(PAGES).optional(),
       query: z.string().max(120).optional(),
@@ -33,6 +33,8 @@ export const NlIntent = z
       // 关联路径两端（M51）：graph_path 意图必填，界面解析为资产后直达图谱路径高亮
       fromName: z.string().max(120).optional(),
       toName: z.string().max(120).optional(),
+      // 集合名（M56）：add_to_collection 意图必填，界面双重确认后调用集合条目接口
+      collectionName: z.string().max(80).optional(),
       title: z.string().max(200).optional(),
       body: z.string().max(4000).optional(),
     }).default({}),
@@ -45,6 +47,10 @@ export const NlIntent = z
     // 路径意图必须两端齐全：缺端视为未通过白名单校验（不猜测）
     if (v.intent === "graph_path" && (!(v.params.fromName ?? "").trim() || !(v.params.toName ?? "").trim())) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["params", "fromName"], message: "graph_path 需要 fromName 与 toName" });
+    }
+    // 入集合意图必须资产与集合齐全：缺一视为未通过校验（不猜测）
+    if (v.intent === "add_to_collection" && (!(v.params.assetName ?? "").trim() || !(v.params.collectionName ?? "").trim())) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["params", "assetName"], message: "add_to_collection 需要 assetName 与 collectionName" });
     }
   });
 export type NlIntent = z.infer<typeof NlIntent>;
@@ -134,6 +140,22 @@ export function ruleParse(text: string): NlIntent | null {
   if (issue && issue[1]!.trim()) {
     return { intent: "create_issue", params: { title: issue[1]!.trim().slice(0, 200) } };
   }
+  // 入集合（M56）：「把 X 加入集合 Y」「将「X」加进集合 Y」——解析端零副作用，
+  // 界面卡片预览，用户点「执行」后前端解析两端并调用集合条目接口（双重确认）
+  const addCol = t.match(
+    /^(?:把|将)\s*[“「]?([^”」]{1,60}?)」?”?\s*(?:加入|加到|加进|收入)(?:到|进)?\s*集合\s*[“「]?([^”」]{1,60}?)」?”?$/
+  );
+  if (addCol) {
+    const assetName = addCol[1]!.trim();
+    const collectionName = addCol[2]!.trim();
+    // 两侧非空、资产侧不是纯动词/代词（「把它加入集合 Y」缺资产名，不猜测）
+    if (
+      assetName && collectionName &&
+      !/^(?:它|这个|那个|此资产|该资产|资产)$/.test(assetName)
+    ) {
+      return { intent: "add_to_collection", params: { assetName: assetName.slice(0, 120), collectionName: collectionName.slice(0, 80) } };
+    }
+  }
   return null;
 }
 
@@ -159,12 +181,13 @@ function buildLlmMessages(text: string, page: string) {
       role: "system" as const,
       content:
         "你是团队资产工作台的界面命令解析器。把用户的中文指令解析为一个 JSON 对象，只输出 JSON，不要输出任何解释。" +
-        `可选意图（白名单，五选一）：\n` +
+        `可选意图（白名单，六选一）：\n` +
         `1) {"intent":"navigate","params":{"page":"dashboard|workbench|activity|approvals|graph|ontology|proposals","assetName":"<仅 page=graph 且用户想聚焦某资产时填写资产名>","activityAction":"<仅 page=activity 且用户想看特定类别动态时填写，七选一：agent|asset.archive|asset.restore|review_prepared|release_published|release_rollback|audit.export>"}} —— 跳转页面（proposals 是 Agent 提案审核页；graph+assetName 进入聚焦模式；activity+activityAction 直达对应动作过滤视图）\n` +
         `2) {"intent":"search_assets","params":{"query":"<搜索关键词>"}} —— 搜索资产\n` +
         `3) {"intent":"fill_register_form","params":{"typeKeyHint":"<类型键，可选：${TYPE_KEYS_HINT}>","name":"<资产名，可选>"}} —— 预填登记表单\n` +
         `4) {"intent":"create_issue","params":{"title":"<问题标题，必填>","body":"<问题详情，可选>"}} —— 起草问题工单（界面会先预览，用户确认后才创建）\n` +
         `5) {"intent":"graph_path","params":{"fromName":"<起点资产名>","toName":"<终点资产名>"}} —— 用户想知道两个资产之间怎么关联/有什么关系/看关联路径时使用（两端缺一不可）\n` +
+        `6) {"intent":"add_to_collection","params":{"assetName":"<资产名或别名>","collectionName":"<集合名>"}} —— 用户想把某资产加入某集合时使用（两者缺一不可；集合是团队内人工策展的资产组）\n` +
         "规则：指令含糊时优先 search_assets；用户只是描述问题而非明确要求建工单时，用 search_assets；" +
         "不要发明白名单之外的意图；不要编造属性值。",
     },

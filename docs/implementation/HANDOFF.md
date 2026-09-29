@@ -448,16 +448,51 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    引用/下载后热度分项刷新（软件资产「下载 2」来自真实下载，模型「引用复制
    2」）；目录「最常使用」模型置顶且 URL ?view=assets&sort=usage 可分享。
    全量 55 套件 258 项全绿。
+   M56 已完成（资产集合——人工策展，调研清单第三项落地，0025 迁移）：
+   asset_collections（团队内名称唯一，复合主键 (team_id,id) 同 house 模式）+
+   asset_collection_items（(team_id, collection_id, asset_id) 唯一、note 收录
+   备注 ≤500 字、FK 两表、ON DELETE CASCADE，RLS 租户隔离）。定位：权威榜单/
+   新人入门包/评审材料包——检索负责发现、集合负责沉淀（HF Collections 思想）。
+   路由 /collections：POST 创建（重名 409 COLLECTION_TAKEN）、GET 列表
+   （item_count ::int；按 assetId 过滤附 contains_asset——详情页勾选态数据源，
+   无 assetId 时语义为 null）、GET 详情（条目含类型/生命周期/备注/收录人）、
+   PATCH 改名/描述与 DELETE（创建者或管理员；改名撞名 409）、条目 POST/
+   PATCH note/DELETE（全员日常协作，同 Issues 权限语义；重复 409、未知资产
+   422）。安全修复（测试先行暴露）：集合路由最初只靠 RLS 没有显式成员校验
+   ——RLS 隔离行但不校验调用者归属，外人可凭 body.teamId 越权写入；全部
+   端点补 teamRole（NOT_FOUND 化非成员）。UI：工作台新增「集合」标签页
+   （左列表右详情：新建表单、条目表、备注内联编辑、改名/删除按 canManage 显
+   示）+ 资产详情「集合」卡（所在集合 chips × 移除、下拉+备注加入、加入后
+   即时成 chip）；?view=collections 直达（可分享）。Agent 新增 collection
+   .search（读，关键词过滤+条目数）与 collection.add（草稿层：集合按名精确/
+   id 解析（多命中列候选），资产走 resolveAssetRef 名称→别名→模糊，note
+   收录理由，重复如实报错「已在集合中」）；NL L1 新句式「把 X 加入集合 Y」
+   （加到/加进/收入变体、引号容错；资产侧代词或缺侧不猜测不命中）+ LLM 白
+   名单第六意图 add_to_collection（superRefine 两侧必填），命令栏卡片双重
+   确认后前端解析两端（/assets/search + /collections）再调条目接口——解析
+   端点零副作用原则不变。
+   tests/m56 九项：创建/重名 409/空名 422、条目加入（成员协作+备注）/重复
+   409/未知资产 422/contains_asset 两态、备注更新与清空+移除再删 404、管理
+   权 403/改名/撞名 409/描述、跨团队隔离三路 404、级联删除后资产无恙、NL
+   句式命中/代词与缺侧不命中/既有句式零回归、Agent collection.search/
+   collection.add 真实运行（seedInTeam+真实 agent_runs 行同 m55；含未登记
+   别名如实报错与重复如实报错）。浏览器实测：建集合→详情「加入集合」带备注
+   chip 即现→条目表改备注→⌘K「把接口规范文档加入集合新人入门包」规则解析
+   卡（零模型成本）→执行 flash 成功→条目 2 项；?view=collections 直达；
+   真实 DeepSeek 一句话跑通 collection.search→asset.search→collection.add
+   （备注「链路依赖软件」）并如实汇总条目数 3。
+   全量 56 套件 267 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M55 后，两批调研吸收清单余项，按性价比排序）：Collections
-   人工策展（跨类型集合+条目备注+NL「把 X 加入集合 Y」——HF）；使用片段
-   模板（按资产类型渲染调用/引用 snippet——HF/Terraform）；派生血缘字段
-   （base_asset_id + base_relation，UI 查看派生资产——HF base_model）；
-   owner/lifecycle 必填引导与完整度 scorecard（Backstage）；属性自定义筛选器
-   （OpenMetadata）；分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认
-   流）；引用导出 BibTeX/Markdown（Zenodo）；别名进 ⌘K（assets:/x@prod 解析）。
+   可选后续方向（M56 后，两批调研吸收清单余项，按性价比排序）：使用片段
+   模板（按资产类型渲染调用/引用 snippet——HF/Terraform，集合条目卡可直接
+   附 snippet）；派生血缘字段（base_asset_id + base_relation，UI 查看派生
+   资产——HF base_model）；owner/lifecycle 必填引导与完整度 scorecard
+   （Backstage）；属性自定义筛选器（OpenMetadata）；分类沿血缘传播写侧
+   （Atlas，废弃波及下游，需治理确认流）；引用导出 BibTeX/Markdown
+   （Zenodo）；别名进 ⌘K（assets:/x@prod 解析）；集合导出/分享只读快照
+   （HF collection share，需 meta-share 通道决策）。
    暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
    点名需求。

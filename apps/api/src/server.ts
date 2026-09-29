@@ -18,6 +18,7 @@ import { semanticRoutes } from "./routes/semantic.js";
 import { graphRoutes } from "./routes/graph.js";
 import { assetMetaRoutes } from "./routes/meta-share.js";
 import { nlRoutes } from "./routes/nl.js";
+import { collectionRoutes } from "./routes/collections.js";
 
 export async function buildServer() {
   const app = Fastify({
@@ -82,6 +83,7 @@ export async function buildServer() {
   await app.register(graphRoutes, { prefix: "/api/v1" });
   await app.register(assetMetaRoutes, { prefix: "/api/v1" });
   await app.register(nlRoutes, { prefix: "/api/v1" });
+  await app.register(collectionRoutes, { prefix: "/api/v1" });
 
   return app;
 }

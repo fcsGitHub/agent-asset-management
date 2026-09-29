@@ -16,8 +16,8 @@ interface Command {
 }
 
 export interface NlIntentPayload {
-  intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue" | "graph_path";
-  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; activityAction?: string; fromName?: string; toName?: string; title?: string; body?: string };
+  intent: "navigate" | "search_assets" | "fill_register_form" | "create_issue" | "graph_path" | "add_to_collection";
+  params: { page?: PageKey; query?: string; typeKeyHint?: string; name?: string; assetName?: string; activityAction?: string; fromName?: string; toName?: string; collectionName?: string; title?: string; body?: string };
   parser: { kind: "rules" | "llm"; model?: string; tokens?: number; note?: string };
 }
 
@@ -43,6 +43,7 @@ export function describeIntent(i: NlIntentPayload): string {
   if (i.intent === "search_assets") return `搜索资产：${i.params.query ?? ""}`;
   if (i.intent === "graph_path") return `查询「${i.params.fromName ?? ""}」与「${i.params.toName ?? ""}」的关联路径`;
   if (i.intent === "create_issue") return `起草问题工单（确认后才创建）`;
+  if (i.intent === "add_to_collection") return `把「${i.params.assetName ?? ""}」加入集合「${i.params.collectionName ?? ""}」（确认后才加入）`;
   return `预填登记表单${i.params.typeKeyHint ? `（类型含 "${i.params.typeKeyHint}"）` : ""}${i.params.name ? `，名称 "${i.params.name}"` : ""}`;
 }
 
@@ -215,6 +216,12 @@ export function CommandBar({
                 <div className="nl-preview-title">{nl.params.title || "（无标题）"}</div>
                 {nl.params.body && <div className="nl-preview-body">{nl.params.body}</div>}
                 <div className="nl-note">写类操作双重确认：点「执行」才会调用真实接口创建工单；解析本身不落库。</div>
+              </div>
+            )}
+            {nl.intent === "add_to_collection" && (
+              <div className="nl-preview">
+                <div className="nl-preview-title">「{nl.params.assetName}」→ 集合「{nl.params.collectionName}」</div>
+                <div className="nl-note">写类操作双重确认：点「执行」才会解析两端并加入集合；解析本身不落库。</div>
               </div>
             )}
             <div className="btn-row">

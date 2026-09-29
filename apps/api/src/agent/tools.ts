@@ -247,6 +247,30 @@ export const READONLY_TOOLS: ToolDef[] = [
       };
     },
   },
+  {
+    name: "collection.search",
+    tier: "read",
+    description:
+      "列出本团队的资产集合（人工策展的跨类型资产组，如权威榜单、新人入门包、评审材料包）。" +
+      "可按名称关键词过滤，返回集合名、描述与条目数。",
+    parameters: {
+      type: "object",
+      properties: { q: { type: "string", description: "名称关键词（可选）" } },
+      required: [],
+    },
+    async execute(client, ctx, args) {
+      const kw = String(args.q ?? "").slice(0, 80);
+      const { rows } = await client.query(
+        `SELECT c.id, c.name, c.description,
+                (SELECT count(*)::int FROM asset_collection_items i WHERE i.team_id = c.team_id AND i.collection_id = c.id) AS item_count
+           FROM asset_collections c
+          WHERE c.team_id = $1 AND ($2 = '' OR c.name ILIKE '%' || $2 || '%')
+          ORDER BY c.created_at DESC LIMIT 20`,
+        [ctx.teamId, kw]
+      );
+      return rows;
+    },
+  },
 ];
 
 /** 使用度事件埋点（M55）：agent_read 随工具事务提交（runner 外层 withTeam 提交）。
@@ -318,6 +342,35 @@ async function resolveAssetRef(
   throw new Error(`${side} 须提供 assetId 或 name`);
 }
 
+/** 集合端点解析（collection.add 用）：UUID 按 id，否则团队内名称精确匹配；
+ *  多命中列出候选要求改用 id。租户内解析（RLS 上下文由调用方事务决定）。 */
+async function resolveCollectionRef(
+  client: PoolClient,
+  teamId: string,
+  ref: unknown
+): Promise<{ id: string; name: string }> {
+  const key = String(ref ?? "").trim();
+  if (!key) throw new Error("collection 不能为空（传集合名或 id）");
+  if (/^[0-9a-f-]{36}$/.test(key)) {
+    const { rows } = await client.query<{ id: string; name: string }>(
+      `SELECT id, name FROM asset_collections WHERE team_id = $1 AND id = $2`,
+      [teamId, key]
+    );
+    if (!rows[0]) throw new Error(`集合 id「${key}」不存在于本团队`);
+    return rows[0];
+  }
+  const exact = await client.query<{ id: string; name: string }>(
+    `SELECT id, name FROM asset_collections WHERE team_id = $1 AND name = $2 LIMIT 2`,
+    [teamId, key]
+  );
+  if (exact.rows.length === 1) return exact.rows[0];
+  if (exact.rows.length === 0) throw new Error(`集合「${key}」不存在（可先用 collection.search 查看现有集合）`);
+  throw new Error(
+    `集合名「${key}」命中多个集合，请改用 id：` +
+      exact.rows.map((r) => `${r.name}(${r.id.slice(0, 8)}…)`).join("、")
+  );
+}
+
 export const DRAFT_TOOLS: ToolDef[] = [
   {
     name: "issue.create",
@@ -344,6 +397,41 @@ export const DRAFT_TOOLS: ToolDef[] = [
          String(args.title).slice(0, 200), String(args.body).slice(0, 16000), ctx.userId]
       );
       return { issueId: id };
+    },
+  },
+  {
+    name: "collection.add",
+    tier: "draft",
+    description:
+      "把资产加入集合（人工策展，日常协作）。集合传名称（精确匹配）或 id，可先用 collection.search 查看现有集合；" +
+      "资产传 assetId、名称或别名。可附 note 说明收录理由（如「作为权威起点」）。资产已在集合中会如实报错。",
+    parameters: {
+      type: "object",
+      properties: {
+        collection: { type: "string", description: "集合名称或 id" },
+        assetId: { type: "string", description: "资产 id（与 assetName 二选一）" },
+        assetName: { type: "string", description: "资产名称或别名（与 assetId 二选一）" },
+        note: { type: "string", description: "收录理由备注（可选，≤500 字）" },
+      },
+      required: ["collection"],
+    },
+    async execute(client, ctx, args) {
+      const collection = await resolveCollectionRef(client, ctx.teamId, args.collection);
+      const asset = await resolveAssetRef(client, ctx.teamId, { assetId: args.assetId, name: args.assetName }, "asset");
+      const note = String(args.note ?? "").trim().slice(0, 500);
+      try {
+        await client.query(
+          `INSERT INTO asset_collection_items (team_id, collection_id, asset_id, note, added_by)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [ctx.teamId, collection.id, asset.id, note, ctx.userId]
+        );
+      } catch (err) {
+        if ((err as { code?: string }).code === "23505") {
+          throw new Error(`资产「${asset.name}」已在集合「${collection.name}」中`);
+        }
+        throw err;
+      }
+      return { collectionId: collection.id, collectionName: collection.name, assetId: asset.id, assetName: asset.name, note };
     },
   },
   {
