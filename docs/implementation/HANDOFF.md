@@ -510,16 +510,71 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    YAML 与别名短引用展开内容核验（assets:prod-model、frame: ECI、
    validStepSeconds.min: 0.1）。
    全量 57 套件 273 项全绿。
+   M58 已完成（发布测试门禁 + 批量关联下载，用户新目标两个点名缺口，0026 迁移；
+   调研笔记 docs/implementation/research-M58-release-gate-bundle.md——GitHub
+   required checks / HF snapshot_download / BagIt+Frictionless 双 manifest）：
+   ①发布测试门禁（「部分模型需要过测试才可以通过」）——策略声明在类型层：
+   asset_type_versions.requires_test_evidence（0026，不可变，改门禁=注册新版本，
+   与 schema 演进同构；类型链上任一定义声明即门禁类型，与属性校验链语义一致）。
+   POST /types 接受 requiresTestEvidence + GET /types 带回标志；本体页登记表单
+   「发布测试门禁」开关 + 类型树「需测试证据」chip。证据只认候选精确修订上的
+   测试运行（test_runs.target_content_digest 绑定），取 executedAt 最新一次
+   （id 决胜保证确定性）：曾过但最新 fail/error/skipped 一样拦（GitHub strict
+   模式）。prepare-review 把逐项门禁状态冻结进候选摘要与快照载荷（CR 详情
+   items[].test_gate 展示「需测试证据 · 通过/尚无运行/最新 fail」，评审者先见）；
+   review-and-publish 现场重算双保险——未满足 409 TEST_GATE_REQUIRED（details
+   带资产与最新结果），prepare 后状态翻转由快照摘要失配兜底（B04 同机制，
+   退回重提后放行）。开 CR 不拦（对齐「required checks 卡 merge 不卡 PR」）；
+   非门禁类型零影响（test_gate.not_required）。CrItemCard 门禁 chip 红显未满足
+   （.gate-blocked）。测试运行录入端点沿用 M3 生命周期 test-runs（绑定被测修订
+   +结果+环境+日志摘录）。
+   ②批量关联下载（「可以批量关联下载」）——GET /assets/:id/bundle?depth=1..3&
+   direction=out|in|both：confirmed 关系闭包（BFS 防环、200 资产上限截断警告）
+   各取当前头修订；GET /collections/:id/bundle：策展集合即批量范围（flat 不扩
+   散）。一次 HTTP 请求流式返回 store-only 自描述 ZIP：manifest.json（Frictionless
+   风格：来源与参数/资产（别名、修订、内容摘要、属性、制品）/闭包内关系（带
+   标题）/警告）+ manifest-sha256.txt（BagIt 风格逐文件校验和，sha256sum 双空格
+   格式，离线可核）+ 制品原文件（assets/<typeKey>/<安全化名>/<消解重名后的原名>，
+   Windows 保留字符替换、同目录重名 -2 后缀）。@taw/domain/bundle 纯函数四件：
+   traverseClosure / buildBundlePlan / buildStoreZip（确定性：固定 DOS 时间戳
+   1980-01-01、CRC32、UTF-8 名、零新依赖）/ checkTestGate——API 与单测同源；
+   ZIP 体积上限 256MB（超限 422 引导分批）；包内每资产计一次 download 使用热度
+   （M55 白名单复用）；越权同 M57 教训显式 teamRole（外人伪造 teamId 404、畸形
+   id 404、缺 teamId 422）。UI：详情页「批量下载」卡（跳数 1-3/方向选择/直接关
+   联计数/<a download> 原生下载）+ 集合详情「⬇ 下载集合包」（空集合如实不显示）。
+   schema 标准入库为既有能力（M2/A03 类型链 JSON Schema 全量校验），本轮未改动。
+   tests/m58 十一项：纯函数四组（闭包深度/方向/防环/截断；路径安全化/重名消解/
+   校验和行/闭包外边过滤；ZIP 确定性/CRC 向量/解析回读；门禁四态+摘要不匹配+
+   同刻 id 决胜）+ 集成七项（闭包打包 manifest+校验和+制品原文+热度计数、方向
+   过滤、集合打包/空集 422/畸形 404、越权 404/422、门禁拦截→补证据摘要失配→
+   退回重提放行全闭环、strict 回归拦截、非门禁零影响回归）。修复两处真实缺陷：
+   dedupePath 相对偏移换算错误（重名消解把扩展名吃进 stem）、集合 bundle 畸形
+   id 直透 PG 报 500（补路径参数校验）。
+   浏览器实测（M49 演示团队真实数据）：详情页批量下载卡渲染（直接关联 1 个）+
+   页面内真实下载——ZIP PK 魔数/application/zip/UTF-8 文件名，2 跳闭包 hop
+   0/1/2（天线布局→轨道传播→热控系统）、关系带标题（依赖/属于）；集合页建
+   「M58移交验证包」加两资产→「下载集合包」真实打包（source.kind=collection）；
+   本体页 UI 注册 m58.safety.model（门禁开关开启）→ 树上「需测试证据」chip；
+   CR 详情变更项「需测试证据 · 尚无运行」红显 chip；作者自审发布 403（B03 既有
+   不变量，UI 如实显示）；第二评审员无证据被拦（409 TEST_GATE_REQUIRED 集成已
+   证，浏览器侧手动 cookie 受浏览器安全模型限制改 curl 完成同一闭环）→ 记 pass
+   运行 → 旧快照摘要失配 → 退回重提 → 评审员带证据发布成功
+   REL-2026-09-29-c46695。截图四张：m58-ui-bundle-card / m58-ui-collection-
+   bundle / m58-ui-type-gate / m58-ui-cr-gate-chip。走查中 DB 沉淀：M58 临时
+   数据（m58.safety.model 类型、M58安全模型、回归套件、移交验证包、评审员
+   账号）留在 M49 演示团队，与历史走查数据共存惯例一致。
+   全量 58 套件 284 项全绿（M57 后 +1 套件 +11 项）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M57 后，两批调研吸收清单余项，按性价比排序）：派生血缘
-   字段（base_asset_id + base_relation，UI 查看派生资产——HF base_model）；
-   owner/lifecycle 必填引导与完整度 scorecard（Backstage）；属性自定义筛选器
-   （OpenMetadata）；分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认
-   流）；引用导出 BibTeX/Markdown（Zenodo，可复用 M57 片段构建器）；别名进
-   ⌘K（assets:/x@prod 解析）；集合导出/分享只读快照（HF collection share，
-   需 meta-share 通道决策）；Agent 对话区可折叠（窄屏/演示场景一键全宽工作区）。
+   可选后续方向（M58 后，按性价比排序）：bundle 离线校验/回导工具（manifest-
+   sha256.txt 已可离线核，回导端可复用 M28 回导管线）；门禁类型 UI 提示前移（登记
+   资产/创建 CR 时即提示「该类型发布需测试证据」，现在只在 CR 详情与发布拦截时
+   可见）；两批调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
+   lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
+   （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
+   BibTeX/Markdown（Zenodo，可复用 M57 片段构建器）、别名进 ⌘K、集合只读分享
+   快照、Agent 对话区可折叠。
    暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
    点名需求。

@@ -5,7 +5,13 @@ import { IconChevronDown } from "./icons";
 export interface CRDiffProp { key: string; kind: "added" | "changed" | "removed"; from?: unknown; to?: unknown }
 export interface CRDiffArtifact { role: string; name: string; fromDigest?: string; toDigest?: string; binary: boolean; conflict: boolean; textPatch?: { type: "context" | "add" | "del"; line: string }[] }
 export interface CRItemDiff { properties: CRDiffProp[]; artifacts: CRDiffArtifact[]; relations: { added: { typeKey: string; target: string }[]; removed: { typeKey: string; target: string }[] } }
-export interface CRDiffItem { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number; diff?: CRItemDiff }
+/** M58 测试门禁状态（来自最新有效审核快照；发布端仍现场重算，展示不作为放行依据） */
+export interface CRItemTestGate {
+  assetId: string; assetName: string; revisionId: string;
+  required: boolean; satisfied: boolean; reason: string;
+  latestRunId?: string; latestResult?: string; latestExecutedAt?: string;
+}
+export interface CRDiffItem { asset_id: string; asset_name: string; base_seq: number; candidate_seq: number; diff?: CRItemDiff; test_gate?: CRItemTestGate }
 export interface CRComment { id: string; content: string; created_at: string; author_name: string | null }
 
 /** 评审留痕（M47）：退回原因等 CR 评论按时间排列；无留痕时如实不渲染（调用方判空）。 */
@@ -105,12 +111,23 @@ export function CrItemDiffView({ diff }: { diff: CRItemDiff }) {
   );
 }
 
-/** 变更项卡片：汇总行（资产名 / r_base→r_cand / 差异计数）+ 展开差异明细。 */
+/** 变更项卡片：汇总行（资产名 / r_base→r_cand / 差异计数 / 测试门禁）+ 展开差异明细。 */
 export function CrItemCard({ item }: { item: CRDiffItem }) {
   const relN = item.diff ? item.diff.relations.added.length + item.diff.relations.removed.length : 0;
   const propN = item.diff?.properties.length ?? 0;
   const artN = item.diff?.artifacts.length ?? 0;
   const changeN = propN + artN + relN;
+  const gate = item.test_gate;
+  const gateLabel =
+    gate === undefined
+      ? null
+      : !gate.required
+        ? null
+        : gate.satisfied
+          ? "测试证据 ✓"
+          : gate.reason === "no_runs"
+            ? "需测试证据 · 尚无运行"
+            : `需测试证据 · 最新 ${gate.latestResult ?? "未通过"}`;
   return (
     <details className="cr-item">
       <summary>
@@ -125,6 +142,14 @@ export function CrItemCard({ item }: { item: CRDiffItem }) {
                   artN > 0 ? `制品 ${artN}` : "",
                   relN > 0 ? `关系 ${relN}` : "",
                 ].filter(Boolean).join(" · ")}
+          </span>
+        )}
+        {gateLabel && (
+          <span
+            className={`cr-item-counts${gate?.satisfied ? "" : " gate-blocked"}`}
+            title="类型声明的发布门禁：该候选修订必须有最新一次通过的测试运行才能发布"
+          >
+            {gateLabel}
           </span>
         )}
         <IconChevronDown size={13} className="chev" />

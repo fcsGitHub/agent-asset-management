@@ -171,6 +171,64 @@ function SnippetCard({ teamId, assetId }: { teamId: string; assetId: string }) {
   );
 }
 
+// 批量关联下载（M58）：资产 + confirmed 关系闭包一次请求打成自描述 ZIP
+// （manifest.json + manifest-sha256.txt + 制品原文件；HF snapshot 思想 + BagIt 校验和）。
+// 下载经浏览器原生 <a download>（会话 cookie 鉴权），服务端按包内资产计 download 热度。
+function BundleCard({ teamId, assetId, directRelCount }: { teamId: string; assetId: string; directRelCount: number }) {
+  const [depth, setDepth] = useState(1);
+  const [direction, setDirection] = useState<"both" | "out" | "in">("both");
+  const dirLabel = { both: "上下游", out: "仅下游", in: "仅上游" } as const;
+  return (
+    <div className="card">
+      <h3>
+        批量下载
+        <span className="chip-dim" style={{ marginLeft: 8, fontSize: 12 }}>资产 + 关联闭包 · 自描述 ZIP</span>
+      </h3>
+      <div className="state" style={{ padding: 0, marginBottom: 8 }}>
+        按已确认关系把本资产与{dirLabel[direction]}关联资产（各取当前修订）连制品一次打包，
+        内含 manifest.json（资产/修订/关系清单）与 manifest-sha256.txt（逐文件校验和，离线可核完整性）。
+        直接关联 {directRelCount} 个。
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12.5 }}>
+          范围{" "}
+          <select
+            value={depth}
+            onChange={(e) => setDepth(Number(e.target.value))}
+            aria-label="关联跳数"
+            style={{ padding: "1px 4px" }}
+          >
+            <option value={1}>1 跳（直接关联）</option>
+            <option value={2}>2 跳</option>
+            <option value={3}>3 跳</option>
+          </select>
+        </label>
+        <label style={{ fontSize: 12.5 }}>
+          方向{" "}
+          <select
+            value={direction}
+            onChange={(e) => setDirection(e.target.value as "both" | "out" | "in")}
+            aria-label="关系方向"
+            style={{ padding: "1px 4px" }}
+          >
+            <option value="both">上下游</option>
+            <option value="out">仅下游（本资产 → 关联）</option>
+            <option value="in">仅上游（关联 → 本资产）</option>
+          </select>
+        </label>
+        <a
+          className="ref-chip"
+          href={`/api/v1/assets/${assetId}/bundle?teamId=${teamId}&depth=${depth}&direction=${direction}`}
+          download
+          title="下载 ZIP（manifest + 制品文件；计入各资产下载热度）"
+        >
+          ⬇ 下载 ZIP
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void }) {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [projectsError, setProjectsError] = useState("");
@@ -1111,12 +1169,24 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
                 <span className="chip-dim" style={{ marginLeft: 8, fontSize: 12 }}>
                   {detail.items.length} 项 · 由 {detail.created_by_name} 创建
                 </span>
-                {canManage(detail) && (
-                  <span style={{ float: "right", display: "flex", gap: 6 }}>
-                    <button onClick={() => void renameCollection()} title="改名（创建者或管理员）">改名…</button>
-                    <button style={{ color: "var(--red)" }} onClick={() => void deleteCollection()} title="删除集合（创建者或管理员）">删除集合</button>
-                  </span>
-                )}
+                <span style={{ float: "right", display: "flex", gap: 6 }}>
+                  {detail.items.length > 0 && (
+                    <a
+                      className="ref-chip"
+                      href={`/api/v1/collections/${detail.id}/bundle?teamId=${project!.teamId}`}
+                      download
+                      title="把集合内全部资产（各取当前修订）连制品打包成一个 ZIP（manifest + 校验和清单）"
+                    >
+                      ⬇ 下载集合包
+                    </a>
+                  )}
+                  {canManage(detail) && (
+                    <>
+                      <button onClick={() => void renameCollection()} title="改名（创建者或管理员）">改名…</button>
+                      <button style={{ color: "var(--red)" }} onClick={() => void deleteCollection()} title="删除集合（创建者或管理员）">删除集合</button>
+                    </>
+                  )}
+                </span>
               </h3>
               {detail.description && <p style={{ margin: "4px 0 10px", opacity: 0.8 }}>{detail.description}</p>}
               {detail.items.length === 0 ? (
@@ -1592,6 +1662,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
         )}
       </div>
       <SnippetCard teamId={teamId} assetId={assetId} />
+      <BundleCard teamId={teamId} assetId={assetId} directRelCount={(rels?.outgoing.length ?? 0) + (rels?.incoming.length ?? 0)} />
       <div className="card">
         <h3>集合</h3>
         {cols === null ? (

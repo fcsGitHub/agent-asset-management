@@ -49,6 +49,7 @@ type TypeDefRow = {
   unit_vocabularies: Record<string, string[]>;
   parent_type_version_id: string | null;
   status?: string;
+  requires_test_evidence?: boolean;
 };
 
 /**
@@ -65,7 +66,7 @@ async function loadTypeChain(client: PoolClient, teamId: string, typeVersionId: 
     }
     seen.add(cursor);
     const result: { rows: TypeDefRow[] } = await client.query<TypeDefRow>(
-      `SELECT id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id
+      `SELECT id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id, requires_test_evidence
          FROM asset_type_versions WHERE team_id = $1 AND id = $2`,
       [teamId, cursor]
     );
@@ -270,6 +271,9 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         jsonSchema: z.object({}).passthrough(),
         unitVocabularies: z.record(z.string(), z.array(z.string())).default({}),
         parentTypeVersionId: z.string().uuid().optional(),
+        // M58 发布测试门禁（GitHub required checks 思想）：门禁策略声明在类型层——
+        // 该类型资产进入正式发布必须携带最新一次通过的测试运行证据；不可变，改门禁=注册新版本
+        requiresTestEvidence: z.boolean().default(false),
       }),
       req.body
     );
@@ -304,9 +308,9 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         if (violation) throw ERR.INVALID(`子类型定义不是父类型的收窄：${violation}`);
       }
       await client.query(
-        `INSERT INTO asset_type_versions (team_id, id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [body.teamId, id, body.typeKey, body.version, body.title, JSON.stringify(body.jsonSchema), JSON.stringify(body.unitVocabularies), body.parentTypeVersionId ?? null, auth.userId]
+        `INSERT INTO asset_type_versions (team_id, id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id, requires_test_evidence, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [body.teamId, id, body.typeKey, body.version, body.title, JSON.stringify(body.jsonSchema), JSON.stringify(body.unitVocabularies), body.parentTypeVersionId ?? null, body.requiresTestEvidence, auth.userId]
       );
       // 图投影脏标记（M49）：类层次 SUBCLASS_OF 边可能变化
       await markGraphDirty(client, body.teamId);
@@ -659,7 +663,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
         `SELECT v.id, v.type_key, v.version, v.title, v.status, v.json_schema, v.unit_vocabularies,
-                v.parent_type_version_id, p.type_key AS parent_type_key, p.version AS parent_version, v.created_at
+                v.parent_type_version_id, p.type_key AS parent_type_key, p.version AS parent_version,
+                v.requires_test_evidence, v.created_at
            FROM asset_type_versions v
            LEFT JOIN asset_type_versions p ON p.team_id = v.team_id AND p.id = v.parent_type_version_id
           WHERE v.team_id = $1 ORDER BY v.type_key, v.version`,

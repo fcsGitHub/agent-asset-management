@@ -16,6 +16,7 @@ interface TypeInfo {
   id: string; type_key: string; version: string; title: string; status: string;
   parent_type_version_id?: string | null;
   parent_type_key?: string | null; parent_version?: string | null;
+  requires_test_evidence?: boolean;
   json_schema: { required?: string[]; properties?: Record<string, PropSchema> };
 }
 interface RelTypeInfo {
@@ -385,6 +386,9 @@ function TreeNode({ t, depth, childrenOf }: { t: TypeInfo; depth: number; childr
         {t.parent_type_key && (
           <span className="onto-parent">← {t.parent_type_key} v{t.parent_version}</span>
         )}
+        {t.requires_test_evidence && (
+          <span className="chip chip-dim" title="发布门禁：该类型资产必须有最新一次通过的测试运行才能正式发布">需测试证据</span>
+        )}
         <span className={`chip ${t.status === "active" ? "chip-ok" : "chip-dim"}`}>{t.status === "active" ? "active" : t.status}</span>
       </div>
       {open && (
@@ -508,6 +512,7 @@ function RegisterType({ project, types, unitVocab, onDone }: {
   const [version, setVersion] = useState("1.0.0");
   const [title, setTitle] = useState("");
   const [parentId, setParentId] = useState("");
+  const [requiresTest, setRequiresTest] = useState(false);
   const [schemaText, setSchemaText] = useState(DEFAULT_SCHEMA);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -548,10 +553,11 @@ function RegisterType({ project, types, unitVocab, onDone }: {
         body: {
           teamId: project.teamId, typeKey, version, title, jsonSchema,
           ...(parentId ? { parentTypeVersionId: parentId } : {}),
+          requiresTestEvidence: requiresTest,
         },
       });
-      onDone(`类型已登记：${typeKey} v${version}（${res.typeVersionId.slice(0, 8)}…）`);
-      setTypeKey(""); setTitle(""); setParentId(""); setSchemaText(DEFAULT_SCHEMA);
+      onDone(`类型已登记：${typeKey} v${version}（${res.typeVersionId.slice(0, 8)}…）${requiresTest ? "，含发布测试门禁" : ""}`);
+      setTypeKey(""); setTitle(""); setParentId(""); setRequiresTest(false); setSchemaText(DEFAULT_SCHEMA);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -574,7 +580,16 @@ function RegisterType({ project, types, unitVocab, onDone }: {
             ))}
           </select>
         </label>
+        <label>发布测试门禁（M58，GitHub required checks 思想）
+          <select value={requiresTest ? "1" : "0"} onChange={(e) => setRequiresTest(e.target.value === "1")}>
+            <option value="0">关闭：发布不强制测试证据</option>
+            <option value="1">开启：候选修订必须有最新一次通过的测试运行才能发布</option>
+          </select>
+        </label>
       </div>
+      {requiresTest && (
+        <div className="hint">门禁类型资产进入正式发布时，服务端会校验该候选修订（按内容摘要绑定）上最新一次测试运行为 pass；曾通过但后来失败同样拦截。</div>
+      )}
       <label>JSON Schema（必填属性放 required；单位词表对应 &lt;name&gt; 或 &lt;name&gt;Unit 属性）
         <textarea rows={6} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} style={{ fontFamily: "monospace", width: "100%" }} />
       </label>

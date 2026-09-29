@@ -12,7 +12,9 @@ import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { canonicalDigest, reviewDigest as computeReviewDigest, POLICY_VERSION, stableStringify } from "@taw/domain/digest";
 import { diffRevisions, type RevisionDiff } from "@taw/domain/diff";
+import { checkTestGate, type TestGateCheck } from "@taw/domain/bundle";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
+import type { PoolClient } from "pg";
 
 interface CRRow {
   id: string;
@@ -40,6 +42,70 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
     );
     if (!rows[0]) throw ERR.NOT_FOUND();
     return rows[0].role;
+  }
+
+  // ---------- 发布测试门禁（M58，GitHub required checks 思想） ----------
+  // 策略在类型层（链上任一定义 requires_test_evidence=true 即门禁类型）；证据只认
+  // 候选精确修订上的最新一次运行（id 决胜保证确定性）。prepare 冻结进候选摘要，
+  // publish 现场重算：prepare 后新落的 fail 两条路都拦（摘要失配 + 显式 409）。
+  async function testGateForItems(
+    client: PoolClient,
+    teamId: string,
+    items: { assetId: string; assetName: string; revisionId: string; contentDigest: string; typeVersionId: string }[]
+  ): Promise<TestGateCheck[]> {
+    const checks: TestGateCheck[] = [];
+    for (const it of items) {
+      const { rows: reqRows } = await client.query<{ required: boolean }>(
+        `WITH RECURSIVE chain AS (
+           SELECT id, parent_type_version_id, requires_test_evidence FROM asset_type_versions WHERE team_id = $1 AND id = $2
+           UNION ALL
+           SELECT t.id, t.parent_type_version_id, t.requires_test_evidence
+             FROM asset_type_versions t JOIN chain c ON t.team_id = $1 AND t.id = c.parent_type_version_id
+         ) SELECT bool_or(requires_test_evidence) AS required FROM chain`,
+        [teamId, it.typeVersionId]
+      );
+      const { rows: runRows } = await client.query<{
+        id: string;
+        result: "pass" | "fail" | "error" | "skipped";
+        executed_at: Date;
+        target_content_digest: string;
+        test_asset_id: string;
+      }>(
+        `SELECT id, result, executed_at, target_content_digest, test_asset_id FROM test_runs
+          WHERE team_id = $1 AND target_asset_id = $2 AND target_revision_id = $3
+          ORDER BY executed_at DESC, id DESC LIMIT 1`,
+        [teamId, it.assetId, it.revisionId]
+      );
+      const run = runRows[0];
+      checks.push(
+        checkTestGate(
+          {
+            assetId: it.assetId,
+            assetName: it.assetName,
+            revisionId: it.revisionId,
+            contentDigest: it.contentDigest,
+            requiresTestEvidence: reqRows[0]?.required === true,
+          },
+          run
+            ? [
+                {
+                  id: run.id,
+                  targetRevisionId: it.revisionId,
+                  targetContentDigest: run.target_content_digest,
+                  result: run.result,
+                  executedAt: run.executed_at.toISOString(),
+                  testAssetId: run.test_asset_id,
+                },
+              ]
+            : []
+        )
+      );
+    }
+    return checks;
+  }
+
+  function unsatisfiedGates(gates: TestGateCheck[]): TestGateCheck[] {
+    return gates.filter((g) => g.required && !g.satisfied);
   }
 
   // ---------- 创建 CR ----------
@@ -153,6 +219,19 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
            FROM review_snapshots WHERE team_id = $1 AND change_request_id = $2 ORDER BY created_at DESC`,
         [teamId, crId]
       );
+      // M58：最新有效快照的测试门禁状态随条目返回（评审者在 CR 详情即见
+      // 「需测试证据：通过/未通过/尚无运行」；发布端仍会现场重算，不信任展示层）
+      const activeSnap = snaps.find((s: { superseded: boolean }) => !s.superseded);
+      const gateByAsset = new Map<string, unknown>();
+      if (activeSnap) {
+        const { rows: payRows } = await client.query<{ payload: { revisions?: { asset_id: string; test_gate?: unknown }[] } }>(
+          `SELECT payload FROM review_snapshots WHERE team_id = $1 AND id = $2`,
+          [teamId, activeSnap.id]
+        );
+        for (const rev of payRows[0]?.payload?.revisions ?? []) {
+          if (rev.test_gate !== undefined) gateByAsset.set(rev.asset_id, rev.test_gate);
+        }
+      }
       // 逐项冻结差异（M43）：diff 绑定 CR 固化的 base/candidate 修订（而非分支活头），
       // 与审批摘要的冻结语义一致；复用 @taw/domain/diff 的 diffRevisions（属性/制品/关系/文本行）。
       const loadRev = async (revisionId: string) => {
@@ -177,7 +256,7 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
           relations: rels.rows.map((r) => ({ typeKey: r.type_key, target: r.target })),
         };
       };
-      const items: Array<(typeof itemRows)[number] & { diff: RevisionDiff }> = [];
+      const items: Array<(typeof itemRows)[number] & { diff: RevisionDiff; test_gate?: unknown }> = [];
       for (const it of itemRows) {
         const [from, to] = await Promise.all([loadRev(it.base_revision_id), loadRev(it.candidate_revision_id)]);
         const diff = await diffRevisions({
@@ -190,7 +269,8 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
             }
           },
         });
-        items.push({ ...it, diff });
+        const gate = gateByAsset.get(it.asset_id);
+        items.push({ ...it, diff, ...(gate !== undefined ? { test_gate: gate } : {}) });
       }
       const { rows: comments } = await client.query(
         `SELECT c.id, c.content, c.created_at, u.display_name AS author_name
@@ -230,11 +310,13 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
       }
       const { rows: items } = await client.query<{
         asset_id: string;
+        asset_name: string;
         base_revision_id: string;
         candidate_revision_id: string;
       }>(
-        `SELECT asset_id, base_revision_id, candidate_revision_id FROM change_request_items
-          WHERE team_id = $1 AND change_request_id = $2 ORDER BY asset_id`,
+        `SELECT i.asset_id, a.name AS asset_name, i.base_revision_id, i.candidate_revision_id
+           FROM change_request_items i JOIN assets a ON a.team_id = i.team_id AND a.id = i.asset_id
+          WHERE i.team_id = $1 AND i.change_request_id = $2 ORDER BY i.asset_id`,
         [body.teamId, crId]
       );
       if (!items[0]) throw ERR.INVALID("CR 没有变更项");
@@ -291,6 +373,16 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
             throw ERR.CONFLICT("ARTIFACT_MISSING", `制品 ${a.digest.slice(0, 8)}… 不可读，无法进入审核`);
           }
         }
+        // 门禁状态冻结进候选摘要与快照载荷：评审者可见，prepare 后状态变化 → 摘要失配
+        const [gate] = await testGateForItems(client, body.teamId, [
+          {
+            assetId: item.asset_id,
+            assetName: item.asset_name,
+            revisionId: r.id,
+            contentDigest: r.content_digest,
+            typeVersionId: r.type_version_id,
+          },
+        ]);
         revisionPayloads.push({
           asset_id: item.asset_id,
           revision_id: r.id,
@@ -300,6 +392,7 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
           properties: r.properties,
           content_digest: r.content_digest,
           artifact_digests: arts.rows.map((a) => a.digest),
+          test_gate: gate,
         });
       }
       const candidateDigest = canonicalDigest({
@@ -439,6 +532,7 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
               revision_id: string;
               base_revision_id: string;
               expected_channel_head?: string | null;
+              type_version: string;
               content_digest: string;
               artifact_digests: string[];
             }[];
@@ -554,7 +648,43 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
             artifact_digests: arts.rows.map((a) => a.digest),
           });
         }
-        const freshCandidate = canonicalDigest({ revisions: freshPayloads, policy: POLICY_VERSION });
+        // 5.5) 发布测试门禁（M58）：现场重算（类型链声明 + 候选修订最新一次运行）。
+        //      未满足一律拦截——先于摘要比对给评审者明确原因；prepare 后状态翻转
+        //      （如新落一条 fail）也会在下方的摘要重算失配兜底，两条路径互为冗余。
+        const { rows: nameRows } = await client.query<{ id: string; name: string }>(
+          `SELECT id, name FROM assets WHERE team_id = $1 AND id = ANY($2::uuid[])`,
+          [body.teamId, snap.payload.revisions.map((r) => r.asset_id)]
+        );
+        const assetNames = new Map(nameRows.map((n) => [n.id, n.name]));
+        const freshGates = await testGateForItems(
+          client,
+          body.teamId,
+          snap.payload.revisions.map((r) => ({
+            assetId: r.asset_id,
+            assetName: assetNames.get(r.asset_id) ?? "",
+            revisionId: r.revision_id,
+            contentDigest: r.content_digest,
+            typeVersionId: r.type_version,
+          }))
+        );
+        const blockedGates = unsatisfiedGates(freshGates);
+        if (blockedGates.length > 0) {
+          throw ERR.CONFLICT(
+            "TEST_GATE_REQUIRED",
+            "门禁类型资产的候选修订缺少最新一次通过的测试运行，不能发布",
+            blockedGates.map((g) => ({
+              assetId: g.assetId,
+              assetName: g.assetName,
+              reason: g.reason,
+              latestResult: g.latestResult ?? null,
+            }))
+          );
+        }
+        const gateByAsset = new Map(freshGates.map((g) => [g.assetId, g]));
+        const freshCandidate = canonicalDigest({
+          revisions: freshPayloads.map((p) => ({ ...p, test_gate: gateByAsset.get(p.asset_id) })),
+          policy: POLICY_VERSION,
+        });
         if (freshCandidate !== snap.candidate_digest) {
           throw ERR.CONFLICT("REVIEW_DIGEST_CHANGED", "候选内容与审核快照不一致");
         }
