@@ -640,16 +640,43 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    四段就此齐备：便捷设定（M60+M61）→ 入库/更新强制（M59）→ 测试门禁（M58）
    → 发布复核（M59/M58）。
    全量 61 套件 300 项全绿。
+   M62 已完成（Schema 驱动的登记表单，M61 候选「schema 约束的前端预填」升格；
+   调研笔记 research-M62-schema-form.md）。修的是 M59 强制关卡之后暴露的输入侧
+   四个坑：①祖先链字段不可见（表单只渲染所选类型自身 properties，而
+   validateAgainstChain 逐环校验——父类 required 字段被子类 schema 省略时表单无
+   输入位、登记必挂且无从下手）；②布尔字段文本框提交字符串必挂；③min/max/
+   长度/pattern/单位词表零提示；④数组只按字符串切分。@taw/domain/schema-form
+   纯函数三件：schemaToFormSpec（类型链→字段规格，语义与 validateAgainstChain
+   严格对齐——字段=链上并集、required=并集、有效约束=各环**交集**（数值/长度取
+   更紧、枚举取交集、派生侧漏写 min 不会放松祖先 min）、枚举无交集如实报治理债、
+   单位词表并入 <name>Unit 下拉且 schema enum 优先、仅祖先声明标 inheritedFrom；
+   锚点 rjsf/JSON Forms/Formly 但自建薄转换层，类型链合并是本项目特有语义）；
+   formValuesToProperties（表单字符串→类型化属性：布尔/整数/数值/按元素类型
+   列表/JSON，坏值收集 problems 不抛，替换 cleanedProps）；checkFormValues（本地
+   预检，咨询性——必填/枚举/词表/范围/长度/格式/元素类型，完整语义仍由服务端
+   ajv 权威）。web 登记表单：按 (parent_type_key, parent_version) 从 GET /types
+   全量行重建链（深度/环防御同 loadTypeChain 口径），字段渲染部件化（枚举/布尔
+   下拉、整数/数值输入模式、JSON/列表、约束人读提示行、继承来源标注、链并集与
+   封闭说明）；「校验」与「登记」先本地预检，拦截成功省掉必然 400 的往返，通过
+   后仍可走服务端 dry-run。tests/m62 六项：单类型规格、链合并（交集/无交集治理
+   债/继承标注/closed）、词表并入三级优先、换算（含坏值不抛）、预检命中与放行、
+   端到端（两级链 GET /types 重建→并集字段填满→dry-run 全链通过；漏继承字段
+   本地预检+服务端 [parent vX] 前缀双重拦截；词表外值 422 且本地预检提前发现）。
+   浏览器实测：curl 造 m62.ui.base/m62.ui.orbit 两级链 → 表单四字段（frame 收窄
+   枚举仅 ECI/ECEF、level * 范围 0~3 提示、timeUnit 词表下拉 s/ms+词表名提示、
+   Owner *（继承自 m62.ui.base v1.0.0）+ 并集说明）；空表单校验→本地预检报缺
+   level/owner；level=9→「超过上限 3」；level=2→服务端 dry-run ✓；登记成功入
+   目录。截图：m62-ui-form-spec、m62-ui-registered。全量 62 套件 306 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M61 后，按性价比排序）：AI 草稿质量反馈环（登记后「AI 草稿微调
-   了哪些」轻量回传，反哺 prompt——需先攒真实使用样本）；schema 约束的前端预填
-   （登记表单按 min/max/pattern 输入前提示）；bundle 离线校验/回导工具；门禁类型
-   UI 提示前移；调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
-   lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
-   （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
-   BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。
-   暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
-   点名需求。
+   可选后续方向（M62 后，按性价比排序）：bundle 离线校验/回导工具（manifest-sha256
+   验证 CLI）；门禁类型 UI 提示前移（登记表单选中需测试证据类型时提示）；分支草稿
+   编辑器同享 schema 表单（M62 只覆盖登记侧，草稿属性仍是 JSON 文本域）；
+   调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/lifecycle 必填引导
+   与完整度 scorecard（Backstage）、属性自定义筛选器（OpenMetadata）、分类沿
+   血缘传播写侧（Atlas，需治理确认流）、引用导出 BibTeX/Markdown（Zenodo）、
+   别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。AI 草稿质量反馈环仍需先攒
+   真实使用样本。暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，
+   或由用户直接点名需求。

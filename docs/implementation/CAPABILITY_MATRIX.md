@@ -20,6 +20,7 @@
 | 更新与入库全路径 schema 强制（M59，OpenMetadata 数据契约思想） | 登记与分支草稿保存共用同一类型链关卡（apps/api/src/ontology.ts）；prepare-review 复核候选（清存量欠账）；dry-run 端点 /assets/validate | apps/api/src/ontology.ts, routes/branches.ts, releases.ts, catalog.ts |
 | Schema 便捷生成（M60，quicktype/unanimity 惯例） | 表单属性行构建 + 样例推断（枚举不机械推断）双通道生成 JSON Schema；三模式表单；生成物仍走全部质量门 | @taw/domain/schema-builder, routes/catalog.ts（/types/infer-schema）, components/OntologyPage.tsx |
 | 自然语言生成 schema 草稿（M61） | 真实 DeepSeek 严格 JSON → zod strict 白名单四层防线 → 属性行草稿回填表单；零写入，key 未配置 503 如实降级 | routes/catalog.ts（/types/describe-schema、SchemaDraft）, OntologyPage.tsx |
+| Schema 驱动登记表单（M62，rjsf/JSON Forms 思想） | 类型链→字段规格（字段=链并集、required=并集、约束=各环交集、词表下拉、继承标注）；表单值类型化换算；本地预检拦截，服务端 ajv 仍权威 | @taw/domain/schema-form, apps/web/src/pages/Workbench.tsx（AssetRegister） |
 | 不可变修订 + 分支 + 差异 | DB 权限拒绝覆盖；branch_entries base→head；文本/属性/关系/二进制 diff | migrations/0002/0007, routes/branches.ts, packages/domain/src/diff.ts |
 | 关系 + 候选分离 | relation_assertions（confirmed）与语义候选（candidate/proposed）分离 | routes/catalog.ts, routes/semantic.ts, services/semantic-worker |
 | Issue/CR/审核发布/回退/绑定 | 审核快照 candidate/review digest；固定顺序锁；单事务发布；幂等键 | routes/releases.ts, migrations/0005/0006 |

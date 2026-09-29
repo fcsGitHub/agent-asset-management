@@ -19,6 +19,10 @@ import {
 import { CrItemCard, CrComments, type CRComment, type CRItemDiff } from "../components/CrDiff";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
 import { TYPE_FAMILIES } from "../lib/typeFamily";
+import {
+  checkFormValues, formValuesToProperties, schemaToFormSpec,
+  type FormFieldSpec, type TypeDefLite,
+} from "@taw/domain/schema-form";
 
 type ThemeMode = "auto" | "light" | "dark";
 const THEME_LABEL: Record<ThemeMode, string> = { auto: "跟随系统", light: "浅色", dark: "深色" };
@@ -55,7 +59,16 @@ interface SessionInfo { sessionId: string; title: string; visibility: string; mi
 interface Msg { id: string; role: string; content: string; seq: number }
 interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
-interface TypeInfo { id: string; type_key: string; version: string; title: string; parent_type_key?: string | null; parent_version?: string | null; json_schema: { required?: string[]; properties?: Record<string, { type?: string; enum?: string[]; title?: string }> } }
+interface TypeInfo {
+  id: string; type_key: string; version: string; title: string;
+  parent_type_key?: string | null; parent_version?: string | null;
+  unit_vocabularies?: Record<string, string[]>;
+  json_schema: {
+    required?: string[];
+    properties?: Record<string, { type?: string; enum?: string[]; title?: string; minimum?: number; maximum?: number }>;
+    additionalProperties?: boolean;
+  };
+}
 interface AssetDetail {
   id: string; name: string; lifecycle: string; type_key: string; type_version: string;
   revisions: { id: string; seq: number; content_digest: string; properties: object; created_at: string; artifacts?: { blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number }[] }[];
@@ -2168,6 +2181,74 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
   );
 }
 
+/** 字段规格 → 输入部件（M62）：枚举/词表与布尔渲染下拉，数值带输入模式，object/array 为 JSON/列表。 */
+function FieldInput({ f, value, onChange }: { f: FormFieldSpec; value: string; onChange: (v: string) => void }) {
+  if (f.input === "enum") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">—</option>
+        {(f.enumValues ?? []).map((v) => (
+          <option key={v} value={v}>{v}</option>
+        ))}
+      </select>
+    );
+  }
+  if (f.input === "boolean") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">—</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+  if (f.input === "integer" || f.input === "number") {
+    return (
+      <input
+        inputMode={f.input === "integer" ? "numeric" : "decimal"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={f.input === "integer" ? "整数" : "数字"}
+      />
+    );
+  }
+  if (f.input === "json") {
+    return (
+      <textarea
+        rows={3}
+        style={{ width: "100%", fontFamily: "var(--mono, monospace)", fontSize: 12 }}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={f.type === "array" ? 'JSON 数组，如 [{"name":"a"}]' : 'JSON 对象，如 {"name":"a"}'}
+      />
+    );
+  }
+  if (f.input === "list") {
+    return (
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={`逗号分隔的 ${f.items ?? "string"} 列表，如 a, b`}
+      />
+    );
+  }
+  return <input value={value} onChange={(e) => onChange(e.target.value)} />;
+}
+
+/** 字段约束的人读提示（范围/长度/格式/词表）；无约束返回空串不渲染。 */
+function fieldHint(f: FormFieldSpec): string {
+  const parts: string[] = [];
+  if (f.minimum !== undefined || f.maximum !== undefined) {
+    parts.push(`范围 ${f.minimum ?? "-∞"} ~ ${f.maximum ?? "+∞"}`);
+  }
+  if (f.minLength !== undefined || f.maxLength !== undefined) {
+    parts.push(`长度 ${f.minLength ?? 0}–${f.maxLength ?? "不限"}`);
+  }
+  if (f.pattern) parts.push(`格式 ${f.pattern}`);
+  if (f.vocabulary) parts.push(`受控词表 ${f.vocabulary}`);
+  return parts.join(" · ");
+}
+
 function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?: { name?: string; typeKeyHint?: string; nonce: number }; onDone: () => void }) {
   const [types, setTypes] = useState<TypeInfo[]>([]);
   const [typeKey, setTypeKey] = useState("");
@@ -2201,23 +2282,44 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
   }, [hintNonce, types]);
 
   const type = types.find((t) => t.type_key === typeKey);
-  const fields = useMemo(() => Object.entries(type?.json_schema.properties ?? {}), [type]);
+
+  // 类型链重建（子 → … → 根）：GET /types 已返回全量类型行，按 (parent_type_key,
+  // parent_version) 走链；深度/环防御与服务端 loadTypeChain 同口径。合并语义见
+  // @taw/domain/schema-form：字段 = 链上并集，required 取并集，约束取最派生一环。
+  const spec = useMemo(() => {
+    if (!type) return null;
+    const chain: TypeDefLite[] = [];
+    const seen = new Set<string>();
+    let cursor: TypeInfo | undefined = type;
+    while (cursor && chain.length <= 16 && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      chain.push({
+        typeKey: cursor.type_key,
+        version: cursor.version,
+        jsonSchema: cursor.json_schema ?? {},
+        unitVocabularies: cursor.unit_vocabularies ?? {},
+      });
+      const pk = cursor.parent_type_key;
+      const pv = cursor.parent_version;
+      cursor = pk && pv ? types.find((t) => t.type_key === pk && t.version === pv) : undefined;
+    }
+    return schemaToFormSpec(chain);
+  }, [type, types]);
 
   if (!project) return <div className="state">先选择项目。</div>;
 
-  // 表单字符串 → 类型化属性（提交与「校验」共用，两边口径不可能分叉）
-  function cleanedProps(): Record<string, unknown> {
-    const cleaned: Record<string, unknown> = {};
-    for (const [key, schema] of Object.entries(type?.json_schema.properties ?? {})) {
-      const raw = props[key];
-      if (raw === undefined || raw === "") continue;
-      if (schema.type === "number") cleaned[key] = Number(raw);
-      else if (schema.type === "integer") cleaned[key] = parseInt(raw, 10);
-      else if (schema.type === "object") cleaned[key] = JSON.parse(raw);
-      else if (schema.type === "array") cleaned[key] = raw.split(/[,，]/).map((s) => s.trim());
-      else cleaned[key] = raw;
-    }
-    return cleaned;
+  // 表单字符串 → 类型化属性：与 spec 同源换算（布尔/整数/数值数组/JSON），
+  // 解析失败收集为 problems 就地展示，不抛异常；提交与「校验」共用，口径不可能分叉。
+  function coerce(): { properties: Record<string, unknown>; problems: string[] } {
+    if (!spec) return { properties: {}, problems: [] };
+    return formValuesToProperties(spec.fields, props);
+  }
+
+  /** 本地预检（M62，咨询性）：换算问题优先，否则按字段规格查确定性约束；服务端 ajv 仍是权威关卡。 */
+  function precheck(): string[] {
+    if (!spec) return [];
+    const { properties, problems } = coerce();
+    return problems.length > 0 ? problems : checkFormValues(spec.fields, properties);
   }
 
   return (
@@ -2241,33 +2343,26 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
         <label>资产名称</label>
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </div>
-      {type && fields.length > 0 && (
+      {type && spec && spec.fields.length > 0 && (
         <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8 }}>
           <legend style={{ fontSize: 13, color: "var(--muted)" }}>
-            类型属性（* 必填，由类型定义 v{type.version} 校验）
+            类型属性（* 必填；含继承链共 {spec.fields.length} 项，登记时按 v{type.version} 及全部祖先定义校验）
           </legend>
-          {fields.map(([key, schema]) => (
-            <div className="field" key={key}>
+          {spec.fields.map((f) => (
+            <div className="field" key={f.key}>
               <label>
-                {key}
-                {type.json_schema.required?.includes(key) ? " *" : ""}
-                {schema.enum ? `（${schema.enum.join(" / ")}）` : ""}
+                {f.title || f.key}
+                {f.required ? " *" : ""}
+                {f.inheritedFrom && (
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>（继承自 {f.inheritedFrom}）</span>
+                )}
               </label>
-              {schema.enum ? (
-                <select value={props[key] ?? ""} onChange={(e) => setProps({ ...props, [key]: e.target.value })}>
-                  <option value="">—</option>
-                  {schema.enum.map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  value={props[key] ?? ""}
-                  onChange={(e) => setProps({ ...props, [key]: e.target.value })}
-                  placeholder={schema.type === "number" ? "数字" : schema.type === "object" ? "JSON 对象" : "文本"}
-                />
-              )}
+              <FieldInput f={f} value={props[f.key] ?? ""} onChange={(v) => setProps({ ...props, [f.key]: v })} />
+              {fieldHint(f) && <div className="hint" style={{ fontSize: 11, marginTop: 2 }}>{fieldHint(f)}</div>}
             </div>
+          ))}
+          {spec.notes.map((n, i) => (
+            <div key={i} className="hint" style={{ fontSize: 11 }}>{n}</div>
           ))}
         </fieldset>
       )}
@@ -2287,21 +2382,22 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
       <div className="form-actions">
         <button
           disabled={busy || !typeKey}
-          title="按当前类型定义做全链校验（与登记同一关卡，零副作用；M59）"
+          title="先本地预检（字段规格：必填/枚举/词表/范围/长度/格式），通过后按类型链做服务端全链 dry-run（与登记同一关卡，零副作用；M59/M62）"
           onClick={() => {
-            if (!type || !project) return;
+            if (!type || !project || !spec) return;
             setError(""); setOk(""); setCheckResult(null);
-            try {
-              const properties = cleanedProps();
-              void api<{ valid: boolean; errors: string[] }>("/assets/validate", {
-                method: "POST",
-                body: { teamId: project.teamId, typeVersionId: type.id, properties },
-              })
-                .then(setCheckResult)
-                .catch((err) => setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "校验失败"));
-            } catch (parseErr) {
-              setError(parseErr instanceof Error ? parseErr.message : "属性 JSON 解析失败");
+            const local = precheck();
+            if (local.length > 0) {
+              setCheckResult({ valid: false, errors: local.map((e) => `本地预检：${e}`) });
+              return;
             }
+            const { properties } = coerce();
+            void api<{ valid: boolean; errors: string[] }>("/assets/validate", {
+              method: "POST",
+              body: { teamId: project.teamId, typeVersionId: type.id, properties },
+            })
+              .then(setCheckResult)
+              .catch((err) => setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "校验失败"));
           }}
         >
           校验
@@ -2310,13 +2406,18 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
           className="primary"
           disabled={busy || !typeKey || !name}
           onClick={async () => {
-            if (!type || !project) return;
+            if (!type || !project || !spec) return;
             setBusy(true);
             setError("");
             setOk("");
             try {
-              // 属性类型修正：数字与对象
-              const cleaned = cleanedProps();
+              // 本地预检拦截（M62）：换算失败或确定性约束不过，就地报错，不做必然失败的网络往返
+              const local = precheck();
+              if (local.length > 0) {
+                setError(local.join("；"));
+                return;
+              }
+              const cleaned = coerce().properties;
               let artifacts: unknown[] = [];
               if (file) {
                 const up = await uploadFile(project.teamId, file);
