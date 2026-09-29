@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { q, withTeam } from "../db.js";
 import type { PoolClient } from "pg";
-import { ERR } from "../errors.js";
+import { ERR, AppError } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
@@ -38,46 +38,9 @@ async function teamRole(userId: string, teamId: string): Promise<string> {
 /** 递归键排序的稳定 JSON 序列化见 @taw/domain/digest（与发布摘要共用同一实现）。 */
 export { stableStringify };
 
-const TYPE_CHAIN_MAX_DEPTH = 16;
-
-type TypeDefRow = {
-  id: string;
-  type_key: string;
-  version: string;
-  title: string;
-  json_schema: object;
-  unit_vocabularies: Record<string, string[]>;
-  parent_type_version_id: string | null;
-  status?: string;
-  requires_test_evidence?: boolean;
-};
-
-/**
- * 载入类型定义链（子 → 父 → … → 根）。注册时父引用必须已存在且边指向已有定义，
- * 因此链不可能成环；深度上限是防御性兜底（M8 本体层次）。
- */
-async function loadTypeChain(client: PoolClient, teamId: string, typeVersionId: string): Promise<TypeDefRow[]> {
-  const chain: TypeDefRow[] = [];
-  let cursor: string | null = typeVersionId;
-  const seen = new Set<string>();
-  while (cursor) {
-    if (chain.length > TYPE_CHAIN_MAX_DEPTH || seen.has(cursor)) {
-      throw ERR.CONFLICT("TYPE_HIERARCHY_CORRUPT", "类型层次异常：链过深或成环，联系管理员检查数据");
-    }
-    seen.add(cursor);
-    const result: { rows: TypeDefRow[] } = await client.query<TypeDefRow>(
-      `SELECT id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id, requires_test_evidence
-         FROM asset_type_versions WHERE team_id = $1 AND id = $2`,
-      [teamId, cursor]
-    );
-    const row: TypeDefRow | undefined = result.rows[0];
-    if (!row) throw ERR.INVALID("类型定义不存在（层次链断裂）");
-    chain.push(row);
-    const next: string | null = row.parent_type_version_id;
-    cursor = next;
-  }
-  return chain;
-}
+// 类型链装载与属性校验（M59 抽共享关卡）：登记/分支保存/dry-run 共用同一实现
+import { loadTypeChain, validateAgainstChain, type TypeDefRow } from "../ontology.js";
+export type { TypeDefRow };
 
 /** 子定义必须收窄链上每个祖先定义；返回首个违规描述（无违规返回 null）。 */
 function firstInheritanceViolation(chain: TypeDefRow[]): string | null {
@@ -934,26 +897,15 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const revisionId = newId();
 
     await withTeam(body.teamId, async (client) => {
-      // 锁定类型定义并校验属性（A03）。层次：子类型资产必须同时满足链上全部祖先定义。
+      // 锁定类型定义并校验属性（A03；M59 起与分支保存/dry-run 共用同一关卡）。
+      // 层次：子类型资产必须同时满足链上全部祖先定义。
       const chain = await loadTypeChain(client, body.teamId, body.typeVersionId);
       const { rows: statusRow } = await client.query<{ status: string }>(
         `SELECT status FROM asset_type_versions WHERE team_id = $1 AND id = $2`,
         [body.teamId, body.typeVersionId]
       );
       if (statusRow[0]?.status !== "active") throw ERR.INVALID("typeVersionId 不存在或已停用");
-      const allErrors: string[] = [];
-      for (const def of chain) {
-        const check = validateProperties(
-          { jsonSchema: def.json_schema, unitVocabularies: def.unit_vocabularies },
-          body.properties
-        );
-        if (!check.valid) {
-          allErrors.push(
-            ...check.errors.map((e) => (chain.length > 1 ? `[${def.type_key} v${def.version}] ${e}` : e))
-          );
-        }
-      }
-      if (allErrors.length > 0) throw ERR.INVALID("属性不满足类型约束", allErrors);
+      validateAgainstChain(chain, body.properties);
 
       // 制品 blob 必须已在本团队内容库（防止引用他团队摘要）
       for (const art of body.artifacts) {
@@ -1013,6 +965,40 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       await markGraphDirty(client, body.teamId);
     });
     return reply.code(201).send({ teamId: body.teamId, assetId, revisionId });
+  });
+
+  // 属性 dry-run 校验（M59，Backstage catalog validate 端点思想）：与登记/分支保存
+  // 同一关卡（loadTypeChain + validateAgainstChain），零副作用——表单提交前、Agent
+  // 登记提案前、外部集成都可先拿判定，规则不可能与真实写入分叉。
+  app.post("/assets/validate", async (req) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        typeVersionId: z.string().uuid(),
+        properties: z.object({}).passthrough(),
+      }),
+      req.body
+    );
+    await teamRole(auth.userId, body.teamId);
+    return withTeam(body.teamId, async (client) => {
+      const chain = await loadTypeChain(client, body.teamId, body.typeVersionId);
+      const { rows: statusRow } = await client.query<{ status: string }>(
+        `SELECT status FROM asset_type_versions WHERE team_id = $1 AND id = $2`,
+        [body.teamId, body.typeVersionId]
+      );
+      if (statusRow[0]?.status !== "active") throw ERR.INVALID("typeVersionId 不存在或已停用");
+      try {
+        validateAgainstChain(chain, body.properties);
+        return { valid: true, errors: [] as string[] };
+      } catch (err) {
+        if (err instanceof AppError && err.statusCode === 422) {
+          return { valid: false, errors: (err.details as string[]) ?? [err.message] };
+        }
+        throw err;
+      }
+    });
   });
 
   // ---------- 查询 ----------

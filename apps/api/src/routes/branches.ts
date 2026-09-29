@@ -11,6 +11,7 @@ import { parseBody } from "./auth.js";
 import { stableStringify } from "@taw/domain/digest";
 import { diffRevisions } from "@taw/domain/diff";
 import { blobStoreFromEnv } from "@taw/storage/local-cas";
+import { loadTypeChain, validateAgainstChain } from "../ontology.js";
 
 async function teamRole(userId: string, teamId: string): Promise<string> {
   const { rows } = await q<{ role: string }>(
@@ -152,6 +153,10 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       );
       const head = headRows[0]!;
       const newProperties = { ...head.properties, ...(body.properties ?? {}) };
+      // 更新必须经过设定的 schema（M59）：草稿保存与登记共用同一类型链关卡——
+      // 子类型资产同时满足链上全部祖先定义，错误带 [typeKey vN] 前缀。
+      const chain = await loadTypeChain(client, body.teamId, head.type_version_id);
+      validateAgainstChain(chain, newProperties);
       const canonical = stableStringify({
         p: newProperties,
         arts: body.artifacts.map((a) => a.digest).sort(),

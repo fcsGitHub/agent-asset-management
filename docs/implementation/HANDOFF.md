@@ -564,15 +564,48 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    数据（m58.safety.model 类型、M58安全模型、回归套件、移交验证包、评审员
    账号）留在 M49 演示团队，与历史走查数据共存惯例一致。
    全量 58 套件 284 项全绿（M57 后 +1 套件 +11 项）。
+   M59 已完成（更新与入库的全路径 schema 强制，用户点名「保证更新与入库必须经过
+   设定的 schema」；调研笔记 research-M59-schema-enforcement.md——OpenMetadata
+   「实体定义即数据契约，后端对一切写入按 schema 校验」+ Backstage catalog
+   validate 端点）。现状核对：类型↔schema 关联自 M1 已有（类型定义版本携带
+   json_schema 不可变）；登记自 M2/A03 已校验。全仓库修订写入点只有两个——
+   登记与**分支草稿保存（未校验，即资产「更新」主路径可完全绕过 schema）**。
+   ①共享关卡：apps/api/src/ontology.ts——loadTypeChain（子→父→根，防环+深度
+   上限）+ validateAgainstChain（全链逐定义校验，AJV 全量约束 required/type/
+   enum/min/max + 单位词表，错误带 [typeKey vN] 前缀）；登记、分支保存、dry-run
+   共用同一实现，规则不可能分叉（catalog.ts 原地内联循环已替换）。
+   ②更新强制：POST /branches/:id/revisions 对合并后属性做全链校验，不合规 422
+   ——「更新必须经过设定的 schema」闭环（草稿→CR→发布的候选全部产生自已校验
+   修订；Agent 草稿工具只写提案不写修订，无第三条路）。
+   ③发布复核：prepare-review 对每个候选修订属性重验全链，不合规 409
+   CANDIDATE_SCHEMA_INVALID（修订与类型定义均不可变，创建时过卡的候选此处恒过
+   ——零成本纵深；真实拦截对象是校验上线前存量的不合规历史草稿，它们不能借
+   旧 CR 进入正式审核）。
+   ④dry-run：POST /assets/validate（成员可用、零副作用）返回 {valid, errors}，
+   与真实写入同源（Backstage validate 端点思想）；登记表单新增「校验」按钮
+   （cleanedProps 提取为提交/校验共用函数，两侧口径不可能分叉）。
+   tests/m59 五项：登记链前缀回归（子+祖先各报一条）、分支非法属性 422 且未
+   写入（类型错+越界各拦、修订数不变）、合法草稿 r2 回归、存量欠账（应用角色
+   直插不合规修订+分支条目→CR→prepare 409，正路候选重提 201）、dry-run 同源
+   判定/缺必填判出/越权 404。测试自修一处：withTeamDb 是 ROLLBACK 只读包装器，
+   模拟「绕过端点直插」需会话级 autocommit 助手 writeTeamDb。
+   浏览器实测（M49 演示团队）：登记表单选仿真模型→空属性「校验」→如实列出
+   6 个必填缺失→填齐→「✓ 属性满足当前类型链的全部定义（含祖先）」；资产详情
+   「修改资产」卡新建分支 m59-schema-check→name 改 123 保存→422 且 UI 显示
+   链上两个定义错误（[sim.report v1.0.0] + [analysis.asset v1.0.0]，祖先链
+   生效的直接证据）→改回合法→「草稿已保存：r2」。截图：m59-ui-validate-btn、
+   m59-ui-draft-gate。
+   全量 59 套件 289 项全绿（零回归——既有分支/发布链路的历史测试数据本就合规）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M58 后，按性价比排序）：bundle 离线校验/回导工具（manifest-
-   sha256.txt 已可离线核，回导端可复用 M28 回导管线）；门禁类型 UI 提示前移（登记
-   资产/创建 CR 时即提示「该类型发布需测试证据」，现在只在 CR 详情与发布拦截时
-   可见）；两批调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
-   lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
+   可选后续方向（M59 后，按性价比排序）：schema 约束的前端预填（登记表单按
+   jsonSchema 的 min/max/pattern 做输入前提示，服务端已是强制关卡、此项纯体验）；
+   bundle 离线校验/回导工具（manifest-sha256.txt 已可离线核，回导端可复用 M28
+   回导管线）；门禁类型 UI 提示前移（登记/创建 CR 时即提示，现在只在 CR 详情与
+   发布拦截时可见）；调研吸收清单余项不变：派生血缘字段（HF base_model）、
+   owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
    （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
    BibTeX/Markdown（Zenodo，可复用 M57 片段构建器）、别名进 ⌘K、集合只读分享
    快照、Agent 对话区可折叠。

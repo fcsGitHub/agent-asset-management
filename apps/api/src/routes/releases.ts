@@ -7,9 +7,10 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { q, withTeam } from "../db.js";
-import { ERR } from "../errors.js";
+import { ERR, AppError } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
+import { loadTypeChain, validateAgainstChain } from "../ontology.js";
 import { canonicalDigest, reviewDigest as computeReviewDigest, POLICY_VERSION, stableStringify } from "@taw/domain/digest";
 import { diffRevisions, type RevisionDiff } from "@taw/domain/diff";
 import { checkTestGate, type TestGateCheck } from "@taw/domain/bundle";
@@ -363,6 +364,22 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
           [body.teamId, item.candidate_revision_id]
         );
         const r = rev[0]!;
+        // M59 发布复核：候选修订属性必须满足其类型链。修订与类型定义均不可变，
+        // 创建时已过卡的候选此处恒过（零成本纵深）；拦截的是校验上线前存量的
+        // 不合规历史草稿——它们不能借旧 CR 进入正式审核与发布。
+        const chain = await loadTypeChain(client, body.teamId, r.type_version_id);
+        try {
+          validateAgainstChain(chain, r.properties);
+        } catch (err) {
+          if (err instanceof AppError) {
+            throw ERR.CONFLICT(
+              "CANDIDATE_SCHEMA_INVALID",
+              `「${item.asset_name}」候选修订属性不满足类型约束，不能进入审核；请修正草稿后重新提交`,
+              err.details
+            );
+          }
+          throw err;
+        }
         const arts = await client.query<{ digest: string }>(
           `SELECT blob_digest AS digest FROM revision_artifacts WHERE team_id = $1 AND revision_id = $2 ORDER BY blob_digest`,
           [body.teamId, item.candidate_revision_id]

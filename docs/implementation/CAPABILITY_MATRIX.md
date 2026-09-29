@@ -17,6 +17,7 @@
 | --- | --- | --- |
 | 身份/团队/项目/Session + 登录会话 | scrypt + 服务端会话 + CSRF 双提交 | apps/api/src/auth.ts, routes/auth.ts, routes/projects.ts |
 | 七类资产 + 类型定义 + 新类型注册 | asset_type_versions 版本并存 + JSON Schema/词表校验 | packages/domain/src/defaults.ts, validate.ts, routes/catalog.ts |
+| 更新与入库全路径 schema 强制（M59，OpenMetadata 数据契约思想） | 登记与分支草稿保存共用同一类型链关卡（apps/api/src/ontology.ts）；prepare-review 复核候选（清存量欠账）；dry-run 端点 /assets/validate | apps/api/src/ontology.ts, routes/branches.ts, releases.ts, catalog.ts |
 | 不可变修订 + 分支 + 差异 | DB 权限拒绝覆盖；branch_entries base→head；文本/属性/关系/二进制 diff | migrations/0002/0007, routes/branches.ts, packages/domain/src/diff.ts |
 | 关系 + 候选分离 | relation_assertions（confirmed）与语义候选（candidate/proposed）分离 | routes/catalog.ts, routes/semantic.ts, services/semantic-worker |
 | Issue/CR/审核发布/回退/绑定 | 审核快照 candidate/review digest；固定顺序锁；单事务发布；幂等键 | routes/releases.ts, migrations/0005/0006 |

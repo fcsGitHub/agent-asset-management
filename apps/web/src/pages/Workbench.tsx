@@ -2177,6 +2177,7 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ok, setOk] = useState("");
+  const [checkResult, setCheckResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
 
   useEffect(() => {
     if (!project) return;
@@ -2203,6 +2204,21 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
   const fields = useMemo(() => Object.entries(type?.json_schema.properties ?? {}), [type]);
 
   if (!project) return <div className="state">先选择项目。</div>;
+
+  // 表单字符串 → 类型化属性（提交与「校验」共用，两边口径不可能分叉）
+  function cleanedProps(): Record<string, unknown> {
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, schema] of Object.entries(type?.json_schema.properties ?? {})) {
+      const raw = props[key];
+      if (raw === undefined || raw === "") continue;
+      if (schema.type === "number") cleaned[key] = Number(raw);
+      else if (schema.type === "integer") cleaned[key] = parseInt(raw, 10);
+      else if (schema.type === "object") cleaned[key] = JSON.parse(raw);
+      else if (schema.type === "array") cleaned[key] = raw.split(/[,，]/).map((s) => s.trim());
+      else cleaned[key] = raw;
+    }
+    return cleaned;
+  }
 
   return (
     <div className="card">
@@ -2261,7 +2277,35 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
       </div>
       {error && <div className="error-text">{error}</div>}
       {ok && <div className="ok-text">{ok}</div>}
+      {checkResult && (checkResult.valid ? (
+        <div className="ok-text">✓ 属性满足当前类型链的全部定义（含祖先），可以登记</div>
+      ) : (
+        <div className="error-text">
+          {checkResult.errors.map((e, i) => <div key={i}>⚠ {e}</div>)}
+        </div>
+      ))}
       <div className="form-actions">
+        <button
+          disabled={busy || !typeKey}
+          title="按当前类型定义做全链校验（与登记同一关卡，零副作用；M59）"
+          onClick={() => {
+            if (!type || !project) return;
+            setError(""); setOk(""); setCheckResult(null);
+            try {
+              const properties = cleanedProps();
+              void api<{ valid: boolean; errors: string[] }>("/assets/validate", {
+                method: "POST",
+                body: { teamId: project.teamId, typeVersionId: type.id, properties },
+              })
+                .then(setCheckResult)
+                .catch((err) => setError(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "校验失败"));
+            } catch (parseErr) {
+              setError(parseErr instanceof Error ? parseErr.message : "属性 JSON 解析失败");
+            }
+          }}
+        >
+          校验
+        </button>
         <button
           className="primary"
           disabled={busy || !typeKey || !name}
@@ -2272,16 +2316,7 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
             setOk("");
             try {
               // 属性类型修正：数字与对象
-              const cleaned: Record<string, unknown> = {};
-              for (const [key, schema] of Object.entries(type.json_schema.properties ?? {})) {
-                const raw = props[key];
-                if (raw === undefined || raw === "") continue;
-                if (schema.type === "number") cleaned[key] = Number(raw);
-                else if (schema.type === "integer") cleaned[key] = parseInt(raw, 10);
-                else if (schema.type === "object") cleaned[key] = JSON.parse(raw);
-                else if (schema.type === "array") cleaned[key] = raw.split(/[,，]/).map((s) => s.trim());
-                else cleaned[key] = raw;
-              }
+              const cleaned = cleanedProps();
               let artifacts: unknown[] = [];
               if (file) {
                 const up = await uploadFile(project.teamId, file);
