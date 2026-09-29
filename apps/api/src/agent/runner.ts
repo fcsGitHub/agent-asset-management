@@ -132,11 +132,15 @@ async function runLoop(runId: string): Promise<void> {
       await touchRun(teamId, runId, { status: "cancelled", error: "用户取消" });
     };
 
-    for (let turn = 0; turn < 12; turn++) {
-      if (controller.signal.aborted) {
-        await finishCancelled();
-        return;
-      }
+      const specs = toolSpecs(tools).map((t) => ({
+        ...t,
+        function: { ...t.function, name: wireName(t.function.name) },
+      }));
+      for (let turn = 0; turn < 12; turn++) {
+        if (controller.signal.aborted) {
+          await finishCancelled();
+          return;
+        }
       // cancel_requested 是数据库中的持久取消请求：取消若在进程内 controller
       // 注册之前到达（慢机/排队积压窗口），abort 会丢失——每轮开始时兜底复查
       if (await isCancelRequested(teamId, runId)) {
@@ -147,7 +151,39 @@ async function runLoop(runId: string): Promise<void> {
         ...t,
         function: { ...t.function, name: wireName(t.function.name) },
       }));
-      const chat = await provider.chat(messages, specs, controller.signal);
+      // 流式增量落库（M53）：内容 delta 缓冲 300ms 合帧写入 run_events（message_delta），
+      // SSE 订阅方据此逐字渲染；flush 串行化保证事件有序，事件先于终值 message 事件入库，
+      // 断线重放（Last-Event-ID 续传）语义与实时一致。append 失败不终止运行（终值 message
+      // 事件仍会修正界面文本）。
+      let deltaBuf = "";
+      let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+      let deltaChain: Promise<void> = Promise.resolve();
+      const flushDelta = (): void => {
+        if (!deltaBuf) return;
+        const chunk = deltaBuf;
+        deltaBuf = "";
+        const turnNo = turn;
+        deltaChain = deltaChain
+          .then(async () => {
+            await appendEvent(teamId, runId, "message_delta", { delta: chunk, turn: turnNo });
+          })
+          .catch(() => undefined);
+      };
+      const onDelta = (d: string): void => {
+        deltaBuf += d;
+        if (deltaTimer) return;
+        deltaTimer = setTimeout(() => {
+          deltaTimer = null;
+          flushDelta();
+        }, 300);
+      };
+      const chat = await provider.chatStream(messages, specs, controller.signal, onDelta);
+      if (deltaTimer) {
+        clearTimeout(deltaTimer);
+        deltaTimer = null;
+      }
+      flushDelta();
+      await deltaChain;
       usedTokens += chat.totalTokens;
       await emitUsage();
       const msg = chat.message;

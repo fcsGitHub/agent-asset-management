@@ -25,9 +25,10 @@ interface Msg { id: string; role: string; content: string; seq: number; created_
 interface ToolInvocation { call_id: string; name: string; args: unknown; result: unknown; status: string; error: string }
 interface RunBudget { maxToolCalls?: number; maxTokens?: number }
 interface RunRecord { id: string; status: string; prompt: string; result: unknown; error: string; created_at: string; used?: { toolCalls?: number; tokens?: number }; budget?: RunBudget; context_refs?: string[]; invocations: ToolInvocation[] }
-interface RunToolBlock { callId: string; name: string; args: unknown; state: "running" | "ok" | "denied" | "error"; result?: unknown; error?: string }
-/** 界面侧的运行视图：事件流实时更新；历史运行从 /sessions/:id/runs 重建。 */
-interface RunView { id: string; status: string; prompt: string; text: string; note: string; streaming: boolean; tools: RunToolBlock[]; createdAt: string; used?: { toolCalls?: number; tokens?: number }; budget?: RunBudget; refs: string[]; thoughts: string[] }
+interface RunToolBlock { callId: string; name: string; args: unknown; state: "running" | "ok" | "denied" | "error"; result?: unknown; error?: string; startedAt?: number; durationMs?: number }
+/** 界面侧的运行视图：事件流实时更新；历史运行从 /sessions/:id/runs 重建。
+ *  turn 记录当前正在流式的回合号（-1=无流式），message_delta 换回合时旧段自动收入思考过程。 */
+interface RunView { id: string; status: string; prompt: string; text: string; note: string; streaming: boolean; tools: RunToolBlock[]; createdAt: string; used?: { toolCalls?: number; tokens?: number }; budget?: RunBudget; refs: string[]; thoughts: string[]; turn: number }
 /** @ 引用的资产（composer 选中态） */
 interface ContextRef { id: string; name: string; typeKey: string; version: string }
 
@@ -110,6 +111,7 @@ function ToolCard({ tool, onOpenAsset }: { tool: RunToolBlock; onOpenAsset?: (as
     : tool.state === "denied" ? "权限网关拒绝"
     : tool.state === "error" ? (tool.error ? `出错：${tool.error}` : "出错")
     : "";
+  const durText = tool.durationMs != null ? ` · ${(tool.durationMs / 1000).toFixed(1)}s` : "";
   // 参数/结果里可解析出的资产引用：渲染为可点击 chips，直达工作区资产详情
   const refs = toolAssetRefs(tool);
   return (
@@ -122,7 +124,7 @@ function ToolCard({ tool, onOpenAsset }: { tool: RunToolBlock; onOpenAsset?: (as
           {tool.state === "error" && <IconX size={12} />}
         </span>
         <span className="tool-name">{tool.name}</span>
-        <span className="tool-summary">{toolSummary(tool)}{stateText && ` · ${stateText}`}</span>
+        <span className="tool-summary">{toolSummary(tool)}{stateText && ` · ${stateText}`}{durText}</span>
         <IconChevronDown size={13} className="chev" />
       </summary>
       <div className="tool-detail">
@@ -395,6 +397,7 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
               budget: r.budget,
               refs: r.context_refs ?? [],
               thoughts: [],
+              turn: -1,
               tools: r.invocations.map((i) => ({
                 callId: i.call_id, name: displayToolName(i.name), args: i.args,
                 state: i.status === "ok" ? "ok" : i.status === "denied" ? "denied" : "error",
@@ -453,7 +456,7 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
       setRuns((prev) => prev.map((r) => (r.id === runId ? fn(r) : r)));
     es.addEventListener("tool_call", (e) => {
       const p = JSON.parse((e as MessageEvent).data) as { callId: string; name: string; args: unknown };
-      patch((r) => ({ ...r, tools: [...r.tools, { callId: p.callId, name: displayToolName(p.name), args: p.args, state: "running" }] }));
+      patch((r) => ({ ...r, tools: [...r.tools, { callId: p.callId, name: displayToolName(p.name), args: p.args, state: "running", startedAt: Date.now() }] }));
     });
     es.addEventListener("tool_result", (e) => {
       const p = JSON.parse((e as MessageEvent).data) as { callId: string; status: string; result: unknown; error: string };
@@ -461,9 +464,25 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
         ...r,
         tools: r.tools.map((t) =>
           t.callId === p.callId
-            ? { ...t, state: p.status === "ok" ? "ok" : p.status === "denied" ? "denied" : "error", result: p.result, error: p.error }
+            ? {
+                ...t,
+                state: p.status === "ok" ? "ok" : p.status === "denied" ? "denied" : "error",
+                result: p.result,
+                error: p.error,
+                durationMs: t.startedAt != null ? Date.now() - t.startedAt : undefined,
+              }
             : t
         ),
+      }));
+    });
+    // 逐字流式（M53）：内容 delta 追加；换回合时旧段收入思考过程（与 message 事件对齐）
+    es.addEventListener("message_delta", (e) => {
+      const p = JSON.parse((e as MessageEvent).data) as { delta: string; turn: number };
+      patch((r) => ({
+        ...r,
+        text: p.turn !== r.turn ? p.delta : r.text + p.delta,
+        thoughts: p.turn !== r.turn && r.text ? [...r.thoughts, r.text] : r.thoughts,
+        turn: p.turn,
       }));
     });
     es.addEventListener("message", (e) => {
@@ -543,7 +562,7 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
         method: "POST",
         body: { teamId: project.teamId, prompt: content, contextRefs: refs },
       });
-      setRuns((prev) => [...prev, { id: created.runId, status: "running", prompt: content, text: "", note: "", streaming: true, tools: [], createdAt: new Date().toISOString(), refs, thoughts: [] }]);
+      setRuns((prev) => [...prev, { id: created.runId, status: "running", prompt: content, text: "", note: "", streaming: true, tools: [], createdAt: new Date().toISOString(), refs, thoughts: [], turn: -1 }]);
       openEventStream(project.teamId, created.runId);
       // 用户消息已在创建事务中持久化：立即刷新，让自己的气泡先出现在运行块之上
       stickRef.current = true;

@@ -113,6 +113,8 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // 下载：重新授权（设计 14 章：下载必须能证明属于有权访问的对象）
+  // M53（吸收 CKAN「资源随取随用」）：回原文件名（revision_artifacts 登记名），
+  // 界面 <a download> 与浏览器另存名都拿到真实文件名而非摘要串。
   app.get("/blobs/:digest", async (req, reply) => {
     const auth = requireAuth(req);
     const { digest } = req.params as { digest: string };
@@ -125,6 +127,18 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
     if (!rows[0]) throw ERR.NOT_FOUND();
     const exists = await store.exists(teamId, digest);
     if (!exists) throw ERR.NOT_FOUND();
+    // 文件名登记在 revision_artifacts（RLS 表）：须带租户上下文查询，否则行不可见
+    const originalName = await withTeam(teamId, async (client) => {
+      const { rows } = await client.query<{ original_name: string }>(
+        `SELECT original_name FROM revision_artifacts WHERE team_id = $1 AND blob_digest = $2 AND original_name <> '' LIMIT 1`,
+        [teamId, digest]
+      );
+      return rows[0]?.original_name ?? "";
+    });
+    if (originalName) {
+      // RFC 5987 filename*：中文名等非 ASCII 安全透传
+      reply.header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(originalName)}`);
+    }
     const content = await store.get(teamId, digest);
     void resolve;
     return reply.header("content-type", "application/octet-stream").send(content);

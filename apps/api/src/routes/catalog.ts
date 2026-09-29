@@ -1011,10 +1011,11 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------- 查询 ----------
   // lifecycle 过滤：active（默认，排除归档）/ archived（仅归档）/ all
+  // M53 分面：label（精确）与 typePrefix（前缀，支撑 文档/代码/测试/数据 家族快筛）
   app.get("/assets/search", async (req) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
-      teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string;
+      teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string; typePrefix?: string;
     };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
@@ -1024,7 +1025,11 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version,
-                r.id AS head_revision_id, r.content_digest, r.created_at
+                r.id AS head_revision_id, r.content_digest, r.created_at,
+                EXISTS (
+                  SELECT 1 FROM revision_artifacts ra
+                   WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
+                ) AS has_artifacts
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
            JOIN LATERAL (
@@ -1035,11 +1040,49 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
             AND ($3 = '' OR tv.type_key = $3)
             AND ($5 = 'all' OR a.lifecycle = CASE WHEN $5 = 'archived' THEN 'archived' ELSE 'active' END)
+            AND ($6 = '' OR EXISTS (
+                  SELECT 1 FROM asset_labels l
+                   WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $6
+                ))
+            AND ($7 = '' OR tv.type_key LIKE $7 || '%')
           ORDER BY a.created_at DESC LIMIT $4`,
-        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle]
+        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle, query.label ?? "", query.typePrefix ?? ""]
       )
     );
     return rows;
+  });
+
+  // 分面清单（M53，吸收 CKAN facet 思路）：目录筛选下拉的数据源——
+  // 在用 type_key、标签（按使用次数排序）、分类路径。全部真实聚合，无本地猜测。
+  app.get("/assets/facets", async (req) => {
+    const auth = requireAuth(req);
+    const query = (req.query ?? {}) as { teamId?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows: types } = await client.query<{ type_key: string }>(
+        `SELECT DISTINCT tv.type_key
+           FROM assets a
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE a.team_id = $1 AND a.lifecycle <> 'archived'
+          ORDER BY 1`,
+        [teamId]
+      );
+      const { rows: labels } = await client.query<{ label: string; count: number }>(
+        `SELECT label, COUNT(*)::int AS count FROM asset_labels WHERE team_id = $1 GROUP BY label ORDER BY count DESC, label LIMIT 50`,
+        [teamId]
+      );
+      const { rows: cats } = await client.query<{ category_path: string }>(
+        `SELECT DISTINCT category_path FROM asset_categories WHERE team_id = $1 ORDER BY 1 LIMIT 200`,
+        [teamId]
+      );
+      return {
+        typeKeys: types.map((r) => r.type_key),
+        labels: labels.map((r) => ({ label: r.label, count: r.count })),
+        categories: cats.map((r) => r.category_path),
+      };
+    });
   });
 
   app.get("/assets/:assetId", async (req) => {
@@ -1070,6 +1113,26 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
           WHERE team_id = $1 AND asset_id = $2 ORDER BY seq DESC LIMIT $3 OFFSET $4`,
         [teamId, assetId, revLimit, revOffset]
       );
+      // 制品随修订返回（M53 随取随用）：界面详情页直接提供当前修订制品下载
+      const { rows: arts } = await client.query<{
+        revision_id: string; blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number;
+      }>(
+        `SELECT ra.revision_id, ra.blob_digest, ra.artifact_role, ra.original_name, ra.media_type, ra.size
+           FROM revision_artifacts ra
+           JOIN asset_revisions r ON r.team_id = ra.team_id AND r.id = ra.revision_id
+          WHERE ra.team_id = $1 AND r.asset_id = $2`,
+        [teamId, assetId]
+      );
+      const artsByRev = new Map<string, typeof arts>();
+      for (const a of arts) {
+        const list = artsByRev.get(a.revision_id) ?? [];
+        list.push(a);
+        artsByRev.set(a.revision_id, list);
+      }
+      const revisionsWithArts = revisions.map((r: Record<string, unknown>) => ({
+        ...r,
+        artifacts: artsByRev.get(r.id as string) ?? [],
+      }));
       const { rows: labels } = await client.query<{ label: string }>(
         `SELECT label FROM asset_labels WHERE team_id = $1 AND asset_id = $2`,
         [teamId, assetId]
@@ -1078,7 +1141,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         `SELECT category_path, is_primary FROM asset_categories WHERE team_id = $1 AND asset_id = $2`,
         [teamId, assetId]
       );
-      return { ...asset, revisions, revisionsTotal: total[0]!.n, labels: labels.map((l) => l.label), categories };
+      return { ...asset, revisions: revisionsWithArts, revisionsTotal: total[0]!.n, labels: labels.map((l) => l.label), categories };
     });
   });
 

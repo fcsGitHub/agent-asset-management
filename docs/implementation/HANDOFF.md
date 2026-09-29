@@ -1,6 +1,6 @@
 # HANDOFF — 交接
 
-更新时间：2026-09-29（M52 资产详情多跳关联轮后）
+更新时间：2026-09-29（M53 调研吸收轮后）
 
 ## 仓库状态
 
@@ -368,11 +368,43 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    逆向与最短优先/环图不回头/空边集）。浏览器实测：M49 演示团队「轨道传播
    模型分析报告」详情显示两条 1 跳链（partOf→ 热控、←dependsOn 天线），终点
    可点；停库降级与恢复自愈；暗色主题正常。全量 49 套件 230 项全绿。
+   M53 已完成（调研吸收轮：分面检索/流式输出/图谱降噪）：广泛调研 9 个开源
+   元数据/资产管理项目（DataHub/OpenMetadata/Atlas/NetBox/CKAN/OpenCTI 等），
+   调研笔记与吸收清单落 docs/implementation/research-M53-opensource-survey.md。
+   落地五块：①CKAN 分面——GET /assets/facets（在用类型/标签计数/分类路径真值
+   聚合），/assets/search 补 label（修复参数声明却未实现的真实缺口）与 typePrefix
+   两个过滤；目录资产列表新增家族快筛 chips（文档/代码/测试/仿真/数据，纯函数
+   lib/typeFamily 前缀映射、自定义类型回落不强行归类）+ 类型/标签下拉（带计数）。
+   ②随取随用——GET /assets/:id 修订携带 artifacts，详情页新增「制品（当前修订）」
+   卡（角色/大小/一键下载）；GET /blobs/:digest 补 content-disposition
+   filename*=UTF-8''（回真实文件名），顺带修复该查询漏租户上下文、RLS 下静默
+   查不到文件名的真实缺陷；详情主卡展示标量属性，http(s) 值渲染为可点外链
+   （NetBox Custom Links 轻量形态）。③关系目标可点——详情「关系」卡端点已带
+   source/target_asset_id，渲染为按钮直达对应资产。④Agent 真·流式输出——
+   adapter 新增 chatStream（OpenAI 兼容 SSE；createStreamAccumulator 纯函数
+   离线单测：内容增量/工具调用按 index 归并/usage 收尾帧/残帧容忍），runner 以
+   300ms 合帧把 message_delta {delta,turn} 先于 message 终值落库（append 失败
+   不终止运行，终值事件兜底），前端 message_delta 逐字渲染（turn 感知、换回合
+   旧段自动收入思考过程），工具卡加耗时显示。⑤图谱去杂乱（OpenCTI 思路）——
+   类型图例点选显隐（图例覆盖全部参与类型含被隐藏的，off 态可单独恢复，避免
+   「藏了就找不回」）、度数降噪（度 ≥ N 剪边，达标节点即使连边被剪光也保留——
+   星型图中心枢纽不丢失，专门修了首版全灭缺陷）、边标签开关（localStorage 记忆），
+   降噪后空态文案如实区分。
+   测试：流式累积器 4 项 + typeFamily 3 项 + tests/m53-facets 七项（facets/
+   label/typePrefix/has_artifacts/content-disposition）+ tests/m53-agent-stream
+   （真实 DeepSeek 流式运行：message_delta 落库、同回合增量拼接=message 终值、
+   增量先于终值的次序不变量）。浏览器实测：目录家族过滤/📎 标记、详情制品下载
+   与关系直跳与属性直链、Agent 运行文本逐段增长（5→111→548 字符采样）+ 工具卡
+   展开详情与耗时 + 用量条、图谱图例显隐往返/降噪保留中心/标签开关、docker stop
+   taw-graphdb 诚实降级文案与重启自愈；暗色主题视觉正常。全量 53 套件 245 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M52 后）：图谱页聚焦模式改走服务端邻域端点（当前客户端
-   BFS，≤200 资产规模下暂无痛点）；⌘K/资产详情多跳关联的 NL 句式（「X 的
-   关联资产」）。暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，
-   或由用户直接点名需求。
+   可选后续方向（M53 后，自调研吸收清单）：属性自定义筛选器（OpenMetadata
+   extension 属性可过滤聚合，需属性索引设计）；分类沿血缘传播（Atlas，关系
+   断言带传播规则如废弃波及下游）；完整模板变量自定义链接（NetBox
+   Custom Links）；URL 化筛选条件（可收藏可分享）；图谱页聚焦模式改走服务端
+   邻域端点（当前客户端 BFS，≤200 资产规模下暂无痛点）；⌘K/资产详情多跳
+   关联的 NL 句式（「X 的关联资产」）。暂缓项：无。如继续迭代，建议再做用户
+   走查/收集真实使用反馈，或由用户直接点名需求。

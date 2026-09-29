@@ -36,6 +36,16 @@ function loadFocusHops(): number {
   }
 }
 
+// 边标签显隐偏好（M53 去杂乱）：大图默认可关掉全部关系标签（悬停 title 仍可读）
+const EDGE_LABELS_KEY = "taw.graph.showEdgeLabels";
+function loadShowEdgeLabels(): boolean {
+  try {
+    return localStorage.getItem(EDGE_LABELS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
 // 类型着色：按 type_key 排序后取调色板（确定性，同类型同色）
 const PALETTE = ["#3b6ea5", "#2e6b4f", "#8a5a9e", "#b0703c", "#4f7d9e", "#7d6a3b", "#a54a6f", "#4a8a7a", "#6b6b9e", "#8a7a4a"];
 
@@ -63,6 +73,10 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
   const [statusFilter, setStatusFilter] = useState("");
   const [focusId, setFocusId] = useState("");
   const [focusHops, setFocusHops] = useState(loadFocusHops);
+  // 去杂乱（M53，吸收 OpenCTI 图内过滤思路）：类型图例点选显隐 + 低连接度节点降噪
+  const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  const [minDegree, setMinDegree] = useState(0);
+  const [showEdgeLabels, setShowEdgeLabels] = useState(loadShowEdgeLabels);
   const [tick, setTick] = useState(0); // 模拟帧驱动
   const nodesRef = useRef<SimNode[]>([]);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -129,17 +143,27 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
 
   useEffect(reload, [reload]);
 
-  // 过滤后的边与参与节点。聚焦模式：BFS 展开聚焦资产 N 跳邻域（1/2/3 跳）；
+  // 过滤后的边与参与节点。过滤顺序：类型显隐 → 聚焦/路径 → 度数降噪。
+  // 聚焦模式：BFS 展开聚焦资产 N 跳邻域（1/2/3 跳）；路径模式只留链路边（过滤全旁路）；
   // 无关系连接的资产默认隐藏（数量如实提示）。
-  const { simEdges, simNodes, hiddenAssets } = useMemo(() => {
+  const { simEdges, simNodes, hiddenAssets, prunedNodes, legend } = useMemo(() => {
     const byId = new Map(assets.map((a) => [a.id, a]));
-    const base = (edges ?? []).filter(
+    let base = (edges ?? []).filter(
       (e) =>
         byId.has(e.source_asset_id) && byId.has(e.target_asset_id) &&
         (!typeFilter || e.type_key === typeFilter) &&
         (!statusFilter || e.status === statusFilter)
     );
+    // 类型显隐（M53）：被隐藏类型资产的连边整体剔除（端点任一命中即隐）
+    if (hiddenTypes.size > 0) {
+      base = base.filter(
+        (e) =>
+          !hiddenTypes.has(byId.get(e.source_asset_id)!.type_key) &&
+          !hiddenTypes.has(byId.get(e.target_asset_id)!.type_key)
+      );
+    }
     let kept = base;
+    let keepIds: Set<string> | null = null;
     if (pathView?.status === "found") {
       // 路径模式（M51）：只保留链路上的关系边——链条节点天然带度，不会消失
       kept = base.filter((e) => pathView.edgeIds.has(e.id));
@@ -165,6 +189,24 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
         frontier = next;
       }
       kept = base.filter((e) => inSet.has(e.source_asset_id) && inSet.has(e.target_asset_id));
+    } else if (minDegree > 0) {
+      // 度数降噪（M53）：先算一遍度，把度 < minDegree 的节点连边剔除（聚焦资产豁免）。
+      // 单轮剪枝（不迭代收敛）：剪完的孤立节点消失即可，如实提示数量。
+      const pre = new Map<string, number>();
+      for (const e of kept) {
+        pre.set(e.source_asset_id, (pre.get(e.source_asset_id) ?? 0) + 1);
+        pre.set(e.target_asset_id, (pre.get(e.target_asset_id) ?? 0) + 1);
+      }
+      kept = kept.filter((e) => {
+        const okS = (pre.get(e.source_asset_id) ?? 0) >= minDegree || e.source_asset_id === focusId;
+        const okT = (pre.get(e.target_asset_id) ?? 0) >= minDegree || e.target_asset_id === focusId;
+        return okS && okT;
+      });
+      // 达标节点即使连边被剪光也保留（度归 0）：中心枢纽正是要留下的密集核，
+      // 否则星型图在度 ≥ 2 时会整体消失。
+      keepIds = new Set(
+        [...pre.entries()].filter(([id, d]) => d >= minDegree || id === focusId).map(([id]) => id)
+      );
     }
     const degree = new Map<string, number>();
     for (const e of kept) {
@@ -172,6 +214,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
       degree.set(e.target_asset_id, (degree.get(e.target_asset_id) ?? 0) + 1);
     }
     if (focusId && byId.has(focusId) && !degree.has(focusId)) degree.set(focusId, 0);
+    for (const id of keepIds ?? []) if (!degree.has(id)) degree.set(id, 0);
     const nodeList: SimNode[] = [];
     const index = new Map<string, number>();
     for (const id of [...degree.keys()].sort()) {
@@ -185,6 +228,9 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
         vx: 0, vy: 0, degree: degree.get(id) ?? 0,
       });
     }
+    // 类型可见度统计（M53）：图例上显示当前可见的各类型节点数
+    const typeCounts = new Map<string, number>();
+    for (const n of nodeList) typeCounts.set(n.typeKey, (typeCounts.get(n.typeKey) ?? 0) + 1);
     const edgeList: SimEdge[] = kept.map((e) => ({
       id: e.id, typeKey: e.type_key, status: e.status,
       source: index.get(e.source_asset_id)!, target: index.get(e.target_asset_id)!,
@@ -205,8 +251,35 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
         e.lanes = g.length;
       });
     }
-    return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size };
-  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops, pathView]);
+    // prunedNodes：度数降噪单独隐藏的数量 = 类型过滤后参与边集的资产中已不在可见度表里的
+    let pruned = 0;
+    if (minDegree > 0 && pathView?.status !== "found" && !(focusId && byId.has(focusId))) {
+      const participants = new Set<string>();
+      for (const e of base) {
+        participants.add(e.source_asset_id);
+        participants.add(e.target_asset_id);
+      }
+      for (const id of participants) if (!degree.has(id)) pruned++;
+    }
+    // 图例（M53）：覆盖全部参与关系的类型（含被隐藏的），可见数/总数并排——
+    // 被隐藏的类型仍保留在图例里（off 态），可再次点选恢复，而不必整体重置。
+    const totalByType = new Map<string, number>();
+    const participantsAll = new Set<string>();
+    for (const e of edges ?? []) {
+      participantsAll.add(e.source_asset_id);
+      participantsAll.add(e.target_asset_id);
+    }
+    for (const id of participantsAll) {
+      const a = byId.get(id);
+      if (a) totalByType.set(a.type_key, (totalByType.get(a.type_key) ?? 0) + 1);
+    }
+    const legend = [...new Set([...totalByType.keys(), ...typeCounts.keys()])].map((typeKey) => ({
+      typeKey,
+      visible: typeCounts.get(typeKey) ?? 0,
+      total: totalByType.get(typeKey) ?? 0,
+    }));
+    return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size, typeCounts, prunedNodes: pruned, legend };
+  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops, pathView, hiddenTypes, minDegree]);
 
   nodesRef.current = simNodes;
 
@@ -403,6 +476,28 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
             <option value={3}>3 跳邻域</option>
           </select>
         )}
+        <select
+          aria-label="度数降噪"
+          value={minDegree}
+          onChange={(e) => setMinDegree(Number(e.target.value))}
+          title="隐藏低连接度的资产，只看关系密集的核心网络（聚焦模式下不生效）"
+        >
+          <option value={0}>全部节点</option>
+          <option value={1}>度 ≥ 1</option>
+          <option value={2}>度 ≥ 2</option>
+          <option value={3}>度 ≥ 3</option>
+        </select>
+        <label className="legend-toggle" title="隐藏/显示关系类型标签（大图更清爽）">
+          <input
+            type="checkbox"
+            checked={showEdgeLabels}
+            onChange={(e) => {
+              setShowEdgeLabels(e.target.checked);
+              try { localStorage.setItem(EDGE_LABELS_KEY, e.target.checked ? "1" : "0"); } catch { /* 偏好记忆不可用时功能不受影响 */ }
+            }}
+          />
+          关系标签
+        </label>
         <button onClick={reload}>刷新</button>
         {simNodes.length > 0 && (
           <>
@@ -415,7 +510,10 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
       {edges !== null && edges.length === 0 && (
         <Empty icon="⚭" title="团队还没有已登记的关系" hint="在资产详情页断言关系（或由语义候选确认）后，这里会展示关系网络。" />
       )}
-      {edges !== null && edges.length > 0 && simNodes.length === 0 && (
+      {edges !== null && edges.length > 0 && simNodes.length === 0 && minDegree > 0 && (
+        <Empty icon="⛃" title="度数降噪后没有满足阈值的节点" hint="当前图里所有资产的连接度都低于阈值——调低「度数降噪」选项或点击「全部节点」重试。" />
+      )}
+      {edges !== null && edges.length > 0 && simNodes.length === 0 && minDegree === 0 && (
         <Empty icon="⛃" title="关系引用的资产不在最近 200 个资产内" hint="资产目录超过 200 条时图谱只展示最近登记的资产参与的关系。" />
       )}
       {simNodes.length > 0 && (
@@ -453,7 +551,8 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
           )}
           {hiddenAssets > 0 && (
             <p className="hint" style={{ marginTop: 0 }}>
-              已隐藏 {hiddenAssets} 个无关系连接的资产；图谱只展示有关系的资产。拖拽节点可重排，点击节点打开资产详情。
+              已隐藏 {hiddenAssets} 个资产（无关系连接、被图例隐藏或低于度数阈值{prunedNodes > 0 ? `，其中度数降噪隐藏 ${prunedNodes} 个` : ""}）。
+              拖拽节点可重排，点击节点打开资产详情。
             </p>
           )}
           <div className="graph-wrap card">
@@ -497,7 +596,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
                 return (
                   <g key={e.id} className={onPath ? "edge path-edge" : e.status === "proposed" ? "edge proposed" : "edge"}>
                     <path d={d} fill="none" markerEnd="url(#arrow)" strokeDasharray={e.status === "proposed" ? "5 4" : undefined} />
-                    <text x={lx} y={ly - 4} className="edge-label">{e.label}</text>
+                    {showEdgeLabels && <text x={lx} y={ly - 4} className="edge-label">{e.label}</text>}
                   </g>
                 );
               })}
@@ -533,13 +632,29 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
                 );
               })}
             </svg>
-            <div className="graph-legend" aria-label="类型图例">
-              {[...new Set(simNodes.map((n) => n.typeKey))].sort().map((k) => (
-                <span key={k} className="legend-item">
-                  <span className="legend-dot" style={{ background: colorOf.get(k) }} />
-                  {k}
-                </span>
+            <div className="graph-legend" aria-label="类型图例（点选显隐该类型资产）">
+              {legend.sort((a, b) => a.typeKey.localeCompare(b.typeKey)).map(({ typeKey, visible, total }) => (
+                <button
+                  key={typeKey}
+                  className={`legend-toggle${hiddenTypes.has(typeKey) ? " off" : ""}`}
+                  title={hiddenTypes.has(typeKey) ? `点击显示类型 ${typeKey}（当前隐藏）` : `点击隐藏类型 ${typeKey}，简化视图`}
+                  disabled={pathView?.status === "found"}
+                  onClick={() =>
+                    setHiddenTypes((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(typeKey)) next.delete(typeKey);
+                      else next.add(typeKey);
+                      return next;
+                    })
+                  }
+                >
+                  <span className="legend-dot" style={{ background: colorOf.get(typeKey) }} />
+                  {typeKey}（{visible}/{total}）
+                </button>
               ))}
+              {hiddenTypes.size > 0 && (
+                <button className="legend-reset" onClick={() => setHiddenTypes(new Set())}>重置显隐</button>
+              )}
             </div>
           </div>
         </>

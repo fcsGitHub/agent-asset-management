@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, uploadFile } from "../api";
 import { refreshBadges } from "../lib/badges";
 import type { Me } from "../App";
@@ -18,6 +18,7 @@ import {
 } from "../components/icons";
 import { CrItemCard, CrComments, type CRComment, type CRItemDiff } from "../components/CrDiff";
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
+import { TYPE_FAMILIES } from "../lib/typeFamily";
 
 type ThemeMode = "auto" | "light" | "dark";
 const THEME_LABEL: Record<ThemeMode, string> = { auto: "跟随系统", light: "浅色", dark: "深色" };
@@ -52,15 +53,29 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean }
+interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
 interface TypeInfo { id: string; type_key: string; version: string; title: string; parent_type_key?: string | null; parent_version?: string | null; json_schema: { required?: string[]; properties?: Record<string, { type?: string; enum?: string[]; title?: string }> } }
 interface AssetDetail {
   id: string; name: string; lifecycle: string; type_key: string; type_version: string;
-  revisions: { id: string; seq: number; content_digest: string; properties: object; created_at: string }[];
+  revisions: { id: string; seq: number; content_digest: string; properties: object; created_at: string; artifacts?: { blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number }[] }[];
   labels: string[]; categories: { category_path: string; is_primary: boolean }[];
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
-interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string }
+interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string }
+
+/** 字节人性化显示（制品大小）。 */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** http(s) 绝对地址判定（属性值直链，M53 吸收 NetBox Custom Links 思路的轻量形态）。 */
+function isHttpUrl(v: string): boolean {
+  return /^https?:\/\/\S+$/.test(v);
+}
 
 export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void }) {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
@@ -809,17 +824,35 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
   const [lifecycle, setLifecycle] = useState("active");
+  const [facets, setFacets] = useState<AssetFacets | null>(null);
+  const [type, setType] = useState("");
+  const [family, setFamily] = useState("");
+  const [label, setLabel] = useState("");
+
+  // 分面清单（M53）：类型/标签下拉与家族 chips 的真实数据源
+  useEffect(() => {
+    setFacets(null);
+    if (!project) return;
+    void api<AssetFacets>("/assets/facets", { query: { teamId: project.teamId } })
+      .then(setFacets)
+      .catch(() => setFacets({ typeKeys: [], labels: [], categories: [] }));
+  }, [project]);
 
   useEffect(() => {
     setAssets(null);
     if (!project) return;
-    void api<AssetRow[]>("/assets/search", { query: { teamId: project.teamId, q: keyword, lifecycle } })
+    void api<AssetRow[]>("/assets/search", {
+      query: { teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family },
+    })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
-  }, [project, keyword, lifecycle]);
+  }, [project, keyword, lifecycle, type, family, label]);
 
   if (!project) return <div className="state">先选择项目。</div>;
   if (error) return <div className="state error">{error}</div>;
+  const familyActive = (prefix: string) => family === prefix && !type;
+  const clearAll = () => { setType(""); setFamily(""); setLabel(""); };
+  const hasFilter = !!(type || family || label);
   return (
     <div className="card">
       <h3>
@@ -828,8 +861,46 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           登记新资产
         </button>
       </h3>
+      <div className="facet-row" role="group" aria-label="按类别快筛">
+        <button
+          className={`facet-chip${!hasFilter ? " active" : ""}`}
+          onClick={clearAll}
+        >
+          全部
+        </button>
+        {TYPE_FAMILIES.map((f) => (
+          <button
+            key={f.key}
+            className={`facet-chip${familyActive(f.prefix) ? " active" : ""}`}
+            title={`type_key 前缀 ${f.prefix}*`}
+            onClick={() => {
+              setFamily(familyActive(f.prefix) ? "" : f.prefix);
+              setType("");
+            }}
+          >
+            {f.icon} {f.label}
+          </button>
+        ))}
+      </div>
       <div className="field field-row">
         <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+        <select
+          aria-label="按类型过滤"
+          value={type}
+          onChange={(e) => {
+            setType(e.target.value);
+            if (e.target.value) setFamily("");
+          }}
+        >
+          <option value="">全部类型</option>
+          {(facets?.typeKeys ?? []).map((k) => <option key={k} value={k}>{k}</option>)}
+        </select>
+        <select aria-label="按标签过滤" value={label} onChange={(e) => setLabel(e.target.value)}>
+          <option value="">全部标签</option>
+          {(facets?.labels ?? []).map((l) => (
+            <option key={l.label} value={l.label}>{l.label}（{l.count}）</option>
+          ))}
+        </select>
         <select aria-label="生命周期过滤" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
           <option value="active">进行中</option>
           <option value="archived">已归档</option>
@@ -840,7 +911,9 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
         <div className="state">加载中…</div>
       ) : assets.length === 0 ? (
         <div className="state">
-          {lifecycle === "archived" ? "没有已归档资产。" : "暂无资产。上传文件并登记后出现在这里。"}
+          {hasFilter
+            ? "当前筛选条件下没有资产。"
+            : lifecycle === "archived" ? "没有已归档资产。" : "暂无资产。上传文件并登记后出现在这里。"}
         </div>
       ) : (
         <table className="list">
@@ -856,7 +929,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <tbody>
             {assets.map((a) => (
               <tr key={a.id} onClick={() => onOpen(a.id)}>
-                <td>{a.name}</td>
+                <td>{a.name}{a.has_artifacts && <span title="当前修订含制品文件，点开详情可下载" style={{ marginLeft: 6 }}>📎</span>}</td>
                 <td><span className="badge">{a.type_key}</span></td>
                 <td>{a.type_version}</td>
                 <td>
@@ -931,6 +1004,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
   if (!detail) return <div className="state">加载中…</div>;
   const head = detail.revisions[0];
   const archived = detail.lifecycle === "archived";
+  const headArtifacts = head?.artifacts ?? [];
   return (
     <>
       <div className="card">
@@ -950,6 +1024,19 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               <span className="k">当前修订</span><span>r{head.seq} · 摘要 <code>{head.content_digest.slice(0, 16)}…</code></span>
             </>
           )}
+          {head && Object.entries(head.properties as Record<string, unknown>)
+            .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+            .slice(0, 12)
+            .map(([k, v]) => (
+              <Fragment key={k}>
+                <span className="k" title="当前修订属性">{k}</span>
+                <span>
+                  {isHttpUrl(String(v))
+                    ? <a href={String(v)} target="_blank" rel="noreferrer" title="打开外部链接">{String(v)}</a>
+                    : String(v)}
+                </span>
+              </Fragment>
+            ))}
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           {archived ? (
@@ -965,6 +1052,30 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>
       </div>
+      {headArtifacts.length > 0 && (
+        <div className="card">
+          <h3>制品（当前修订 r{head!.seq}）</h3>
+          <table className="list">
+            <thead>
+              <tr><th>文件</th><th>角色</th><th>大小</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+              {headArtifacts.map((a) => (
+                <tr key={a.blob_digest}>
+                  <td title={`${a.original_name} · ${a.blob_digest.slice(0, 16)}…`}>{a.original_name}</td>
+                  <td><span className="badge">{a.artifact_role}</span></td>
+                  <td>{fmtBytes(a.size)}</td>
+                  <td>
+                    <a className="ref-chip" href={`/api/v1/blobs/${a.blob_digest}?teamId=${teamId}`} download={a.original_name} title="下载制品文件">
+                      ⬇ 下载
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {!archived && <DraftPanel teamId={teamId} projectId={projectId} asset={detail} role={role} onSaved={reload} />}
       <div className="card">
         <h3>修订历史（不可变）</h3>
@@ -988,9 +1099,31 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           <h3>关系</h3>
           <div className="kv">
             <span className="k">指出去（{rels.outgoing.length}）</span>
-            <span>{rels.outgoing.map((r) => `${r.type_key} → ${r.target_name}`).join("；") || "无"}</span>
+            <span>
+              {rels.outgoing.length === 0 ? "无" : rels.outgoing.map((r, i) => (
+                <Fragment key={r.id}>
+                  {i > 0 && "；"}
+                  <code>{r.type_key}</code>{" → "}
+                  {onOpenAsset && r.target_asset_id ? (
+                    <button className="link-btn" title={`打开 ${r.target_name}`} onClick={() => onOpenAsset(r.target_asset_id!)}>{r.target_name}</button>
+                  ) : r.target_name}
+                </Fragment>
+              ))}
+            </span>
             <span className="k">被指向（{rels.incoming.length}）</span>
-            <span>{rels.incoming.map((r) => `${r.source_name} —${r.type_key}→ 本资产`).join("；") || "无"}</span>
+            <span>
+              {rels.incoming.length === 0 ? "无" : rels.incoming.map((r, i) => (
+                <Fragment key={r.id}>
+                  {i > 0 && "；"}
+                  {onOpenAsset && r.source_asset_id ? (
+                    <button className="link-btn" title={`打开 ${r.source_name}`} onClick={() => onOpenAsset(r.source_asset_id!)}>{r.source_name}</button>
+                  ) : r.source_name}
+                  {" —"}
+                  <code>{r.type_key}</code>
+                  {"→ 本资产"}
+                </Fragment>
+              ))}
+            </span>
           </div>
         </div>
       )}
