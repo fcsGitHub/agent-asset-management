@@ -75,7 +75,7 @@ export async function bundleRoutes(app: FastifyInstance): Promise<void> {
     const { rows: arts } = await client.query<{
       revision_id: string; blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number;
     }>(
-      `SELECT revision_id, blob_digest, artifact_role, original_name, media_type, size
+      `SELECT revision_id, blob_digest, artifact_role, original_name, media_type, size::int AS size
          FROM revision_artifacts WHERE team_id = $1 AND revision_id = ANY($2::uuid[])`,
       [teamId, assets.map((a) => a.revision_id)]
     );

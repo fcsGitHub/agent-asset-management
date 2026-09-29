@@ -202,7 +202,9 @@ export function buildBundlePlan(
       artifacts,
     };
   });
-  // 只保留闭包内资产之间的边（外部引用如实出现在 manifest 之外没有意义）
+  // 只保留闭包内资产之间的边（外部引用如实出现在 manifest 之外没有意义）。
+  // predicate 携带稳定标识 type_key（回导工具据此解析关系类型，M63）；标题另列
+  // predicateTitle 供人读——标题可改可重名，不是机器可解析的标识。
   const manifestRelations = relations
     .filter((e) => assetIds.has(e.fromAssetId) && assetIds.has(e.toAssetId))
     .map((e) => ({
@@ -210,7 +212,8 @@ export function buildBundlePlan(
       fromName: assetNames.get(e.fromAssetId) ?? "",
       toAssetId: e.toAssetId,
       toName: assetNames.get(e.toAssetId) ?? "",
-      predicate: relationNames.get(e.predicate) ?? e.predicate,
+      predicate: e.predicate,
+      predicateTitle: relationNames.get(e.predicate) ?? e.predicate,
     }));
   const manifest = {
     tawBundle: 1,

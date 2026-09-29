@@ -667,16 +667,42 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    Owner *（继承自 m62.ui.base v1.0.0）+ 并集说明）；空表单校验→本地预检报缺
    level/owner；level=9→「超过上限 3」；level=2→服务端 dry-run ✓；登记成功入
    目录。截图：m62-ui-form-spec、m62-ui-registered。全量 62 套件 306 项全绿。
+   M63 已完成（bundle 离线校验与回导工具，连续两轮落选按约定升格必做；调研笔记
+   research-M63-bundle-verify-import.md）。补 M58 批量下载的后半程：①@taw/domain
+   bundle-verify——readStoreZip（与 buildStoreZip 对称的 store-only ZIP 读取：EOCD→
+   中央目录→局部头切片，CRC32 复核，压缩/ZIP64/加密如实拒绝）+ verifyBundle
+   （BagIt RFC 8493 口径：complete=payload↔清单双射与 valid=校验和全对**分开报告**，
+   加 manifest 交叉核对——制品 path/digest/size 与 zip 实物一致、tawBundle 版本；
+   已知边界如实：manifest.json 自身不在 checksum 清单，纯元数据改写包内不可证）。
+   ②scripts/bundle-tools.ts CLI（tsx，npm 场景零新依赖）：verify（零网络，退出码
+   0/1，--json）+ import（先离线校验不过即拒——无 --force 后门；再走公开 API 登录/
+   CSRF/上传/登记/建关系，与界面同一套 M59 关卡，无旁路；类型按 typeKey+version
+   精确解析缺失如实跳过；制品内容寻址上传去重、上传后摘要与 manifest 不符即中止；
+   关系按 type_key 解析最新版+evidenceNote 注明回导来源；--dry-run 零写入先看计划；
+   别名/测试运行/lifecycle 不回导并在报告注明；部分成功不回滚）。③修 M58 两个真
+   缺陷：manifest 关系 predicate 存的是标题（人读）而非 type_key（机器可解析）——
+   改为 predicate=type_key + predicateTitle 标题；revision_artifacts.size 是 bigint，
+   node-pg 运行时返回 string 导致 manifest 里 size 是字符串、包容量 reduce 变字符串
+   拼接——SQL 补 size::int，verifyBundle 的 size 核对从静默跳过改为如实报错。
+   tests/m63 七项：读取器往返；校验 ok/篡改字节（valid=false 点到文件）/缺文件/
+   多文件（complete=false 双射）/坏清单行/manifest 摘要交叉核对；API 端到端（真实
+   下载包离线校验通过→dry-run 类型缺失如实列→补类型后全量导入资产+制品+关系→
+   公开查询口径可见）；坏包拒绝导入零写入。m58 两处断言随格式修正同步。全量
+   63 套件 313 项全绿。真实服务器 CLI 实测：演示团队造数据→curl 下载包→verify ✓
+   exit 0→制品替换篡改→verify ✗（校验和+manifest 摘要/大小三重抓获）exit 1→
+   新团队 dry-run（类型缺失如实跳过）→补注册同版类型→正式回导 2 资产+1 关系
+   exit 0；进程退出用 exitCode 避免 Windows/libuv 断言。证据：
+   docs/evidence/m63-cli-bundle-tools.txt。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M62 后，按性价比排序）：bundle 离线校验/回导工具（manifest-sha256
-   验证 CLI）；门禁类型 UI 提示前移（登记表单选中需测试证据类型时提示）；分支草稿
-   编辑器同享 schema 表单（M62 只覆盖登记侧，草稿属性仍是 JSON 文本域）；
-   调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/lifecycle 必填引导
-   与完整度 scorecard（Backstage）、属性自定义筛选器（OpenMetadata）、分类沿
-   血缘传播写侧（Atlas，需治理确认流）、引用导出 BibTeX/Markdown（Zenodo）、
-   别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。AI 草稿质量反馈环仍需先攒
-   真实使用样本。暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，
-   或由用户直接点名需求。
+   可选后续方向（M63 后，按性价比排序）：门禁类型 UI 提示前移（登记表单选中需
+   测试证据类型时提示）；分支草稿编辑器同享 schema 表单（M62 只覆盖登记侧，草稿
+   属性仍是 JSON 文本域）；bundle tagmanifest（manifest.json 自身入校验清单，补
+   M63 记录的边界）；调研吸收清单余项不变：派生血缘字段（HF base_model）、
+   owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
+   （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
+   BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。
+   AI 草稿质量反馈环仍需先攒真实使用样本。暂缓项：无。如继续迭代，建议再做
+   用户走查/收集真实使用反馈，或由用户直接点名需求。

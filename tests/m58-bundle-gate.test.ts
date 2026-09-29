@@ -175,7 +175,8 @@ describe("M58 纯函数：闭包遍历 / 打包计划 / store ZIP / 门禁判定
     // 闭包外资产（C/D 不在 assets 里）的边被过滤
     const relAssets = (plan.manifest.relations as { fromAssetId: string; toAssetId: string }[]).flatMap((r) => [r.fromAssetId, r.toAssetId]);
     expect(relAssets.every((x) => x === A || x === B)).toBe(true);
-    expect((plan.manifest.relations as { predicate: string }[])[0].predicate).toBe("文档说明");
+    expect((plan.manifest.relations as { predicate: string }[])[0].predicate).toBe("documentedBy"); // M63：predicate=type_key（机器可解析）
+    expect((plan.manifest.relations as { predicateTitle: string }[])[0].predicateTitle).toBe("文档说明");
     expect((plan.manifest as { warnings: string[] }).warnings).toEqual(["测试警告"]);
     expect((plan.manifest as { source: { kind: string } }).source.kind).toBe("asset");
   });
@@ -331,7 +332,7 @@ describe("M58 发布测试门禁与批量关联下载（真实集成）", () => 
     const manifest = JSON.parse(files.get("manifest.json")!.toString("utf8")) as {
       tawBundle: number; source: { kind: string; depth: number; direction: string };
       assets: { id: string; name: string; hop: number; revision: { contentDigest: string }; artifacts: { path: string; digest: string }[] }[];
-      relations: { fromAssetId: string; toAssetId: string; predicate: string }[];
+      relations: { fromAssetId: string; toAssetId: string; predicate: string; predicateTitle: string }[];
     };
     expect(manifest.tawBundle).toBe(1);
     expect(manifest.source).toMatchObject({ kind: "asset", depth: 2, direction: "out" });
@@ -340,7 +341,7 @@ describe("M58 发布测试门禁与批量关联下载（真实集成）", () => 
     expect(hops[docB]).toBe(1);
     expect(hops[softC]).toBe(2);
     expect(manifest.relations).toHaveLength(2);
-    expect(manifest.relations.every((r) => r.predicate === "文档说明")).toBe(true);
+    expect(manifest.relations.every((r) => r.predicate === "documentedBy" && r.predicateTitle === "文档说明")).toBe(true);
     // 校验和行与实际文件摘要一致
     for (const line of files.get("manifest-sha256.txt")!.toString("utf8").trim().split("\n")) {
       const [digest, path] = [line.slice(0, 64), line.slice(66)];

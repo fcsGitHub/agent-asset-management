@@ -12,7 +12,8 @@
     "./snippets": "./src/snippets.ts",
     "./bundle": "./src/bundle.ts",
     "./schema-builder": "./src/schema-builder.ts",
-    "./schema-form": "./src/schema-form.ts"
+    "./schema-form": "./src/schema-form.ts",
+    "./bundle-verify": "./src/bundle-verify.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

@@ -26,6 +26,7 @@
 | Issue/CR/审核发布/回退/绑定 | 审核快照 candidate/review digest；固定顺序锁；单事务发布；幂等键 | routes/releases.ts, migrations/0005/0006 |
 | 发布测试门禁（M58，GitHub required checks 思想） | 类型层声明 requires_test_evidence；候选精确修订最新一次测试运行须 pass；prepare 冻结+publish 现场重算双保险 | migrations/0026, @taw/domain/bundle（checkTestGate）, routes/releases.ts |
 | 批量关联下载（M58，HF snapshot + BagIt/Frictionless 思想） | 关系闭包/策展集合一次请求 store-only ZIP（manifest.json + manifest-sha256.txt + 制品原文）；路径安全化与重名消解；包内资产计 download 热度 | @taw/domain/bundle, routes/bundles.ts |
+| Bundle 离线校验与回导（M63，BagIt verify 口径 + CAS 再入库） | verify：complete/valid 分离 + manifest 交叉核对，零网络；import：先校验后走公开 API（同 M59 关卡无旁路），类型精确解析缺失如实跳过，--dry-run 零写入 | @taw/domain/bundle-verify, scripts/bundle-tools.ts |
 | 项目闭环 | 需求不可变修订+基线、任务交付物、测试运行、追踪矩阵、阶段门、结题包 | routes/lifecycle.ts |
 | Agent 真实调用 + 工具网关 | DeepSeek Provider（OpenAI 兼容）；读/草稿/人类专属三级；调用全记录 | packages/agent-adapter, apps/api/src/agent/{tools,runner}.ts |
 | SSE 续接/预算/取消/对账 | run_events 落库后推送；Last-Event-ID 重放；AbortController；unknown_reconcile | routes/runs.ts, agent/runner.ts |
