@@ -18,6 +18,7 @@ import {
   inheritanceViolations,
 } from "@taw/domain/validate";
 import { stableStringify } from "@taw/domain/digest";
+import { buildSnippets } from "@taw/domain/snippets";
 import { markGraphDirty } from "@taw/graph";
 import {
   DEFAULT_RELATION_TYPES,
@@ -1207,6 +1208,43 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!rows[0]) throw ERR.NOT_FOUND();
       return { teamId, alias: alias.toLowerCase(), assetId: rows[0].id, name: rows[0].name, typeKey: rows[0].type_key, typeVersion: rows[0].type_version };
+    });
+  });
+
+  // 使用片段（M57）：按类型家族生成引用/调用片段（HF/Terraform 思想）。
+  // 构建器是 @taw/domain 纯函数——端点与单测同源；数据全部来自真实登记，不编造。
+  app.get("/assets/:assetId/snippets", async (req) => {
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const teamId = String(((req.query ?? {}) as { teamId?: string }).teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT a.id, a.name, tv.type_key, tv.version AS type_version
+           FROM assets a JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [teamId, assetId]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      const { rows: aliases } = await client.query<{ alias: string }>(
+        `SELECT alias FROM asset_aliases WHERE team_id = $1 AND asset_id = $2 ORDER BY created_at`,
+        [teamId, assetId]
+      );
+      const { rows: head } = await client.query<{ properties: Record<string, unknown>; content_digest: string }>(
+        `SELECT properties, content_digest FROM asset_revisions WHERE team_id = $1 AND asset_id = $2 ORDER BY seq DESC LIMIT 1`,
+        [teamId, assetId]
+      );
+      const snippets = buildSnippets({
+        id: rows[0].id as string,
+        name: rows[0].name as string,
+        typeKey: rows[0].type_key as string,
+        typeVersion: rows[0].type_version as string,
+        aliases: aliases.map((a) => a.alias),
+        properties: head[0]?.properties ?? null,
+        contentDigest: head[0]?.content_digest ?? null,
+      });
+      return { assetId, snippets };
     });
   });
 

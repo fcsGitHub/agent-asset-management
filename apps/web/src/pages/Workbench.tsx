@@ -102,6 +102,75 @@ function CopyRefBtn({ text, teamId, assetId }: { text: string; teamId: string; a
   );
 }
 
+// 使用片段（M57）：按类型家族渲染的引用/调用模板（HF/Terraform 思想）。
+// 数据来自 /assets/:id/snippets（@taw/domain 纯函数同源），复制成功计入 copy_ref 使用热度。
+function SnippetCard({ teamId, assetId }: { teamId: string; assetId: string }) {
+  const [snippets, setSnippets] = useState<{ kind: string; label: string; language: string; text: string }[] | null>(null);
+  const [open, setOpen] = useState<string>("");
+  const [copied, setCopied] = useState("");
+  useEffect(() => {
+    setSnippets(null);
+    setOpen("");
+    void api<{ snippets: { kind: string; label: string; language: string; text: string }[] }>(`/assets/${assetId}/snippets`, {
+      query: { teamId },
+    })
+      .then((r) => setSnippets(r.snippets))
+      .catch(() => setSnippets([]));
+  }, [teamId, assetId]);
+  if (snippets === null) return null;
+  return (
+    <div className="card">
+      <h3>
+        使用片段
+        <span className="chip-dim" style={{ marginLeft: 8, fontSize: 12 }}>按类型生成 · 可复制即用</span>
+      </h3>
+      {snippets.length === 0 ? (
+        <div className="state" style={{ padding: 0 }}>片段不可用。</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {snippets.map((s) => (
+            <div key={s.kind} style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+              <button
+                className="link-btn"
+                style={{ fontWeight: 600 }}
+                aria-expanded={open === s.kind}
+                onClick={() => setOpen((cur) => (cur === s.kind ? "" : s.kind))}
+              >
+                {open === s.kind ? "▾" : "▸"} {s.label}
+              </button>
+              <button
+                className="link-btn"
+                title="复制片段（计入使用热度）"
+                onClick={() => {
+                  void navigator.clipboard.writeText(s.text).then(() => {
+                    setCopied(s.kind);
+                    window.setTimeout(() => setCopied(""), 1600);
+                    void api(`/assets/${assetId}/usage`, { method: "POST", body: { teamId, kind: "copy_ref" } }).catch(() => undefined);
+                  }).catch(() => undefined);
+                }}
+              >
+                {copied === s.kind ? "已复制" : "复制"}
+              </button>
+              {open === s.kind && (
+                <pre
+                  style={{
+                    margin: 0, width: "100%", overflowX: "auto",
+                    background: "color-mix(in srgb, var(--surface-2, #eee) 70%, transparent)",
+                    border: "1px solid var(--line, #ddd)", borderRadius: 8,
+                    padding: "8px 10px", fontSize: 12, lineHeight: 1.55,
+                  }}
+                >
+                  {s.text}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void }) {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [projectsError, setProjectsError] = useState("");
@@ -134,15 +203,17 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   // Agent 运行状态（AgentPane 上报）：顶栏药丸如实反映 空闲/运行中
   const [agentRunning, setAgentRunning] = useState(false);
   const handleRunState = useCallback((running: boolean) => setAgentRunning(running), []);
-  // Agent 区宽度：拖动分隔条调整（localStorage 记忆，双击复位，←→ 微调）
-  const DEFAULT_PANE_PCT = 44;
+  // Agent 区宽度：拖动分隔条调整（localStorage 记忆，双击复位，←→ 微调）。
+  // M57 默认 44%→36%（用户反馈对话框过大）；存储键升 v2——旧键里持久化的 44 是
+  // 挂载即写造成的"伪用户选择"，不继承，拖动后按新键记忆
+  const DEFAULT_PANE_PCT = 36;
   const [panePct, setPanePct] = useState<number>(() => {
-    const v = Number(localStorage.getItem("taw-pane-pct"));
-    return v >= 25 && v <= 65 ? v : DEFAULT_PANE_PCT;
+    const v = Number(localStorage.getItem("taw-pane-pct-v2"));
+    return v >= 22 && v <= 65 ? v : DEFAULT_PANE_PCT;
   });
   const mainRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    localStorage.setItem("taw-pane-pct", String(Math.round(panePct * 10) / 10));
+    localStorage.setItem("taw-pane-pct-v2", String(Math.round(panePct * 10) / 10));
   }, [panePct]);
   const startPaneDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -151,7 +222,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
     const rect = main.getBoundingClientRect();
     const onMove = (ev: MouseEvent) => {
       const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      setPanePct(Math.min(65, Math.max(25, pct)));
+      setPanePct(Math.min(65, Math.max(22, pct)));
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
@@ -741,7 +812,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             onMouseDown={startPaneDrag}
             onDoubleClick={() => setPanePct(DEFAULT_PANE_PCT)}
             onKeyDown={(e) => {
-              if (e.key === "ArrowLeft") { e.preventDefault(); setPanePct((p) => Math.max(25, p - 2)); }
+              if (e.key === "ArrowLeft") { e.preventDefault(); setPanePct((p) => Math.max(22, p - 2)); }
               if (e.key === "ArrowRight") { e.preventDefault(); setPanePct((p) => Math.min(65, p + 2)); }
             }}
           />
@@ -1520,6 +1591,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           </div>
         )}
       </div>
+      <SnippetCard teamId={teamId} assetId={assetId} />
       <div className="card">
         <h3>集合</h3>
         {cols === null ? (

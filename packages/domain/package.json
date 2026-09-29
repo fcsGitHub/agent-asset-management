@@ -8,7 +8,8 @@
     "./defaults": "./src/defaults.ts",
     "./validate": "./src/validate.ts",
     "./digest": "./src/digest.ts",
-    "./diff": "./src/diff.ts"
+    "./diff": "./src/diff.ts",
+    "./snippets": "./src/snippets.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

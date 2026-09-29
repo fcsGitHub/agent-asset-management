@@ -482,17 +482,44 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    真实 DeepSeek 一句话跑通 collection.search→asset.search→collection.add
    （备注「链路依赖软件」）并如实汇总条目数 3。
    全量 56 套件 267 项全绿。
+   M57 已完成（越权修补 + 显示优化 + 使用片段，用户点名「对话框过大/漏洞修补/迭代」）：
+   ①跨租户越权修补——全端点扫描（脚本核遍 GET/POST/PATCH/DELETE 三要素：CSRF/
+   认证/成员校验）坐实 M56 同类漏洞 5 处：POST /issues、/issues/:id/status、
+   /issues/:id/comments、POST 与 GET /sessions/:id/messages——这些端点只靠
+   withTeam 设 RLS 租户上下文，而 RLS 只隔离行、不校验调用者归属：任何登录
+   用户伪造他团队 teamId 即可读会话消息、向项目可见会话注入消息、建工单、
+   推工单状态、评论。全部补显式成员校验（teamRole/team_members，非成员 404）；
+   复扫全绿。其余标记项人工核明为安全模式（assertTeamMember/assertProjectAccess
+   或先 RLS 行查找后写）。②显示优化——Agent 对话框默认宽度 44%→36%（用户反
+   馈过大）；存储键 taw-pane-pct 升 v2：旧键里的 44 是挂载即写造成的伪用户选
+   择，不继承；拖动下限 25→22；chat-scroll 与 pane-label 内边距/间距紧凑化
+   （gap 18→13px）。③使用片段模板（调研清单第四项，HF/Terraform 思想）——
+   packages/domain buildSnippets 纯函数 + GET /assets/:id/snippets：按类型
+   家族生成（simulation→YAML 调用配置：别名 asset 行 + head 标量属性 + 嵌套
+   对象展开如 validStepSeconds.min + 稳定键序；software→依赖声明示意；
+   document→Markdown 引用；通用：Agent 引用（与 M54 复制引用同格式）、JSON
+   引用（digest 16 位截断）、别名短引用 assets:alias + 不断链说明）；详情页
+   「使用片段」卡：点选展开 + 复制（clipboard 成功后计 copy_ref 使用热度，
+   与 M55 埋点同源）。
+   tests/m57 六项：外人读/写会话消息 404 且验证未写入、外人建工单/推状态/
+   评论 404 且成员路径无回归、片段端点四类内容（agent-ref 同格式/JSON/
+   short-ref/config 嵌套展开）+ 跨团队 404、software/document 家族分派与无
+   别名时无 short-ref、buildSnippets 纯函数（digest 截断/空属性回落/未知家族
+   仅通用两条）。浏览器实测：面板 333/926=36% 视觉确认（截图比例分析对话区
+   与工作区约 1:1.8 合理）、旧存储键 44 未继承（v2=36）；片段卡四条目渲染、
+   YAML 与别名短引用展开内容核验（assets:prod-model、frame: ECI、
+   validStepSeconds.min: 0.1）。
+   全量 57 套件 273 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M56 后，两批调研吸收清单余项，按性价比排序）：使用片段
-   模板（按资产类型渲染调用/引用 snippet——HF/Terraform，集合条目卡可直接
-   附 snippet）；派生血缘字段（base_asset_id + base_relation，UI 查看派生
-   资产——HF base_model）；owner/lifecycle 必填引导与完整度 scorecard
-   （Backstage）；属性自定义筛选器（OpenMetadata）；分类沿血缘传播写侧
-   （Atlas，废弃波及下游，需治理确认流）；引用导出 BibTeX/Markdown
-   （Zenodo）；别名进 ⌘K（assets:/x@prod 解析）；集合导出/分享只读快照
-   （HF collection share，需 meta-share 通道决策）。
+   可选后续方向（M57 后，两批调研吸收清单余项，按性价比排序）：派生血缘
+   字段（base_asset_id + base_relation，UI 查看派生资产——HF base_model）；
+   owner/lifecycle 必填引导与完整度 scorecard（Backstage）；属性自定义筛选器
+   （OpenMetadata）；分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认
+   流）；引用导出 BibTeX/Markdown（Zenodo，可复用 M57 片段构建器）；别名进
+   ⌘K（assets:/x@prod 解析）；集合导出/分享只读快照（HF collection share，
+   需 meta-share 通道决策）；Agent 对话区可折叠（窄屏/演示场景一键全宽工作区）。
    暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
    点名需求。

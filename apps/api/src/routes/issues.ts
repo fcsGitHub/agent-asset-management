@@ -1,10 +1,22 @@
 // /api/v1/issues — 问题与讨论（设计 12/16 章：Issue 锁定报告所针对的版本）。
+// 越权修复（M57）：withTeam 只设置 RLS 租户上下文，不校验调用者归属——teamId 来自
+// 请求体时必须先显式验证成员身份，否则任何登录用户可伪造他团队 teamId 读写下发
+// （与 M56 集合路由同类缺陷，跨租户走查扫描发现）。
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { q, withTeam } from "../db.js";
 import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
+
+async function teamRole(userId: string, teamId: string): Promise<string> {
+  const { rows } = await q<{ role: string }>(
+    `SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2`,
+    [teamId, userId]
+  );
+  if (!rows[0]) throw ERR.NOT_FOUND();
+  return rows[0].role;
+}
 
 export async function issueRoutes(app: FastifyInstance): Promise<void> {
   app.post("/issues", async (req, reply) => {
@@ -21,6 +33,7 @@ export async function issueRoutes(app: FastifyInstance): Promise<void> {
       }),
       req.body
     );
+    await teamRole(auth.userId, body.teamId);
     const id = newId();
     await withTeam(body.teamId, async (client) => {
       if (body.reportedRevisionId) {
@@ -72,6 +85,7 @@ export async function issueRoutes(app: FastifyInstance): Promise<void> {
       z.object({ teamId: z.string().uuid(), status: z.enum(["open", "in_progress", "resolved", "closed"]) }),
       req.body
     );
+    await teamRole(auth.userId, body.teamId);
     await withTeam(body.teamId, async (client) => {
       const { rows } = await client.query<{ created_by: string }>(
         `SELECT created_by FROM issues WHERE team_id = $1 AND id = $2 FOR UPDATE`,
@@ -97,6 +111,7 @@ export async function issueRoutes(app: FastifyInstance): Promise<void> {
       z.object({ teamId: z.string().uuid(), content: z.string().min(1).max(8000) }),
       req.body
     );
+    await teamRole(auth.userId, body.teamId);
     const id = newId();
     await withTeam(body.teamId, async (client) => {
       const { rows } = await client.query(`SELECT 1 FROM issues WHERE team_id = $1 AND id = $2`, [

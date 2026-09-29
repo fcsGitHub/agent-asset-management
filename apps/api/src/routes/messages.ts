@@ -1,7 +1,7 @@
 // /api/v1/sessions/:sessionId/messages — 会话消息（M1 存取；M4 接入 Agent 回复）。
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { withTeam } from "../db.js";
+import { q, withTeam } from "../db.js";
 import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
@@ -18,6 +18,13 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     // 响应必须在事务提交之后发出：在 withTeam 处理器内调用 reply.send() 会让
     // Fastify 立即开始响应（不等 COMMIT），紧跟着的读请求可能读不到刚写入的行
     // （read-your-writes 竞态，C08 含密分享检查曾因此偶发漏检）。
+    // 越权修复（M57）：成员校验必须在 withTeam 之前——RLS 上下文由 teamId 派生，
+    // 不校验调用者归属时任何登录用户可伪造他团队 teamId 注入消息
+    const { rows: member } = await q(`SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2`, [
+      body.teamId,
+      auth.userId,
+    ]);
+    if (!member[0]) throw ERR.NOT_FOUND();
     const created = await withTeam(body.teamId, async (client) => {
       const { rows: sess } = await client.query<{ created_by: string; visibility: string }>(
         `SELECT created_by, visibility FROM sessions WHERE team_id = $1 AND id = $2`,
@@ -45,6 +52,12 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
     const { sessionId } = req.params as { sessionId: string };
     const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    // 越权修复（M57）：先验成员再进租户上下文——否则伪造 teamId 即可读他团队会话消息
+    const { rows: member } = await q(`SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2`, [
+      teamId,
+      auth.userId,
+    ]);
+    if (!member[0]) throw ERR.NOT_FOUND();
     return withTeam(teamId, async (client) => {
       const { rows: sess } = await client.query<{ created_by: string; visibility: string }>(
         `SELECT created_by, visibility FROM sessions WHERE team_id = $1 AND id = $2`,
