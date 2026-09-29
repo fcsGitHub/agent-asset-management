@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { Me } from "../App";
 import { Empty } from "./Empty";
+import { fieldsToSchema, type SchemaFieldDraft } from "@taw/domain/schema-builder";
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 
@@ -516,6 +517,60 @@ function RegisterType({ project, types, unitVocab, onDone }: {
   const [schemaText, setSchemaText] = useState(DEFAULT_SCHEMA);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // M60 便捷生成：表单构建 / 样例推断 / 手写 JSON 三模式；产物统一写入 schemaText
+  // （单一事实源），登记仍走 POST /types 全部质量门与 M59 校验关卡。
+  const [mode, setMode] = useState<"form" | "infer" | "raw">("form");
+  const [fields, setFields] = useState<SchemaFieldDraft[]>([{ key: "", type: "string", required: true }]);
+  const [sampleText, setSampleText] = useState("");
+  const [inferNotes, setInferNotes] = useState<string[]>([]);
+  const [inferring, setInferring] = useState(false);
+  const built = useMemo(() => fieldsToSchema(fields), [fields]);
+
+  useEffect(() => {
+    if (mode === "form") setSchemaText(JSON.stringify(built.jsonSchema, null, 2));
+  }, [mode, built]);
+
+  /** 样例文本解析：整体 JSON（对象或数组）优先，失败按行逐个解析（每行一个对象）。 */
+  function parseSamples(): { samples: unknown[]; parseError: string } {
+    const text = sampleText.trim();
+    if (text === "") return { samples: [], parseError: "请粘贴至少一个属性样例对象" };
+    try {
+      const whole = JSON.parse(text);
+      if (Array.isArray(whole)) return { samples: whole, parseError: "" };
+      if (whole && typeof whole === "object") return { samples: [whole], parseError: "" };
+      return { samples: [], parseError: "顶层必须是对象（或对象数组）" };
+    } catch {
+      const lines = text.split(/\n+/).map((l) => l.trim()).filter((l) => l !== "");
+      const samples: unknown[] = [];
+      for (const line of lines) {
+        try {
+          samples.push(JSON.parse(line));
+        } catch {
+          return { samples: [], parseError: "既不是完整 JSON，也存在无法解析的行" };
+        }
+      }
+      return { samples, parseError: "" };
+    }
+  }
+
+  async function runInfer(): Promise<void> {
+    setError("");
+    const { samples, parseError } = parseSamples();
+    if (parseError) { setError(parseError); return; }
+    setInferring(true);
+    try {
+      const res = await api<{ jsonSchema: object; notes: string[] }>("/types/infer-schema", {
+        method: "POST",
+        body: { teamId: project.teamId, samples },
+      });
+      setSchemaText(JSON.stringify(res.jsonSchema, null, 2));
+      setInferNotes(res.notes);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setInferring(false);
+    }
+  }
 
   // 实时单位校验：schemaText 可解析且词表可用时逐值比对；其余状态如实降级
   const unitCheck = useMemo(() => {
@@ -558,6 +613,7 @@ function RegisterType({ project, types, unitVocab, onDone }: {
       });
       onDone(`类型已登记：${typeKey} v${version}（${res.typeVersionId.slice(0, 8)}…）${requiresTest ? "，含发布测试门禁" : ""}`);
       setTypeKey(""); setTitle(""); setParentId(""); setRequiresTest(false); setSchemaText(DEFAULT_SCHEMA);
+      setFields([{ key: "", type: "string", required: true }]); setSampleText(""); setInferNotes([]);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -590,8 +646,136 @@ function RegisterType({ project, types, unitVocab, onDone }: {
       {requiresTest && (
         <div className="hint">门禁类型资产进入正式发布时，服务端会校验该候选修订（按内容摘要绑定）上最新一次测试运行为 pass；曾通过但后来失败同样拦截。</div>
       )}
-      <label>JSON Schema（必填属性放 required；单位词表对应 &lt;name&gt; 或 &lt;name&gt;Unit 属性）
-        <textarea rows={6} value={schemaText} onChange={(e) => setSchemaText(e.target.value)} style={{ fontFamily: "monospace", width: "100%" }} />
+      <label>
+        Schema 生成方式（M60）
+        <select value={mode} onChange={(e) => setMode(e.target.value as "form" | "infer" | "raw")} style={{ marginBottom: 8 }}>
+          <option value="form">表单构建——填属性行，免写 JSON</option>
+          <option value="infer">样例推断——粘贴属性样例自动生成</option>
+          <option value="raw">手写 JSON Schema</option>
+        </select>
+      </label>
+      {mode === "form" && (
+        <div style={{ marginBottom: 8 }}>
+          <table className="list">
+            <thead>
+              <tr><th>属性名</th><th>类型</th><th>必填</th><th>约束</th><th></th></tr>
+            </thead>
+            <tbody>
+              {fields.map((f, i) => (
+                <tr key={i}>
+                  <td>
+                    <input
+                      value={f.key}
+                      onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))}
+                      placeholder="如 interfaceVersion"
+                      aria-label={`属性名 ${i + 1}`}
+                      style={{ width: 150 }}
+                    />
+                  </td>
+                  <td>
+                    <select
+                      value={f.type}
+                      onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, type: e.target.value as SchemaFieldDraft["type"] } : x)))}
+                      aria-label={`类型 ${i + 1}`}
+                    >
+                      {["string", "number", "integer", "boolean", "object", "array"].map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={f.required}
+                      onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, required: e.target.checked } : x)))}
+                      aria-label={`必填 ${i + 1}`}
+                    />
+                  </td>
+                  <td>
+                    {f.type === "string" && (
+                      <input
+                        value={f.enumValues ?? ""}
+                        onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, enumValues: e.target.value } : x)))}
+                        placeholder="枚举值（逗号分隔，可空）"
+                        aria-label={`枚举 ${i + 1}`}
+                        style={{ width: 220 }}
+                      />
+                    )}
+                    {(f.type === "number" || f.type === "integer") && (
+                      <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                        <input
+                          type="number"
+                          value={f.minimum ?? ""}
+                          onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, minimum: e.target.value === "" ? undefined : Number(e.target.value) } : x)))}
+                          placeholder="min"
+                          aria-label={`最小值 ${i + 1}`}
+                          style={{ width: 70 }}
+                        />
+                        <input
+                          type="number"
+                          value={f.maximum ?? ""}
+                          onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, maximum: e.target.value === "" ? undefined : Number(e.target.value) } : x)))}
+                          placeholder="max"
+                          aria-label={`最大值 ${i + 1}`}
+                          style={{ width: 70 }}
+                        />
+                      </span>
+                    )}
+                    {f.type === "array" && (
+                      <select
+                        value={f.items ?? "string"}
+                        onChange={(e) => setFields(fields.map((x, j) => (j === i ? { ...x, items: e.target.value as SchemaFieldDraft["type"] } : x)))}
+                        aria-label={`元素类型 ${i + 1}`}
+                      >
+                        {["string", "number", "integer", "boolean"].map((t) => <option key={t} value={t}>元素 {t}</option>)}
+                      </select>
+                    )}
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => setFields(fields.length > 1 ? fields.filter((_, j) => j !== i) : fields)}
+                      aria-label={`删除属性行 ${i + 1}`}
+                      title={fields.length > 1 ? "删除该行" : "至少保留一行（可留空）"}
+                    >×</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button onClick={() => setFields([...fields, { key: "", type: "string", required: true }])} style={{ marginTop: 6 }}>+ 添加属性</button>
+          {built.problems.length > 0 && (
+            <div className="error-text">{built.problems.map((p, i) => <div key={i}>⚠ {p}</div>)}</div>
+          )}
+        </div>
+      )}
+      {mode === "infer" && (
+        <div style={{ marginBottom: 8 }}>
+          <label>
+            属性样例（一个 JSON 对象、对象数组，或每行一个对象；多个样例时「所有样例都出现的字段」才会被设为必填）
+            <textarea
+              rows={5}
+              value={sampleText}
+              onChange={(e) => { setSampleText(e.target.value); setInferNotes([]); }}
+              placeholder={'{ "frame": "ECI", "validStepSeconds": { "min": 0.1 }, "tags": ["a", "b"] }'}
+              style={{ fontFamily: "monospace", width: "100%" }}
+            />
+          </label>
+          <div className="btn-row" style={{ marginTop: 6 }}>
+            <button className="primary" disabled={inferring} onClick={() => void runInfer()}>{inferring ? "推断中…" : "推断 Schema"}</button>
+          </div>
+          {inferNotes.length > 0 && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              {inferNotes.map((n, i) => <div key={i}>· {n}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+      <label>JSON Schema{mode === "form" ? "（表单实时生成，可切到「手写」微调）" : mode === "infer" ? "（推断结果，可切到「手写」微调）" : "（必填属性放 required；单位词表对应 <name> 或 <name>Unit 属性）"}
+        <textarea
+          rows={6}
+          value={schemaText}
+          onChange={(e) => setSchemaText(e.target.value)}
+          readOnly={mode === "form"}
+          style={{ fontFamily: "monospace", width: "100%", opacity: mode === "form" ? 0.75 : 1 }}
+        />
       </label>
       {unitCheck.state === "unavailable" && (
         <div className="hint">单位词表不可用（语义 worker 降级），未做单位在线校验；登记不受影响。</div>

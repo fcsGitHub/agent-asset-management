@@ -596,18 +596,41 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    生效的直接证据）→改回合法→「草稿已保存：r2」。截图：m59-ui-validate-btn、
    m59-ui-draft-gate。
    全量 59 套件 289 项全绿（零回归——既有分支/发布链路的历史测试数据本就合规）。
+   M60 已完成（Schema 便捷生成，用户点名；调研笔记 research-M60-schema-builder.md
+   ——quicktype/jsonschema.net 推断惯例 + required unanimity 规则 + 表单式 schema
+   编辑器）。定位：M59 把「校验」补强后，「设定」侧的手写 JSON 门槛成了瓶颈。
+   ①@taw/domain/schema-builder 纯函数两件：fieldsToSchema（表单属性行→schema，
+   类型联动约束、键非法/重复/类型不匹配如实列 problems 不静默）+
+   inferSchemaFromSamples（样例→schema：unanimity 必填——全部样例出现才必填、
+   嵌套展开深度上限 2 层如实注明、数组元素一致才约束 items、类型冲突回落宽松{}
+   并注明、null 跳过、非对象样例忽略；**枚举不机械推断**——样例区分不了受控值与
+   自由文本，notes 提示人工设定）。②POST /types/infer-schema（成员可用、零副作用、
+   compileTypeSchema 防御复核）；web 经 workspace 直引 schema-builder 子路径
+   （模块无 ajv 依赖）。③本体页类型表单三模式（默认表单构建/样例推断/手写 JSON）：
+   属性行编辑器（string→枚举输入、number/integer→min/max、array→元素类型联动）、
+   生成物实时预览、统一回流 schemaText 单一事实源、任意模式可切手写微调；提交
+   仍走 POST /types 全部质量门与 M59 关卡——生成只降「设定」门槛不降「校验」强度。
+   tests/m60 七项：fieldsToSchema 完整行/枚举中英逗号/problems 四类；推断单样例全
+   必填+嵌套+数组/unanimity+类型冲突/null+元素混杂+深度上限+全非对象；端点同源+
+   非对象忽略+越权 404+空样例 422；端到端闭环（推断产物注册类型→符合样例资产
+   201→违反者 M59 关卡 422）。全量 60 套件 296 项全绿（环境注记：宿主重启致
+   PG/graphdb 容器退出，docker compose 重新拉起后零改动全绿——非代码回归）。
+   浏览器实测：表单构建模式填 frame 枚举+level integer 0-10 → 实时预览正确生成
+   → 真实登记 m60.form-built 入类型树；样例推断模式粘贴两行样例 → memo「仅在
+   1/2 个样例中出现」未设必填、validStepSeconds.min 类型冲突如实回落宽松+注明、
+   嵌套 required 展开正确 → 登记m60.inferred 成功。截图：m60-ui-form-builder、
+   m60-ui-infer。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M59 后，按性价比排序）：schema 约束的前端预填（登记表单按
-   jsonSchema 的 min/max/pattern 做输入前提示，服务端已是强制关卡、此项纯体验）；
-   bundle 离线校验/回导工具（manifest-sha256.txt 已可离线核，回导端可复用 M28
-   回导管线）；门禁类型 UI 提示前移（登记/创建 CR 时即提示，现在只在 CR 详情与
-   发布拦截时可见）；调研吸收清单余项不变：派生血缘字段（HF base_model）、
-   owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
+   可选后续方向（M60 后，按性价比排序）：自然语言生成 schema（对 Agent/⌘K 说
+   「我要一个 XX 类型」→ LLM 意图产出草稿 schema 进表单模式，人工确认后登记——
+   LLM 只产草稿不落库，权限语义与 NL 命令栏一致）；schema 约束的前端预填（登记
+   表单按 min/max/pattern 输入前提示）；bundle 离线校验/回导工具；门禁类型 UI
+   提示前移；调研吸收清单余项不变：派生血缘字段（HF base_model）、owner/
+   lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
    （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
-   BibTeX/Markdown（Zenodo，可复用 M57 片段构建器）、别名进 ⌘K、集合只读分享
-   快照、Agent 对话区可折叠。
+   BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。
    暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
    点名需求。

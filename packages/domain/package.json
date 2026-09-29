@@ -10,7 +10,8 @@
     "./digest": "./src/digest.ts",
     "./diff": "./src/diff.ts",
     "./snippets": "./src/snippets.ts",
-    "./bundle": "./src/bundle.ts"
+    "./bundle": "./src/bundle.ts",
+    "./schema-builder": "./src/schema-builder.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

@@ -19,6 +19,7 @@ import {
 } from "@taw/domain/validate";
 import { stableStringify } from "@taw/domain/digest";
 import { buildSnippets } from "@taw/domain/snippets";
+import { inferSchemaFromSamples } from "@taw/domain/schema-builder";
 import { markGraphDirty } from "@taw/graph";
 import {
   DEFAULT_RELATION_TYPES,
@@ -408,6 +409,27 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         removedPropertyUsage: removedUsage,
       };
     });
+  });
+
+  // 从样例推断 JSON Schema（M60 便捷生成）：零副作用，成员可用（推断不产生任何
+  // 写入；登记仍走 POST /types 的全部质量门）。与 @taw/domain/schema-builder 同源。
+  app.post("/types/infer-schema", async (req) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        samples: z.array(z.unknown()).min(1).max(50),
+      }),
+      req.body
+    );
+    await teamRole(auth.userId, body.teamId);
+    const inferred = inferSchemaFromSamples(body.samples);
+    if (!compileTypeSchema(inferred.jsonSchema)) {
+      // 纯函数产物应当可编译；防御性兜底而非静默
+      throw ERR.INVALID("推断产物不可编译，请检查样例结构");
+    }
+    return { jsonSchema: inferred.jsonSchema, notes: inferred.notes };
   });
 
   const entityKindSchema = z.enum(ENTITY_KINDS);
