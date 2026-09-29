@@ -1023,7 +1023,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     await teamRole(auth.userId, teamId);
     const limit = Math.min(Number(query.limit ?? 50), 200);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
-    const sort = query.sort === "refs" ? "refs" : "newest";
+    const sort = query.sort === "refs" || query.sort === "usage" ? query.sort : "newest";
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version,
@@ -1032,7 +1032,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
                   SELECT 1 FROM revision_artifacts ra
                    WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
                 ) AS has_artifacts,
-                rc.n AS relation_count
+                rc.n AS relation_count,
+                uc.n AS usage_count
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
            JOIN LATERAL (
@@ -1044,8 +1045,16 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
               WHERE ra.team_id = a.team_id AND ra.status <> 'withdrawn'
                 AND (ra.source_asset_id = a.id OR ra.target_asset_id = a.id)
            ) rc ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM usage_events ue
+              WHERE ue.team_id = a.team_id AND ue.asset_id = a.id
+                AND ue.created_at > now() - interval '90 days'
+           ) uc ON true
           WHERE a.team_id = $1
-            AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
+            AND ($2 = '' OR a.name ILIKE '%' || $2 || '%' OR EXISTS (
+                  SELECT 1 FROM asset_aliases al
+                   WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
+                ))
             AND ($3 = '' OR tv.type_key = $3)
             AND ($5 = 'all' OR a.lifecycle = CASE WHEN $5 = 'archived' THEN 'archived' ELSE 'active' END)
             AND ($6 = '' OR EXISTS (
@@ -1053,7 +1062,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
                    WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $6
                 ))
             AND ($7 = '' OR tv.type_key LIKE $7 || '%')
-          ORDER BY (CASE WHEN $8 = 'refs' THEN rc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $4`,
+          ORDER BY (CASE WHEN $8 = 'refs' THEN rc.n WHEN $8 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $4`,
         [teamId, query.q ?? "", query.type ?? "", limit, lifecycle, query.label ?? "", query.typePrefix ?? "", sort]
       )
     );
@@ -1090,6 +1099,114 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         labels: labels.map((r) => ({ label: r.label, count: r.count })),
         categories: cats.map((r) => r.category_path),
       };
+    });
+  });
+
+  // ---------- 使用度事件与别名（M55，npm/HF 使用度信号 + MLflow alias 思想） ----------
+  // 引用复制事件：界面「复制引用」按钮上报（下载与 Agent 读取由服务端埋点，不经此端点）
+  app.post("/assets/:assetId/usage", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(z.object({ teamId: z.string().uuid(), kind: z.literal("copy_ref") }), req.body);
+    await teamRole(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const { rows } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [body.teamId, assetId]);
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      await client.query(
+        `INSERT INTO usage_events (team_id, asset_id, kind, actor_id) VALUES ($1,$2,'copy_ref',$3)`,
+        [body.teamId, assetId, auth.userId]
+      );
+    });
+    return reply.code(201).send({ ok: true });
+  });
+
+  const ALIAS_RE = /^[a-z0-9][a-z0-9._@-]{1,63}$/;
+
+  async function requireAssetManagePermission(
+    teamId: string,
+    assetId: string,
+    userId: string,
+    role: string
+  ): Promise<void> {
+    const { rows } = await withTeam(teamId, async (client) =>
+      client.query<{ created_by: string }>(
+        `SELECT created_by FROM assets WHERE team_id = $1 AND id = $2`,
+        [teamId, assetId]
+      )
+    );
+    if (!rows[0]) throw ERR.NOT_FOUND();
+    if (rows[0].created_by !== userId && role !== "admin") throw ERR.FORBIDDEN();
+  }
+
+  app.post("/assets/:assetId/aliases", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(z.object({ teamId: z.string().uuid(), alias: z.string().min(2).max(64) }), req.body);
+    const role = await teamRole(auth.userId, body.teamId);
+    await requireAssetManagePermission(body.teamId, assetId, auth.userId, role);
+    const alias = body.alias.trim().toLowerCase();
+    if (!ALIAS_RE.test(alias)) {
+      throw ERR.INVALID("别名格式：小写字母/数字开头，仅含小写字母、数字、点、下划线、@、连字符，2–64 位");
+    }
+    await withTeam(body.teamId, async (client) => {
+      const { rows } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [body.teamId, assetId]);
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      try {
+        await client.query(
+          `INSERT INTO asset_aliases (team_id, alias, asset_id, created_by) VALUES ($1,$2,$3,$4)`,
+          [body.teamId, alias, assetId, auth.userId]
+        );
+      } catch (err) {
+        if ((err as { code?: string }).code === "23505") {
+          throw ERR.CONFLICT("ALIAS_TAKEN", `别名「${alias}」已被本团队其他资产占用`);
+        }
+        if ((err as { code?: string }).code === "23514") {
+          throw ERR.INVALID("别名格式非法");
+        }
+        throw err;
+      }
+    });
+    return reply.code(201).send({ teamId: body.teamId, assetId, alias });
+  });
+
+  app.delete("/assets/:assetId/aliases/:alias", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId, alias } = req.params as { assetId: string; alias: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    const role = await teamRole(auth.userId, teamId);
+    await requireAssetManagePermission(teamId, assetId, auth.userId, role);
+    const { rowCount } = await withTeam(teamId, async (client) =>
+      client.query(`DELETE FROM asset_aliases WHERE team_id = $1 AND asset_id = $2 AND alias = $3`, [teamId, assetId, alias])
+    );
+    if (!rowCount) throw ERR.NOT_FOUND();
+    return reply.code(200).send({ ok: true });
+  });
+
+  // 别名解析（MLflow @alias 思想）：稳定命名引用 → 资产；跨团队 RLS 隔离（他团队别名 404）
+  app.get("/assets/by-alias/:alias", async (req) => {
+    const auth = requireAuth(req);
+    const { alias } = req.params as { alias: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows } = await client.query<{ id: string; name: string; type_key: string; type_version: string }>(
+        `SELECT a.id, a.name, tv.type_key, tv.version AS type_version
+           FROM asset_aliases al
+           JOIN assets a ON a.team_id = al.team_id AND a.id = al.asset_id
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE al.team_id = $1 AND al.alias = $2`,
+        [teamId, alias.toLowerCase()]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      return { teamId, alias: alias.toLowerCase(), assetId: rows[0].id, name: rows[0].name, typeKey: rows[0].type_key, typeVersion: rows[0].type_version };
     });
   });
 
@@ -1149,7 +1266,28 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         `SELECT category_path, is_primary FROM asset_categories WHERE team_id = $1 AND asset_id = $2`,
         [teamId, assetId]
       );
-      return { ...asset, revisions: revisionsWithArts, revisionsTotal: total[0]!.n, labels: labels.map((l) => l.label), categories };
+      // 别名与使用热度（M55）：详情页展示与「随取随用」计数的真实聚合
+      const { rows: aliasRows } = await client.query<{ alias: string }>(
+        `SELECT alias FROM asset_aliases WHERE team_id = $1 AND asset_id = $2 ORDER BY alias`,
+        [teamId, assetId]
+      );
+      const { rows: usageRows } = await client.query<{ kind: string; n: number }>(
+        `SELECT kind, count(*)::int AS n FROM usage_events
+          WHERE team_id = $1 AND asset_id = $2 AND created_at > now() - interval '90 days'
+          GROUP BY kind`,
+        [teamId, assetId]
+      );
+      const usage = { download: 0, copy_ref: 0, agent_read: 0 };
+      for (const r of usageRows) if (r.kind in usage) usage[r.kind as keyof typeof usage] = r.n;
+      return {
+        ...asset,
+        revisions: revisionsWithArts,
+        revisionsTotal: total[0]!.n,
+        labels: labels.map((l) => l.label),
+        categories,
+        aliases: aliasRows.map((r) => r.alias),
+        usage,
+      };
     });
   });
 

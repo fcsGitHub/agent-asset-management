@@ -87,6 +87,7 @@ export const READONLY_TOOLS: ToolDef[] = [
             [ctx.teamId, assetId]
           );
       if (!rows[0]) throw new Error("修订不存在或与资产不匹配");
+      await recordUsage(client, ctx.teamId, assetId, "agent_read", ctx.userId);
       const arts = await client.query(
         `SELECT blob_digest, artifact_role, original_name FROM revision_artifacts WHERE team_id = $1 AND revision_id = $2`,
         [ctx.teamId, String(rows[0].id)]
@@ -104,6 +105,7 @@ export const READONLY_TOOLS: ToolDef[] = [
       required: ["assetId"],
     },
     async execute(client, ctx, args) {
+      const assetId = String(args.assetId ?? "");
       const out = await client.query(
         `SELECT rt.type_key, ta.name AS target FROM relation_assertions ra
            JOIN relation_type_versions rt ON rt.team_id = ra.team_id AND rt.id = ra.relation_type_version_id
@@ -118,6 +120,7 @@ export const READONLY_TOOLS: ToolDef[] = [
           WHERE ra.team_id = $1 AND ra.target_asset_id = $2 AND ra.status = 'confirmed'`,
         [ctx.teamId, String(args.assetId)]
       );
+      await recordUsage(client, ctx.teamId, assetId, "agent_read", ctx.userId);
       return { outgoing: out.rows, incoming: inc.rows };
     },
   },
@@ -166,7 +169,7 @@ export const READONLY_TOOLS: ToolDef[] = [
     name: "graph.path",
     tier: "read",
     description:
-      "查询两个资产之间的最短关联路径（沿已确认关系，无向）。两端均可传 assetId 或 name（名称精确匹配优先，唯一模糊命中可用，多命中会列出候选要求改用 id）。" +
+      "查询两个资产之间的最短关联路径（沿已确认关系，无向）。两端均可传 assetId 或 name（名称精确匹配优先，其次团队别名，唯一模糊命中可用，多命中会列出候选要求改用 id）。" +
       "找不到路径时如实返回 found=false；图数据库不可用时如实报错（不做降级猜测）。",
     parameters: {
       type: "object",
@@ -182,6 +185,8 @@ export const READONLY_TOOLS: ToolDef[] = [
       const from = await resolveAssetRef(client, ctx.teamId, { assetId: args.fromAssetId, name: args.fromName }, "from");
       const to = await resolveAssetRef(client, ctx.teamId, { assetId: args.toAssetId, name: args.toName }, "to");
       if (from.id === to.id) throw new Error("from 与 to 是同一资产");
+      await recordUsage(client, ctx.teamId, from.id, "agent_read", ctx.userId);
+      await recordUsage(client, ctx.teamId, to.id, "agent_read", ctx.userId);
       let path;
       try {
         path = await findShortestPath(ctx.teamId, from.id, to.id);
@@ -206,7 +211,7 @@ export const READONLY_TOOLS: ToolDef[] = [
     name: "graph.neighbors",
     tier: "read",
     description:
-      "查看某资产的多跳关系邻域（图数据库；深度 1–3，默认 2）。返回邻域内的资产与关系边（不含类型层次边）。可传 assetId 或 name。",
+      "查看某资产的多跳关系邻域（图数据库；深度 1–3，默认 2）。返回邻域内的资产与关系边（不含类型层次边）。可传 assetId 或 name（名称/团队别名均可）。",
     parameters: {
       type: "object",
       properties: {
@@ -218,6 +223,7 @@ export const READONLY_TOOLS: ToolDef[] = [
     },
     async execute(client, ctx, args) {
       const asset = await resolveAssetRef(client, ctx.teamId, { assetId: args.assetId, name: args.name }, "asset");
+      await recordUsage(client, ctx.teamId, asset.id, "agent_read", ctx.userId);
       const depth = args.depth === undefined ? 2 : Math.min(Math.max(Math.trunc(Number(args.depth)), 1), 3);
       let sub;
       try {
@@ -243,8 +249,29 @@ export const READONLY_TOOLS: ToolDef[] = [
   },
 ];
 
+/** 使用度事件埋点（M55）：agent_read 随工具事务提交（runner 外层 withTeam 提交）。
+ *  best-effort：埋点失败不影响工具结果。 */
+async function recordUsage(
+  client: PoolClient,
+  teamId: string,
+  assetId: string,
+  kind: "agent_read",
+  actorId: string
+): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/.test(assetId)) return;
+  try {
+    await client.query(
+      `INSERT INTO usage_events (team_id, asset_id, kind, actor_id) VALUES ($1,$2,$3,$4)`,
+      [teamId, assetId, kind, actorId]
+    );
+  } catch {
+    // 使用度计数是增强信号，绝不拖垮工具调用本身
+  }
+}
+
 /** 资产端点解析（graph.path / graph.neighbors 共用）：assetId 优先；name 精确匹配优先，
- *  唯一模糊命中可用，多命中列出候选让模型改用 id。租户内解析（RLS 上下文由调用方事务决定）。 */
+ *  其次别名精确命中（M55），唯一模糊命中可用，多命中列出候选让模型改用 id。
+ *  租户内解析（RLS 上下文由调用方事务决定）。 */
 async function resolveAssetRef(
   client: PoolClient,
   teamId: string,
@@ -269,12 +296,20 @@ async function resolveAssetRef(
       [teamId, name]
     );
     if (exact.rows.length === 1) return { id: exact.rows[0].id, name: exact.rows[0].name };
+    // 别名精确命中（M55）：如「prop-v2」这类稳定短名，团队内唯一
+    const alias = await client.query<{ id: string; name: string }>(
+      `SELECT a.id, a.name FROM asset_aliases al
+         JOIN assets a ON a.team_id = al.team_id AND a.id = al.asset_id
+        WHERE al.team_id = $1 AND al.alias = $2 LIMIT 2`,
+      [teamId, name.toLowerCase()]
+    );
+    if (alias.rows.length === 1) return { id: alias.rows[0].id, name: alias.rows[0].name };
     const like = await client.query<{ id: string; name: string }>(
       `SELECT id, name FROM assets WHERE team_id = $1 AND name ILIKE '%' || $2 || '%' ORDER BY name LIMIT 6`,
       [teamId, name]
     );
     if (like.rows.length === 1) return { id: like.rows[0].id, name: like.rows[0].name };
-    if (like.rows.length === 0) throw new Error(`${side}.name「${name}」未命中任何本团队资产`);
+    if (like.rows.length === 0) throw new Error(`${side}.name「${name}」未命中任何本团队资产（名称或别名）`);
     throw new Error(
       `${side}.name「${name}」命中多个资产，请改用 assetId：` +
         like.rows.map((r) => `${r.name}(${r.id.slice(0, 8)}…)`).join("、")

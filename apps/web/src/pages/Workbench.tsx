@@ -60,6 +60,8 @@ interface AssetDetail {
   id: string; name: string; lifecycle: string; type_key: string; type_version: string;
   revisions: { id: string; seq: number; content_digest: string; properties: object; created_at: string; artifacts?: { blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number }[] }[];
   labels: string[]; categories: { category_path: string; is_primary: boolean }[];
+  aliases?: string[];
+  usage?: { download: number; copy_ref: number; agent_read: number };
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
 interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
@@ -80,16 +82,18 @@ function isHttpUrl(v: string): boolean {
 const LIFECYCLE_LABEL: Record<string, string> = { archived: "已归档", deprecated: "已弃用", active: "进行中" };
 
 /** 资产详情「复制引用」按钮（M54，吸收 HF Hub「Use this model」/ Dataverse 引用格式思想）：
- * 一键复制规范引用串（与 Agent @ 引用同格式），粘贴进会话/工单即可作为上下文引用。 */
-function CopyRefBtn({ text }: { text: string }) {
+ * 一键复制规范引用串（与 Agent @ 引用同格式），粘贴进会话/工单即可作为上下文引用。
+ * M55：复制行为上报 usage_events（copy_ref），驱动「最常使用」排序。 */
+function CopyRefBtn({ text, teamId, assetId }: { text: string; teamId: string; assetId: string }) {
   const [ok, setOk] = useState(false);
   return (
     <button
-      title="复制规范引用（与 Agent 引用同格式，可直接粘贴到会话/工单）"
+      title="复制规范引用（与 Agent 引用同格式，可直接粘贴到会话/工单）；复制会计入使用热度"
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setOk(true);
           window.setTimeout(() => setOk(false), 1600);
+          void api(`/assets/${assetId}/usage`, { method: "POST", body: { teamId, kind: "copy_ref" } }).catch(() => undefined);
         }).catch(() => undefined);
       }}
     >
@@ -954,9 +958,10 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <option value="archived">已归档</option>
           <option value="all">全部</option>
         </select>
-        <select aria-label="排序方式" value={sort} onChange={(e) => setSort(e.target.value)} title="按关联数排序可快速找到被引用最多的核心资产">
+        <select aria-label="排序方式" value={sort} onChange={(e) => setSort(e.target.value)} title="按关联数排序找核心资产，按使用热度找高频资产">
           <option value="newest">最新登记</option>
           <option value="refs">关联最多</option>
+          <option value="usage">最常使用</option>
         </select>
       </div>
       {assets === null ? (
@@ -1019,6 +1024,8 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
   const [rels, setRels] = useState<Relations | null>(null);
   const [error, setError] = useState("");
   const [lifecycleMsg, setLifecycleMsg] = useState("");
+  const [newAlias, setNewAlias] = useState("");
+  const [aliasMsg, setAliasMsg] = useState("");
 
   async function reload() {
     try {
@@ -1032,12 +1039,37 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
     setDetail(null);
     setError("");
     setLifecycleMsg("");
+    setAliasMsg("");
+    setNewAlias("");
     void reload();
     void api<Relations>("/relations", { query: { teamId, assetId } })
       .then(setRels)
       .catch(() => setRels(undefined as unknown as Relations));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId, assetId]);
+
+  async function addAlias() {
+    const alias = newAlias.trim().toLowerCase();
+    if (!alias) return;
+    try {
+      await api(`/assets/${assetId}/aliases`, { method: "POST", body: { teamId, alias } });
+      setNewAlias("");
+      setAliasMsg("");
+      await reload();
+    } catch (err) {
+      setAliasMsg(err instanceof ApiError ? err.message : "添加失败");
+    }
+  }
+
+  async function removeAlias(alias: string) {
+    try {
+      await api(`/assets/${assetId}/aliases/${encodeURIComponent(alias)}`, { method: "DELETE", query: { teamId } });
+      setAliasMsg("");
+      await reload();
+    } catch (err) {
+      setAliasMsg(err instanceof ApiError ? err.message : "移除失败");
+    }
+  }
 
   async function changeLifecycle(action: "archive" | "restore") {
     const reason = window.prompt(action === "archive" ? "归档原因（必填，将写入审计日志）：" : "恢复原因（必填，将写入审计日志）：");
@@ -1078,6 +1110,34 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           <span className="k">生命周期</span><span>{archived ? "已归档（目录默认视图隐藏，禁止新草稿）" : detail.lifecycle === "deprecated" ? "已弃用" : "进行中"}</span>
           <span className="k">分类</span><span>{detail.categories.map((c) => c.category_path).join(" · ") || "—"}</span>
           <span className="k">标签</span><span>{detail.labels.join(" · ") || "—"}</span>
+          <span className="k">别名</span>
+          <span>
+            {(detail.aliases ?? []).length === 0 ? "—" : ""}
+            {(detail.aliases ?? []).map((a) => (
+              <span key={a} className="picked-ref" style={{ display: "inline-flex", marginRight: 6 }}>
+                {a}
+                <button aria-label={`移除别名 ${a}`} title="移除别名" onClick={() => void removeAlias(a)}>×</button>
+              </span>
+            ))}
+            <input
+              value={newAlias}
+              onChange={(e) => { setNewAlias(e.target.value); setAliasMsg(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && newAlias.trim()) { e.preventDefault(); void addAlias(); } }}
+              placeholder="添加别名（如 prod）"
+              aria-label="新别名"
+              style={{ width: 150, padding: "1px 6px", fontSize: 12.5 }}
+            />
+            <button style={{ marginLeft: 6 }} onClick={() => void addAlias()} disabled={!newAlias.trim()}>添加</button>
+          </span>
+          {detail.usage && (
+            <>
+              <span className="k" title="近 90 天真实使用行为计数（npm/HF 使用度信号）">使用热度</span>
+              <span>
+                近 90 天 {detail.usage.download + detail.usage.copy_ref + detail.usage.agent_read} 次
+                （下载 {detail.usage.download} · 引用复制 {detail.usage.copy_ref} · Agent 读取 {detail.usage.agent_read}）
+              </span>
+            </>
+          )}
           {head && (
             <>
               <span className="k">当前修订</span><span>r{head.seq} · 摘要 <code>{head.content_digest.slice(0, 16)}…</code></span>
@@ -1108,7 +1168,8 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               在图谱中查看
             </button>
           )}
-          <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} />
+          <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} teamId={teamId} assetId={detail.id} />
+          {aliasMsg && <span className="error-text" style={{ alignSelf: "center" }}>{aliasMsg}</span>}
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>
         {depAlert.length > 0 && (

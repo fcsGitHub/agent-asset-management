@@ -75,8 +75,9 @@ M0–M5 里程碑已按目标正文完成并通过真实测试（非 mock）：
 | M52 资产详情多跳关联 | 资产详情新增「多跳关联（图数据库）」卡：跳数 1–3 可选，graph.neighbors 邻域 + 前端 BFS（lib/hopChains 纯函数）为每个关联资产生成从本资产出发的最短关联链（relKey 箭头按真实方向，终点可点直达）；图库停机 503/投影滞后如实提示、恢复自愈 | lib 单测 4 项 + 浏览器实测（含 docker stop 图库降级→恢复自愈） |
 | M53 调研吸收轮（分面检索/流式输出/图谱降噪） | 广泛调研 9 个开源元数据/资产管理项目（DataHub/OpenMetadata/Atlas/NetBox/CKAN/OpenCTI 等，见 `docs/implementation/research-M53-opensource-survey.md`）并落地：①CKAN 分面——`GET /assets/facets` + 目录家族快筛 chips（文档/代码/测试/仿真/数据前缀映射）+ search 补 `label`（修复参数声明未实现的缺口）与 `typePrefix`；②随取随用——详情页制品卡一键下载（`/blobs/:digest` 回真实文件名 RFC 5987，顺带修复该查询漏租户上下文被 RLS 静默拦截）、属性标量值展示且 http(s) 值直链可点开（NetBox 思路）；③关系目标可点直达；④Agent 真·流式输出——adapter `chatStream`（SSE 累积器纯函数可离线单测）→ runner `message_delta` 300ms 合帧落库 → 前端逐字渲染（回合感知），工具卡加耗时；⑤图谱去杂乱——类型图例点选显隐（off 态保留可恢复）、度数降噪（剪边保留达标枢纽）、边标签开关 | 累积器单测 4 项 + typeFamily 3 项 + tests/m53 八项（facets/label/typePrefix/content-disposition/真实 DeepSeek 流式拼接=终值）+ 浏览器实测（流式文本逐段增长、家族过滤、降噪保留中心、停库降级→自愈） |
 | M54 调研吸收二轮（使用与复用） | 第二批调研 HF Hub/MLflow/Dataverse/Zenodo/Backstage/Terraform/npm（笔记追加于同一调研文档）并落地：①详情页「复制引用」（HF Use-this-model/Dataverse Cite-as，与 Agent @ 引用同格式）；②「关联最多」排序——search 带 relation_count + `sort=refs`（npm/Amundsen 使用度信号）+ 目录「关联」列；③依赖链健康警示——`/relations` 携带端点 lifecycle，详情页「上游/下游非进行中资产」横幅（Atlas 传播+Backstage orphan 的读侧诚实形态，不自动改状态）；④筛选 URL 化——`?view=assets&family=&sort=` 可收藏可分享、直达目录并恢复全部筛选（npm `?ranking=` 视角）；⑤图谱聚焦改走服务端 `/graph/neighborhood`（引擎如实标注，离线/滞后回退客户端 BFS）——老化两轮候选项清偿；⑥NL L1 新句式「X 的关联资产」（搜索前缀让位）直达图谱聚焦 | tests/m54 六项（句式命中/让位/无回归 + refs 排序与计数 + lifecycle 数据源）+ 浏览器实测（分享链接直达、警示横幅、⌘K 一句话聚焦、服务端/回退引擎标注切换） |
+| M55 使用度事件与别名引用 | 调研清单头两项落地（0024 迁移）：①使用度事件——usage_events（download/copy_ref/agent_read，RLS 租户隔离），埋点在真实行为处：blob 下载、详情复制引用（复制成功才上报）、Agent 工具读取（getRevision/relation.query/graph.path/neighbors 随工具事务提交）；详情页「使用热度」（近 90 天分项计数）+ 目录「最常使用」排序 `sort=usage`（动态信号补强 M54 静态 relation_count）；②别名引用——asset_aliases（团队内唯一小写 slug），管理端点（创建者/管理员，冲突 409）、`GET /assets/by-alias/:alias` 解析（跨团队 RLS 404）、搜索按别名命中、详情页别名增删 UI、Agent resolveAssetRef 支持别名（名称精确 → 别名精确 → 模糊）——下游按稳定短名消费、资产升级换版不断链（MLflow `@alias` 思想） | tests/m55 七项（别名 CRUD/冲突/权限/跨团队隔离/解析、搜索命中、usage 端点白名单、下载埋点计数、sort=usage 降序、Agent 埋点提交语义与别名解析）+ 浏览器实测（添加别名 chip、热度分项实时刷新、真实下载计入、最常使用置顶） |
 
-当前测试基线：54 套件 251 项全部通过（46 个 `tests/` 集成套件 + 8 个前端/包单测套件；M31 起以 vitest 文件数为准）。M33–M54 迭代明细见 `docs/implementation/HANDOFF.md`。
+当前测试基线：55 套件 258 项全部通过（47 个 `tests/` 集成套件 + 8 个前端/包单测套件；M31 起以 vitest 文件数为准）。M33–M55 迭代明细见 `docs/implementation/HANDOFF.md`。
 
 ## 环境要求
 
@@ -120,7 +121,7 @@ python -m venv .venv-sema
 
 ```bash
 npx tsc -b tsconfig.json          # 类型检查（TS strict）
-npx vitest run                    # 全量测试（54 套件 251 项：tests/ 集成 + 单测，需 PostgreSQL 运行中）
+npx vitest run                    # 全量测试（55 套件 258 项：tests/ 集成 + 单测，需 PostgreSQL 运行中）
 npm run smoke:llm                 # DeepSeek 真实连通冒烟（消耗少量 token）
 npx tsx scripts/e2e-m1.ts         # M1 端到端 + docker 重启持久化演练
 npx tsx scripts/e2e-m5-restore.ts # E03 备份恢复演练（pg_dump → 新容器 → 验证）

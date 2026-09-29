@@ -127,14 +127,27 @@ export async function uploadRoutes(app: FastifyInstance): Promise<void> {
     if (!rows[0]) throw ERR.NOT_FOUND();
     const exists = await store.exists(teamId, digest);
     if (!exists) throw ERR.NOT_FOUND();
-    // 文件名登记在 revision_artifacts（RLS 表）：须带租户上下文查询，否则行不可见
-    const originalName = await withTeam(teamId, async (client) => {
-      const { rows } = await client.query<{ original_name: string }>(
-        `SELECT original_name FROM revision_artifacts WHERE team_id = $1 AND blob_digest = $2 AND original_name <> '' LIMIT 1`,
+    // 文件名与资产归属登记在 revision_artifacts（RLS 表）：须带租户上下文查询，否则行不可见
+    const { assetId, originalName } = await withTeam(teamId, async (client) => {
+      const { rows } = await client.query<{ asset_id: string; original_name: string }>(
+        `SELECT r.asset_id, ra.original_name
+           FROM revision_artifacts ra
+           JOIN asset_revisions r ON r.team_id = ra.team_id AND r.id = ra.revision_id
+          WHERE ra.team_id = $1 AND ra.blob_digest = $2 AND ra.original_name <> ''
+          LIMIT 1`,
         [teamId, digest]
       );
-      return rows[0]?.original_name ?? "";
+      return { assetId: rows[0]?.asset_id ?? "", originalName: rows[0]?.original_name ?? "" };
     });
+    if (assetId) {
+      // 使用度埋点（M55）：真实下载计数（best-effort，不阻塞下载本身）
+      await withTeam(teamId, async (client) => {
+        await client.query(
+          `INSERT INTO usage_events (team_id, asset_id, kind, actor_id) VALUES ($1,$2,'download',$3)`,
+          [teamId, assetId, auth.userId]
+        );
+      }).catch(() => undefined);
+    }
     if (originalName) {
       // RFC 5987 filename*：中文名等非 ASCII 安全透传
       reply.header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(originalName)}`);

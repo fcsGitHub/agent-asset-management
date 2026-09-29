@@ -1,6 +1,6 @@
 # HANDOFF — 交接
 
-更新时间：2026-09-29（M54 调研吸收二轮后）
+更新时间：2026-09-29（M55 使用度与别名轮后）
 
 ## 仓库状态
 
@@ -423,18 +423,41 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    模型的关联资产」规则解析→执行→图谱聚焦 + 服务端引擎标注；docker stop
    graphdb 后切跳数触发回退标注「已回退目录数据客户端计算」、重启自愈。
    全量 54 套件 251 项全绿。
+   M55 已完成（使用度事件与别名引用，调研清单头两项落地，0024 迁移）：
+   ①使用度事件——usage_events（kind: download/copy_ref/agent_read，RLS 租户
+   隔离 + 索引），埋点全部落在真实行为处：GET /blobs/:digest 真实下载（与
+   文件名查询合并为一次 JOIN，best-effort 不阻塞下载）、详情「复制引用」
+   （navigator.clipboard 成功后才上报，IAB 剪贴板受限时如实不计）、Agent 工具
+   读取（asset.getRevision / relation.query / graph.path 两端 / graph.neighbors
+   种子资产，经 recordUsage 随工具事务提交——runner 外层 withTeam 提交语义与
+   m50 教训一致）。search 增 usage_count LATERAL（90 天窗口）与 sort=usage；
+   详情返回 usage 分项，界面「使用热度」行（近 90 天 x 次（下载 · 引用复制 ·
+   Agent 读取））+ 目录排序第三档「最常使用」。②别名引用——asset_aliases
+   （团队内唯一小写 slug ^[a-z0-9][a-z0-9._@-]{1,63}$，FK assets、RLS、索引），
+   POST/DELETE /assets/:id/aliases（创建者或管理员；冲突 409 ALIAS_TAKEN、
+   格式 422）、GET /assets/by-alias/:alias（跨团队 RLS 404）；详情 aliases
+   数组 + 内联增删 UI（chips ×）；/assets/search q 命中别名；Agent
+   resolveAssetRef 解析顺序变为 名称精确 → 别名精确 → 唯一模糊（工具描述
+   同步更新，未命中报错文案提及「名称或别名」）——下游按稳定短名消费、资产
+   升级换版不断链（MLflow models:/name@alias 思想）。
+   tests/m55 七项：别名创建/解析/冲突 409/非创建者 403/格式 422/删除后 404/
+   跨团队隔离、搜索命中别名、usage 端点 kind 白名单（download 拒绝）、真实
+   下载两次计数、sort=usage 置顶与降序一致、Agent getRevision 埋点随
+   seedInTeam 提交（真实 agent_runs 行满足外键，同 m33/m50）、graph.neighbors
+   按别名解析成功。浏览器实测：详情添加别名 prod-model 即时成 chip；复制
+   引用/下载后热度分项刷新（软件资产「下载 2」来自真实下载，模型「引用复制
+   2」）；目录「最常使用」模型置顶且 URL ?view=assets&sort=usage 可分享。
+   全量 55 套件 258 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M54 后，两批调研吸收清单合并，按性价比排序）：使用度事件
-   与排序（复制/下载/Agent 调用记事件入 PG，替代当前 relation_count 静态
-   信号——npm/HF）；别名引用机制（aliases 表 + GET /assets/by-alias/:name，
-   下游按稳定别名消费升级不断链——MLflow）；Collections 人工策展（跨类型
-   集合+条目备注+NL「把 X 加入集合 Y」——HF）；使用片段模板（按资产类型
-   渲染调用/引用 snippet——HF/Terraform）；派生血缘字段（base_asset_id +
-   base_relation，UI 查看派生资产——HF base_model）；owner/lifecycle 必填
-   引导与完整度 scorecard（Backstage）；属性自定义筛选器（OpenMetadata）；
-   分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认流）；引用导出
-   BibTeX/Markdown（Zenodo）。暂缓项：无。如继续迭代，建议再做用户走查/
-   收集真实使用反馈，或由用户直接点名需求。
+   可选后续方向（M55 后，两批调研吸收清单余项，按性价比排序）：Collections
+   人工策展（跨类型集合+条目备注+NL「把 X 加入集合 Y」——HF）；使用片段
+   模板（按资产类型渲染调用/引用 snippet——HF/Terraform）；派生血缘字段
+   （base_asset_id + base_relation，UI 查看派生资产——HF base_model）；
+   owner/lifecycle 必填引导与完整度 scorecard（Backstage）；属性自定义筛选器
+   （OpenMetadata）；分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认
+   流）；引用导出 BibTeX/Markdown（Zenodo）；别名进 ⌘K（assets:/x@prod 解析）。
+   暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
+   点名需求。
