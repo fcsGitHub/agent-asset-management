@@ -89,7 +89,10 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
 
   const [pathView, setPathView] = useState<PathView | null>(null);
   const pathNonceRef = useRef(0);
-  useEffect(() => {
+  // 聚焦邻域改走服务端（M54，老化候选项）：图库在线时 /graph/neighborhood 直出子图
+  // （引擎=graph）；离线或投影滞后时回退客户端 BFS（引擎=sql-fallback，提示如实区分）
+  const [serverNeighborhood, setServerNeighborhood] = useState<{ edgeIds: Set<string>; nodeIds: Set<string> } | null>(null);
+  const [focusEngine, setFocusEngine] = useState<"" | "graph" | "sql-fallback">("");  useEffect(() => {
     if (!initialPath || !project) return;
     if (initialPath.nonce === pathNonceRef.current) return;
     pathNonceRef.current = initialPath.nonce;
@@ -123,6 +126,42 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
       })
       .catch((e) => setPathView({ status: "error", message: e instanceof Error ? e.message : "路径查询失败" }));
   }, [initialPath, project]);
+
+  // 聚焦时拉服务端邻域（M54）：路径模式或未聚焦时清空；失败/滞后回退客户端 BFS
+  useEffect(() => {
+    if (!project || !focusId || pathView?.status === "found") {
+      setServerNeighborhood(null);
+      setFocusEngine("");
+      return;
+    }
+    let cancelled = false;
+    void api<{ found: boolean; reason?: string; nodes?: { assetId: string }[]; edges?: { relId: string }[] }>(
+      "/graph/neighborhood",
+      { query: { teamId: project.teamId, assetId: focusId, depth: String(focusHops) } }
+    )
+      .then((r) => {
+        if (cancelled) return;
+        if (r.found && r.nodes && r.edges) {
+          setServerNeighborhood({
+            nodeIds: new Set(r.nodes.map((n) => n.assetId)),
+            edgeIds: new Set(r.edges.map((e) => e.relId)),
+          });
+          setFocusEngine("graph");
+        } else {
+          setServerNeighborhood(null);
+          setFocusEngine("sql-fallback");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setServerNeighborhood(null);
+          setFocusEngine("sql-fallback");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project, focusId, focusHops, pathView?.status]);
 
   const reload = useCallback(() => {
     if (!project) return;
@@ -168,27 +207,32 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
       // 路径模式（M51）：只保留链路上的关系边——链条节点天然带度，不会消失
       kept = base.filter((e) => pathView.edgeIds.has(e.id));
     } else if (focusId && byId.has(focusId)) {
-      // 邻域集合：从聚焦资产沿边 BFS focusHops 跳
-      const adjacency = new Map<string, string[]>();
-      for (const e of base) {
-        adjacency.set(e.source_asset_id, [...(adjacency.get(e.source_asset_id) ?? []), e.target_asset_id]);
-        adjacency.set(e.target_asset_id, [...(adjacency.get(e.target_asset_id) ?? []), e.source_asset_id]);
-      }
-      const inSet = new Set<string>([focusId]);
-      let frontier = [focusId];
-      for (let hop = 0; hop < focusHops; hop++) {
-        const next: string[] = [];
-        for (const node of frontier) {
-          for (const nb of adjacency.get(node) ?? []) {
-            if (!inSet.has(nb)) {
-              inSet.add(nb);
-              next.push(nb);
+      if (serverNeighborhood) {
+        // 服务端图库邻域（M54）：图库边集交集（relId 与关系断言 id 同源）
+        kept = base.filter((e) => serverNeighborhood.edgeIds.has(e.id));
+      } else {
+        // 客户端 BFS 回退（图库离线/投影滞后）：从聚焦资产沿边 BFS focusHops 跳
+        const adjacency = new Map<string, string[]>();
+        for (const e of base) {
+          adjacency.set(e.source_asset_id, [...(adjacency.get(e.source_asset_id) ?? []), e.target_asset_id]);
+          adjacency.set(e.target_asset_id, [...(adjacency.get(e.target_asset_id) ?? []), e.source_asset_id]);
+        }
+        const inSet = new Set<string>([focusId]);
+        let frontier = [focusId];
+        for (let hop = 0; hop < focusHops; hop++) {
+          const next: string[] = [];
+          for (const node of frontier) {
+            for (const nb of adjacency.get(node) ?? []) {
+              if (!inSet.has(nb)) {
+                inSet.add(nb);
+                next.push(nb);
+              }
             }
           }
+          frontier = next;
         }
-        frontier = next;
+        kept = base.filter((e) => inSet.has(e.source_asset_id) && inSet.has(e.target_asset_id));
       }
-      kept = base.filter((e) => inSet.has(e.source_asset_id) && inSet.has(e.target_asset_id));
     } else if (minDegree > 0) {
       // 度数降噪（M53）：先算一遍度，把度 < minDegree 的节点连边剔除（聚焦资产豁免）。
       // 单轮剪枝（不迭代收敛）：剪完的孤立节点消失即可，如实提示数量。
@@ -279,7 +323,7 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
       total: totalByType.get(typeKey) ?? 0,
     }));
     return { simEdges: edgeList, simNodes: nodeList, hiddenAssets: assets.length - degree.size, typeCounts, prunedNodes: pruned, legend };
-  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops, pathView, hiddenTypes, minDegree]);
+  }, [edges, assets, typeFilter, statusFilter, focusId, focusHops, pathView, hiddenTypes, minDegree, serverNeighborhood]);
 
   nodesRef.current = simNodes;
 
@@ -547,6 +591,8 @@ export function RelationGraph({ project, onOpenAsset, initialFocusId, initialPat
           {focusId && simNodes.length > 0 && pathView?.status !== "found" && (
             <p className="hint" style={{ marginTop: 0 }}>
               聚焦模式：显示聚焦资产 {focusHops} 跳邻域（{simNodes.length} 节点 / {simEdges.length} 关系）。
+              {focusEngine === "graph" && " 邻域子图来自图数据库服务端。"}
+              {focusEngine === "sql-fallback" && " 图库不可用或投影滞后，已回退目录数据客户端计算。"}
             </p>
           )}
           {hiddenAssets > 0 && (

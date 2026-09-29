@@ -1,6 +1,6 @@
 # HANDOFF — 交接
 
-更新时间：2026-09-29（M53 调研吸收轮后）
+更新时间：2026-09-29（M54 调研吸收二轮后）
 
 ## 仓库状态
 
@@ -397,14 +397,44 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    与关系直跳与属性直链、Agent 运行文本逐段增长（5→111→548 字符采样）+ 工具卡
    展开详情与耗时 + 用量条、图谱图例显隐往返/降噪保留中心/标签开关、docker stop
    taw-graphdb 诚实降级文案与重启自愈；暗色主题视觉正常。全量 53 套件 245 项全绿。
+   M54 已完成（调研吸收二轮：使用与复用）：第二批调研 HF Hub / MLflow /
+   Dataverse/Zenodo / Backstage / Terraform Registry / npm（两份独立调研合并，
+   笔记追加于 docs/implementation/research-M53-opensource-survey.md）。落地
+   五项+清偿两项老化候选：①详情页「复制引用」——HF Use-this-model / Dataverse
+   Cite-as 思想，一键复制规范引用串（与 Agent @ 引用 formatContextRef 同格式）。
+   ②「关联最多」排序——/assets/search 增 relation_count（未撤回关系断言数，
+   LATERAL 计数）与 sort=refs（ORDER BY CASE DESC NULLS LAST + created_at
+   次序），目录新增「关联」列与排序下拉（npm ?ranking= 可保存视角思想）。
+   ③依赖链健康警示——/relations 出/入边携带端点 lifecycle；详情页 dep-alert
+   横幅「依赖链上存在非进行中资产：上游/下游「名」（已归档/已弃用）」——Atlas
+   分类传播 + Backstage orphan 横幅的读侧诚实形态：只提示不自动改状态，治理
+   动作仍由人执行。④筛选 URL 化——目录筛选（q/type/family/label/lifecycle/
+   sort）写回查询串；?view=assets 直达目录并恢复全部筛选（可收藏可分享），
+   离开目录视图清参防陈旧。⑤图谱聚焦改走服务端 /graph/neighborhood（M52 以
+   来老化两轮候选清偿）：图库在线引擎=graph（提示「邻域子图来自图数据库服务
+   端」），503/投影滞后回退客户端 BFS（提示如实区分），relId 与断言 id 同源
+   交集。⑥NL L1 新句式「X 的关联资产/相关资产/多跳资产/邻域资产」→ 图谱聚焦
+   （搜索/查找/查 前缀让位搜索意图，纯动词不命中，既有句式零回归）。
+   tests/m54 六项：句式命中与让位与回归 + refs 排序置顶与降序一致性 + 默认
+   排序回归 + 归档上游后 lifecycle 数据源。浏览器实测：分享链接
+   ?view=assets&family=document&sort=refs 刷新直达且筛选全恢复；「关联最多」
+   模型（3 条关系）置顶；模型详情上游「回归测试集」（已归档）警示横幅与复制
+   引用按钮（IAB 剪贴板权限受限无已复制反馈，真实浏览器可用）；⌘K「轨道传播
+   模型的关联资产」规则解析→执行→图谱聚焦 + 服务端引擎标注；docker stop
+   graphdb 后切跳数触发回退标注「已回退目录数据客户端计算」、重启自愈。
+   全量 54 套件 251 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M53 后，自调研吸收清单）：属性自定义筛选器（OpenMetadata
-   extension 属性可过滤聚合，需属性索引设计）；分类沿血缘传播（Atlas，关系
-   断言带传播规则如废弃波及下游）；完整模板变量自定义链接（NetBox
-   Custom Links）；URL 化筛选条件（可收藏可分享）；图谱页聚焦模式改走服务端
-   邻域端点（当前客户端 BFS，≤200 资产规模下暂无痛点）；⌘K/资产详情多跳
-   关联的 NL 句式（「X 的关联资产」）。暂缓项：无。如继续迭代，建议再做用户
-   走查/收集真实使用反馈，或由用户直接点名需求。
+   可选后续方向（M54 后，两批调研吸收清单合并，按性价比排序）：使用度事件
+   与排序（复制/下载/Agent 调用记事件入 PG，替代当前 relation_count 静态
+   信号——npm/HF）；别名引用机制（aliases 表 + GET /assets/by-alias/:name，
+   下游按稳定别名消费升级不断链——MLflow）；Collections 人工策展（跨类型
+   集合+条目备注+NL「把 X 加入集合 Y」——HF）；使用片段模板（按资产类型
+   渲染调用/引用 snippet——HF/Terraform）；派生血缘字段（base_asset_id +
+   base_relation，UI 查看派生资产——HF base_model）；owner/lifecycle 必填
+   引导与完整度 scorecard（Backstage）；属性自定义筛选器（OpenMetadata）；
+   分类沿血缘传播写侧（Atlas，废弃波及下游，需治理确认流）；引用导出
+   BibTeX/Markdown（Zenodo）。暂缓项：无。如继续迭代，建议再做用户走查/
+   收集真实使用反馈，或由用户直接点名需求。

@@ -12,7 +12,7 @@ import { AgentPane } from "../components/AgentPane";
 import { CommandBar, type NlIntentPayload } from "../components/CommandBar";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import {
-  IconActivity, IconArchive, IconBoard, IconBox, IconCheck, IconChevronRight, IconGraph, IconGrid,
+  IconActivity, IconAlert, IconArchive, IconBoard, IconBox, IconCheck, IconChevronRight, IconGraph, IconGrid,
   IconLayers, IconLock, IconMenu, IconMessage, IconMonitor, IconMoon, IconPencil, IconPlus,
   IconRefresh, IconSearch, IconSun,
 } from "../components/icons";
@@ -53,7 +53,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
 interface TypeInfo { id: string; type_key: string; version: string; title: string; parent_type_key?: string | null; parent_version?: string | null; json_schema: { required?: string[]; properties?: Record<string, { type?: string; enum?: string[]; title?: string }> } }
 interface AssetDetail {
@@ -62,7 +62,7 @@ interface AssetDetail {
   labels: string[]; categories: { category_path: string; is_primary: boolean }[];
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
-interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string }
+interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
 
 /** 字节人性化显示（制品大小）。 */
 function fmtBytes(n: number): string {
@@ -77,6 +77,27 @@ function isHttpUrl(v: string): boolean {
   return /^https?:\/\/\S+$/.test(v);
 }
 
+const LIFECYCLE_LABEL: Record<string, string> = { archived: "已归档", deprecated: "已弃用", active: "进行中" };
+
+/** 资产详情「复制引用」按钮（M54，吸收 HF Hub「Use this model」/ Dataverse 引用格式思想）：
+ * 一键复制规范引用串（与 Agent @ 引用同格式），粘贴进会话/工单即可作为上下文引用。 */
+function CopyRefBtn({ text }: { text: string }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <button
+      title="复制规范引用（与 Agent 引用同格式，可直接粘贴到会话/工单）"
+      onClick={() => {
+        void navigator.clipboard.writeText(text).then(() => {
+          setOk(true);
+          window.setTimeout(() => setOk(false), 1600);
+        }).catch(() => undefined);
+      }}
+    >
+      {ok ? "已复制引用" : "复制引用"}
+    </button>
+  );
+}
+
 export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void }) {
   const [projects, setProjects] = useState<ProjectInfo[] | null>(null);
   const [projectsError, setProjectsError] = useState("");
@@ -85,9 +106,14 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   const [sessionId, setSessionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
-  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "proposals" | "release">("overview");
+  // 可分享视图（M54）：URL ?view=assets 直达目录（与筛选参数一并恢复）；非法值回落总览
+  const initialViewParam = useMemo(() => new URLSearchParams(window.location.search).get("view"), []);
+  const initialViewValid = ["assets", "register", "semantic", "proposals", "release"].includes(initialViewParam ?? "");
+  const [wsView, setWsView] = useState<"overview" | "assets" | "register" | "semantic" | "proposals" | "release">(
+    initialViewValid ? (initialViewParam as "assets" | "register" | "semantic" | "proposals" | "release") : "overview"
+  );
   const [assetId, setAssetId] = useState("");
-  const [page, setPage] = useState<PageKey>("dashboard");
+  const [page, setPage] = useState<PageKey>(initialViewValid ? "workbench" : "dashboard");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [cmdSeed, setCmdSeed] = useState<{ query: string; nonce: number }>({ query: "", nonce: 0 });
@@ -138,6 +164,13 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
     const t = window.setTimeout(() => setFlash(null), 6000);
     return () => window.clearTimeout(t);
   }, [flash]);
+
+  // 离开可分享视图（目录）时清掉筛选参数，避免陈旧 ?view=assets 误导下次进入
+  useEffect(() => {
+    if ((page !== "workbench" || wsView !== "assets") && window.location.search) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [page, wsView]);
 
   useEffect(() => {
     void api<ProjectInfo[]>("/projects")
@@ -822,12 +855,27 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
 function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onOpen: (id: string) => void; onRegister: () => void }) {
   const [assets, setAssets] = useState<AssetRow[] | null>(null);
   const [error, setError] = useState("");
-  const [keyword, setKeyword] = useState("");
-  const [lifecycle, setLifecycle] = useState("active");
+  // 筛选条件 URL 化（M54）：初始从查询串恢复（可收藏可分享），变更写回 replaceState
+  const initialParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const [keyword, setKeyword] = useState(initialParams.get("q") ?? "");
+  const [lifecycle, setLifecycle] = useState(initialParams.get("lifecycle") === "archived" || initialParams.get("lifecycle") === "all" ? initialParams.get("lifecycle")! : "active");
   const [facets, setFacets] = useState<AssetFacets | null>(null);
-  const [type, setType] = useState("");
-  const [family, setFamily] = useState("");
-  const [label, setLabel] = useState("");
+  const [type, setType] = useState(initialParams.get("type") ?? "");
+  const [family, setFamily] = useState(initialParams.get("family") ?? "");
+  const [label, setLabel] = useState(initialParams.get("label") ?? "");
+  const [sort, setSort] = useState(initialParams.get("sort") === "refs" ? "refs" : "newest");
+
+  useEffect(() => {
+    const sp = new URLSearchParams();
+    sp.set("view", "assets");
+    if (keyword) sp.set("q", keyword);
+    if (type) sp.set("type", type);
+    if (family) sp.set("family", family);
+    if (label) sp.set("label", label);
+    if (lifecycle !== "active") sp.set("lifecycle", lifecycle);
+    if (sort !== "newest") sp.set("sort", sort);
+    window.history.replaceState(null, "", `?${sp.toString()}`);
+  }, [keyword, type, family, label, lifecycle, sort]);
 
   // 分面清单（M53）：类型/标签下拉与家族 chips 的真实数据源
   useEffect(() => {
@@ -842,11 +890,11 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     setAssets(null);
     if (!project) return;
     void api<AssetRow[]>("/assets/search", {
-      query: { teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family },
+      query: { teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort },
     })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
-  }, [project, keyword, lifecycle, type, family, label]);
+  }, [project, keyword, lifecycle, type, family, label, sort]);
 
   if (!project) return <div className="state">先选择项目。</div>;
   if (error) return <div className="state error">{error}</div>;
@@ -906,6 +954,10 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <option value="archived">已归档</option>
           <option value="all">全部</option>
         </select>
+        <select aria-label="排序方式" value={sort} onChange={(e) => setSort(e.target.value)} title="按关联数排序可快速找到被引用最多的核心资产">
+          <option value="newest">最新登记</option>
+          <option value="refs">关联最多</option>
+        </select>
       </div>
       {assets === null ? (
         <div className="state">加载中…</div>
@@ -923,6 +975,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
               <th>类型</th>
               <th>类型版本</th>
               <th>状态</th>
+              <th>关联</th>
               <th>修订摘要</th>
             </tr>
           </thead>
@@ -939,6 +992,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
                       ? <span className="badge" style={{ background: "#5a5a66", color: "#fff" }}>已弃用</span>
                       : <span className="badge" style={{ background: "#2e6b4f", color: "#fff" }}>进行中</span>}
                 </td>
+                <td title="未撤回关系断言数（被引用与引用他人合计）">{a.relation_count ?? 0}</td>
                 <td><code>{a.content_digest.slice(0, 12)}…</code></td>
               </tr>
             ))}
@@ -1005,6 +1059,11 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
   const head = detail.revisions[0];
   const archived = detail.lifecycle === "archived";
   const headArtifacts = head?.artifacts ?? [];
+  // 上游/下游健康提示（M54，Atlas「分类沿血缘传播」的读侧诚实形态）：
+  // 依赖链上有非进行中资产时警示——只提示不自动改状态，治理动作仍由人执行
+  const badUpstream = rels?.incoming.filter((r) => r.source_lifecycle && r.source_lifecycle !== "active") ?? [];
+  const badDownstream = rels?.outgoing.filter((r) => r.target_lifecycle && r.target_lifecycle !== "active") ?? [];
+  const depAlert = [...badUpstream, ...badDownstream];
   return (
     <>
       <div className="card">
@@ -1049,8 +1108,21 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               在图谱中查看
             </button>
           )}
+          <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} />
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>
+        {depAlert.length > 0 && (
+          <div className="dep-alert" role="alert" style={{ marginTop: 10 }}>
+            <IconAlert size={14} />
+            <span>
+              依赖链上存在非进行中资产：
+              {badUpstream.map((r) => `上游「${r.source_name}」（${LIFECYCLE_LABEL[r.source_lifecycle!] ?? r.source_lifecycle}）`).join("、")}
+              {badUpstream.length > 0 && badDownstream.length > 0 ? "；" : ""}
+              {badDownstream.map((r) => `下游「${r.target_name}」（${LIFECYCLE_LABEL[r.target_lifecycle!] ?? r.target_lifecycle}）`).join("、")}
+              ——本资产可能受影响，请核查（血缘传播提示；归档/弃用等治理动作仍由人执行）。
+            </span>
+          </div>
+        )}
       </div>
       {headArtifacts.length > 0 && (
         <div className="card">

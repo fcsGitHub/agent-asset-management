@@ -1012,16 +1012,18 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   // ---------- 查询 ----------
   // lifecycle 过滤：active（默认，排除归档）/ archived（仅归档）/ all
   // M53 分面：label（精确）与 typePrefix（前缀，支撑 文档/代码/测试/数据 家族快筛）
+  // M54（Amundsen 排序信号）：relation_count 被引数；sort=refs 按关联数降序（默认最新登记）
   app.get("/assets/search", async (req) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
-      teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string; typePrefix?: string;
+      teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string; typePrefix?: string; sort?: string;
     };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     const limit = Math.min(Number(query.limit ?? 50), 200);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const sort = query.sort === "refs" ? "refs" : "newest";
     const { rows } = await withTeam(teamId, async (client) =>
       client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version,
@@ -1029,13 +1031,19 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
                 EXISTS (
                   SELECT 1 FROM revision_artifacts ra
                    WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
-                ) AS has_artifacts
+                ) AS has_artifacts,
+                rc.n AS relation_count
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
            JOIN LATERAL (
              SELECT id, content_digest, created_at FROM asset_revisions
               WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
            ) r ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM relation_assertions ra
+              WHERE ra.team_id = a.team_id AND ra.status <> 'withdrawn'
+                AND (ra.source_asset_id = a.id OR ra.target_asset_id = a.id)
+           ) rc ON true
           WHERE a.team_id = $1
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
             AND ($3 = '' OR tv.type_key = $3)
@@ -1045,8 +1053,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
                    WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $6
                 ))
             AND ($7 = '' OR tv.type_key LIKE $7 || '%')
-          ORDER BY a.created_at DESC LIMIT $4`,
-        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle, query.label ?? "", query.typePrefix ?? ""]
+          ORDER BY (CASE WHEN $8 = 'refs' THEN rc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $4`,
+        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle, query.label ?? "", query.typePrefix ?? "", sort]
       )
     );
     return rows;
@@ -1298,7 +1306,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       const outgoing = await client.query(
         `SELECT ra.id, rt.type_key, ra.status, ra.source_asset_id, ra.source_revision_id,
                 ra.target_asset_id, ra.target_revision_id, ra.conditions, ra.evidence_note,
-                sa.name AS source_name, ta.name AS target_name
+                sa.name AS source_name, ta.name AS target_name,
+                sa.lifecycle AS source_lifecycle, ta.lifecycle AS target_lifecycle
            FROM relation_assertions ra
            JOIN relation_type_versions rt ON rt.team_id = ra.team_id AND rt.id = ra.relation_type_version_id
            JOIN assets sa ON sa.team_id = ra.team_id AND sa.id = ra.source_asset_id
@@ -1309,7 +1318,8 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       const incoming = await client.query(
         `SELECT ra.id, rt.type_key, ra.status, sa.name AS source_name, ta.name AS target_name,
-                ra.source_asset_id, ra.target_asset_id
+                ra.source_asset_id, ra.target_asset_id,
+                sa.lifecycle AS source_lifecycle, ta.lifecycle AS target_lifecycle
            FROM relation_assertions ra
            JOIN relation_type_versions rt ON rt.team_id = ra.team_id AND rt.id = ra.relation_type_version_id
            JOIN assets sa ON sa.team_id = ra.team_id AND sa.id = ra.source_asset_id

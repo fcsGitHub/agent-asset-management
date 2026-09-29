@@ -965,6 +965,16 @@ kbd {
 }
 .link-btn:hover { color: var(--accent); }
 
+/* 上游依赖健康警示（M54）：血缘链上有归档/弃用资产时的读侧提示 */
+.dep-alert {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 8px 12px; border-radius: var(--r-md, 8px); font-size: 13.5px;
+  background: color-mix(in srgb, #b0703c 12%, transparent);
+  border: 1px solid color-mix(in srgb, #b0703c 45%, transparent);
+  color: var(--ink);
+}
+.dep-alert svg { flex: none; margin-top: 3px; color: #b0703c; }
+
 /* ---------- flash 操作反馈 ---------- */
 .flash {
   position: fixed; right: 18px; bottom: 18px; z-index: 60;

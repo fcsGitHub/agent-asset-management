@@ -77,6 +77,18 @@ export function ruleParse(text: string): NlIntent | null {
   if (focus && focus[1]!.trim()) {
     return { intent: "navigate", params: { page: "graph", assetName: focus[1]!.trim().slice(0, 120) } };
   }
+  // 关联资产（M54）：「X 的关联资产」「查看 X 的相关资产」——同样落图谱聚焦该资产，
+  // 邻域视图即回答「X 关联了什么」；名字侧为空（纯「关联资产」）、仅动词或搜索/查找
+  // 前缀（让位给搜索意图，避免吞词）不命中
+  const related =
+    t.match(/^(?:查看|看看|显示|打开|找)?\s*[“「]?([^”」]{1,60}?)」?”?\s*(?:资产)?的(?:关联|相关|多跳|邻域)资产$/);
+  if (
+    related && related[1]!.trim() &&
+    !/^(?:查看|看看|显示|打开|找)$/.test(related[1]!.trim()) &&
+    !/^(?:搜索|查找|查|找一下|搜)/.test(related[1]!.trim())
+  ) {
+    return { intent: "navigate", params: { page: "graph", assetName: related[1]!.trim().slice(0, 120) } };
+  }
   // 动态过滤（M26）：「看归档记录」「查看导出审计记录」「Agent 运行记录」等 →
   // activity + action 过滤（白名单枚举，越表词不命中、落入后续解析）
   const ACTION_WORDS: Record<string, (typeof ACTIVITY_ACTIONS)[number]> = {

@@ -50,3 +50,35 @@
 - Amundsen: https://github.com/amundsen-io/amundsen
 - CKAN: https://docs.ckan.org
 - OpenCTI: https://docs.opencti.io/latest/usage/data-model
+
+---
+
+# M54 追加调研：资产「使用与复用」专题（第二批）
+
+> 2026-09-29 · 侧重资产使用/复用/血缘治理的第二轮调研（两份独立调研合并）。
+
+## 一、调研对象与关键启发
+
+| 项目 | 关键设计点 | 对本系统的启发 |
+| --- | --- | --- |
+| Hugging Face Hub | 「Use this model」按库动态生成可复制片段；YAML front matter 元数据驱动过滤；Collections 人工策展（拖拽排序/条目备注/编辑历史）；base_model + base_model_relation 轻量派生血缘 | 引用一键复制 ✅（M54）；按类型模板化 snippet、Collections 策展、派生血缘字段为候选 |
+| MLflow Model Registry | stage 弃用改自由 alias（`models:/name@prod` 可变命名引用不断链）；SQL 式 filter/order_by 搜索语法 | 别名引用表 + `GET /assets/by-alias/:name` 为候选；filter DSL 可作 ⌘K 编译目标 |
+| Dataverse / Zenodo | 发布即 DOI；「Cite as…」排版引用一键复制；concept DOI（永远最新）+ version DOI（钉快照）双标识 | 双标识（稳定 slug + 版本 id）与 BibTeX/Markdown 引用导出为候选 |
+| Backstage | Component 必填 owner/lifecycle/type 缺失拒入库；孤儿注解 orphan 横幅；TechDocs docs-like-code；dependsOn 关系自动展开 | 上游依赖健康警示 ✅（M54，Atlas+Backstage orphan 思路）；owner/lifecycle 必填引导、完整度 scorecard 为候选 |
+| Terraform Registry | 「Provision Instructions」可复制 module 块 + 版本选择器联动 snippet | snippet 模板按版本联动为候选 |
+| npm | quality/popularity/maintenance 三因子排序，`?ranking=` 可保存的排序视角；下载量一等公民 | 关联数排序 ✅（M54）；使用度事件（复制/下载/Agent 调用）计数为候选 |
+
+## 二、M54 已吸收（与调研互证）
+
+- **引用一键复制**（HF「Use this model」/ Dataverse「Cite as」）：详情页「复制引用」输出规范引用串（与 Agent @ 引用同格式）。
+- **使用度排序**（npm/HF/Amundsen）：`/assets/search` 带 `relation_count`（未撤回关系断言数），`sort=refs` 按被引用降序；目录「关联」列 + 「关联最多」排序。
+- **血缘失效横幅**（Backstage orphan + Atlas 传播，读侧诚实形态）：`/relations` 携带端点 lifecycle，详情页警示「依赖链上存在非进行中资产」——只提示不自动改状态。
+- **可分享的排序/筛选视角**（npm `?ranking=`）：目录筛选 URL 化，`?view=assets&family=document&sort=refs` 直达。
+
+## 三、来源
+
+- HF: https://huggingface.co/docs/hub/model-cards ；https://huggingface.co/docs/hub/collections
+- MLflow: https://mlflow.org/docs/latest/model-registry.html ；https://mlflow.org/docs/latest/python_api/mlflow.client.html
+- Dataverse: https://guides.dataverse.org/en/latest/api/native-api.html ；Zenodo 双 DOI: https://book.the-turing-way.org/communication/citable/citable-versioning
+- Backstage: https://backstage.io/docs/features/software-catalog/descriptor-format ；https://backstage.io/docs/features/software-catalog/life-of-an-entity/
+- Terraform Registry: https://registry.terraform.io ；npm: https://docs.npmjs.com/searching-for-and-choosing-packages-to-download-or-import-into-your-project
