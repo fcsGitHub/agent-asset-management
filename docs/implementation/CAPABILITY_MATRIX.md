@@ -23,6 +23,7 @@
 | Schema 驱动登记表单（M62，rjsf/JSON Forms 思想） | 类型链→字段规格（字段=链并集、required=并集、约束=各环交集、词表下拉、继承标注）；表单值类型化换算；本地预检拦截，服务端 ajv 仍权威 | @taw/domain/schema-form, apps/web/src/pages/Workbench.tsx（AssetRegister） |
 | Schema 表单贯穿草稿编辑 + 门禁提示前移（M64） | 登记与修改共用同一套 SchemaForm（链重建/部件/预检）；草稿双模式（表单预填+额外属性区 / JSON）互转保真，预检按补丁语义合并视图查；需测试证据类型在登记/草稿即提示 | apps/web/src/components/SchemaForm.tsx, Workbench.tsx（DraftPanel）, @taw/domain/schema-form（propertiesToFormValues/chainRequiresTestEvidence） |
 | 元数据完整度 scorecard（M65，Backstage TechInsights 思想） | 六项加权检查（链必填/负责人/关联/制品/别名/标签）→ 0-100 分 + 可执行提示；读侧引导不阻断；required 与登记表单同一链合并语义 | @taw/domain/completeness, routes/catalog.ts（详情附 completeness）, Workbench.tsx（CompletenessCard） |
+| 批量候选（M66）：制品继承 / tagmanifest / 完整度汇总 / 引用导出 | 草稿 artifacts 缺省=沿用 head、显式=替换（RFC 7386 口径）；bundle 附 tagmanifest-sha256.txt（描述符篡改包内可证，旧包兼容）；search 行级 completenessScore + 低分优先排序；BibTeX/Markdown 引用导出端点与按钮 | routes/branches.ts, bundles.ts, @taw/domain/{bundle-verify,cite}, catalog.ts（search/cite）, Workbench.tsx |
 | 不可变修订 + 分支 + 差异 | DB 权限拒绝覆盖；branch_entries base→head；文本/属性/关系/二进制 diff | migrations/0002/0007, routes/branches.ts, packages/domain/src/diff.ts |
 | 关系 + 候选分离 | relation_assertions（confirmed）与语义候选（candidate/proposed）分离 | routes/catalog.ts, routes/semantic.ts, services/semantic-worker |
 | Issue/CR/审核发布/回退/绑定 | 审核快照 candidate/review digest；固定顺序锁；单事务发布；幂等键 | routes/releases.ts, migrations/0005/0006 |

@@ -66,7 +66,8 @@ export { stableStringify };
 // 类型链装载与属性校验（M59 抽共享关卡）：登记/分支保存/dry-run 共用同一实现
 import { loadTypeChain, validateAgainstChain, type TypeDefRow } from "../ontology.js";
 import { schemaToFormSpec } from "@taw/domain/schema-form";
-import { computeCompleteness } from "@taw/domain/completeness";
+import { computeCompleteness, OWNER_KEYS } from "@taw/domain/completeness";
+import { buildCitation } from "@taw/domain/cite";
 export type { TypeDefRow };
 
 /** 子定义必须收窄链上每个祖先定义；返回首个违规描述（无违规返回 null）。 */
@@ -1130,23 +1131,32 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     await teamRole(auth.userId, teamId);
     const limit = Math.min(Number(query.limit ?? 50), 200);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
-    const sort = query.sort === "refs" || query.sort === "usage" ? query.sort : "newest";
-    const { rows } = await withTeam(teamId, async (client) =>
-      client.query(
-        `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version,
-                r.id AS head_revision_id, r.content_digest, r.created_at,
+    const sort =
+      query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
+    const { rows } = await withTeam(teamId, async (client) => {
+      const result = await client.query(
+        `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
+                r.id AS head_revision_id, r.content_digest, r.created_at, r.properties,
                 EXISTS (
                   SELECT 1 FROM revision_artifacts ra
                    WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
                 ) AS has_artifacts,
+                arc.n AS artifact_count,
                 rc.n AS relation_count,
-                uc.n AS usage_count
+                uc.n AS usage_count,
+                alc.n AS alias_count,
+                lc.n AS label_count,
+                cc.n AS category_count
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
            JOIN LATERAL (
-             SELECT id, content_digest, created_at FROM asset_revisions
+             SELECT id, content_digest, created_at, properties FROM asset_revisions
               WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
            ) r ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM revision_artifacts ra
+              WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
+           ) arc ON true
            JOIN LATERAL (
              SELECT count(*)::int AS n FROM relation_assertions ra
               WHERE ra.team_id = a.team_id AND ra.status <> 'withdrawn'
@@ -1157,23 +1167,71 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
               WHERE ue.team_id = a.team_id AND ue.asset_id = a.id
                 AND ue.created_at > now() - interval '90 days'
            ) uc ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM asset_aliases al
+              WHERE al.team_id = a.team_id AND al.asset_id = a.id
+           ) alc ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM asset_labels l
+              WHERE l.team_id = a.team_id AND l.asset_id = a.id
+           ) lc ON true
+           JOIN LATERAL (
+             SELECT count(*)::int AS n FROM asset_categories c
+              WHERE c.team_id = a.team_id AND c.asset_id = a.id
+           ) cc ON true
           WHERE a.team_id = $1
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%' OR EXISTS (
                   SELECT 1 FROM asset_aliases al
                    WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
                 ))
             AND ($3 = '' OR tv.type_key = $3)
-            AND ($5 = 'all' OR a.lifecycle = CASE WHEN $5 = 'archived' THEN 'archived' ELSE 'active' END)
-            AND ($6 = '' OR EXISTS (
+            AND ($4 = 'all' OR a.lifecycle = CASE WHEN $4 = 'archived' THEN 'archived' ELSE 'active' END)
+            AND ($5 = '' OR EXISTS (
                   SELECT 1 FROM asset_labels l
-                   WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $6
+                   WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $5
                 ))
-            AND ($7 = '' OR tv.type_key LIKE $7 || '%')
-          ORDER BY (CASE WHEN $8 = 'refs' THEN rc.n WHEN $8 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $4`,
-        [teamId, query.q ?? "", query.type ?? "", limit, lifecycle, query.label ?? "", query.typePrefix ?? "", sort]
-      )
-    );
-    return rows;
+            AND ($6 = '' OR tv.type_key LIKE $6 || '%')
+          ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
+        // sort=completeness 时先取满候选集（≤200），分数算完在 JS 内升序再截断
+        [teamId, query.q ?? "", query.type ?? "", lifecycle, query.label ?? "", query.typePrefix ?? "", sort, sort === "completeness" ? 200 : limit]
+      );
+      return result;
+    });
+    // 行级完整度分数（M66③，与详情卡同一条 computeCompleteness 定义）：
+    // required 按类型链缓存（团队类型数有限）；计算后剥离 properties 不下发。
+    const requiredCache = new Map<string, string[]>();
+    const scored = await withTeam(teamId, async (client) => {
+      const out: Record<string, unknown>[] = [];
+      for (const row of rows as Record<string, unknown>[]) {
+        const tvId = String(row.type_version_id ?? "");
+        let requiredFields = requiredCache.get(tvId);
+        if (requiredFields === undefined) {
+          const chain = await loadTypeChain(client, teamId, tvId);
+          requiredFields = schemaToFormSpec(
+            chain.map((d) => ({ typeKey: d.type_key, version: d.version, jsonSchema: d.json_schema, unitVocabularies: d.unit_vocabularies }))
+          ).fields.filter((f) => f.required).map((f) => f.key);
+          requiredCache.set(tvId, requiredFields);
+        }
+        const completenessScore = computeCompleteness({
+          requiredFields,
+          properties: (row.properties ?? {}) as Record<string, unknown>,
+          artifactsCount: Number(row.artifact_count ?? 0),
+          relationsCount: Number(row.relation_count ?? 0),
+          aliasesCount: Number(row.alias_count ?? 0),
+          labelsCount: Number(row.label_count ?? 0),
+          categoriesCount: Number(row.category_count ?? 0),
+        }).score;
+        delete row.properties;
+        delete row.type_version_id;
+        out.push({ ...row, completenessScore });
+      }
+      return out;
+    });
+    if (sort === "completeness") {
+      scored.sort((a, b) => Number(a.completenessScore) - Number(b.completenessScore) || String(a.name).localeCompare(String(b.name)));
+      return scored.slice(0, limit);
+    }
+    return scored;
   });
 
   // 分面清单（M53，吸收 CKAN facet 思路）：目录筛选下拉的数据源——
@@ -1246,6 +1304,51 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     if (!rows[0]) throw ERR.NOT_FOUND();
     if (rows[0].created_by !== userId && role !== "admin") throw ERR.FORBIDDEN();
   }
+
+  // 引用导出（M66④，Zenodo「Cite」/ GitHub「Cite this repository」锚点）：
+  // BibTeX/Markdown 标准格式供 LaTeX 与文献管理器；owner 取惯例键（与完整度
+  // 检查同一 OWNER_KEYS 口径）；只读端点，复制计热度由 UI 上报 copy_ref。
+  app.get("/assets/:assetId/cite", async (req, reply) => {
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const query = (req.query ?? {}) as { teamId?: string; format?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    const format = query.format === "markdown" ? "markdown" : "bibtex";
+    await teamRole(auth.userId, teamId);
+    const { rows } = await withTeam(teamId, async (client) =>
+      client.query<{
+        name: string; type_key: string; type_version: string;
+        properties: Record<string, unknown>; created_at: Date; aliases: string[] | null;
+      }>(
+        `SELECT a.name, tv.type_key, tv.version AS type_version, r.properties, a.created_at,
+                ARRAY(SELECT al.alias FROM asset_aliases al WHERE al.team_id = a.team_id AND al.asset_id = a.id ORDER BY al.alias) AS aliases
+           FROM assets a
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+           JOIN LATERAL (
+             SELECT properties FROM asset_revisions
+              WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
+           ) r ON true
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [teamId, assetId]
+      )
+    );
+    const row = rows[0];
+    if (!row) throw ERR.NOT_FOUND();
+    const owner = OWNER_KEYS.map((k) => row.properties?.[k]).find(
+      (v): v is string => typeof v === "string" && v.trim() !== ""
+    );
+    const cite = buildCitation(
+      {
+        assetId, name: row.name, typeKey: row.type_key, typeVersion: row.type_version,
+        owner, aliases: row.aliases ?? [],
+        year: new Date(row.created_at).getFullYear(),
+      },
+      format
+    );
+    return reply.header("content-type", cite.contentType).send(cite.text);
+  });
 
   app.post("/assets/:assetId/aliases", async (req, reply) => {
     checkCsrf(req);
@@ -1386,7 +1489,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       const { rows: arts } = await client.query<{
         revision_id: string; blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number;
       }>(
-        `SELECT ra.revision_id, ra.blob_digest, ra.artifact_role, ra.original_name, ra.media_type, ra.size
+        `SELECT ra.revision_id, ra.blob_digest, ra.artifact_role, ra.original_name, ra.media_type, ra.size::int AS size
            FROM revision_artifacts ra
            JOIN asset_revisions r ON r.team_id = ra.team_id AND r.id = ra.revision_id
           WHERE ra.team_id = $1 AND r.asset_id = $2`,
@@ -1434,7 +1537,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       const requiredFields = schemaToFormSpec(
         chain.map((d) => ({ typeKey: d.type_key, version: d.version, jsonSchema: d.json_schema, unitVocabularies: d.unit_vocabularies }))
       ).fields.filter((f) => f.required).map((f) => f.key);
-      const head = revisions[0] as { properties?: Record<string, unknown>; artifacts?: unknown[] } | undefined;
+      const head = revisionsWithArts[0] as { properties?: Record<string, unknown>; artifacts?: unknown[] } | undefined;
       const completeness = computeCompleteness({
         requiredFields,
         properties: head?.properties ?? {},
@@ -1474,7 +1577,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       const rev = rows[0];
       if (!rev) throw ERR.NOT_FOUND();
       const { rows: arts } = await client.query(
-        `SELECT blob_digest, artifact_role, original_name, media_type, size FROM revision_artifacts
+        `SELECT blob_digest, artifact_role, original_name, media_type, size::int AS size FROM revision_artifacts
           WHERE team_id = $1 AND revision_id = $2`,
         [teamId, revisionId]
       );

@@ -251,11 +251,12 @@ function printVerify(report: BundleVerifyReport, asJson: boolean): number {
     console.log(JSON.stringify(report, null, 2));
   } else {
     const m = report.manifest;
-    console.log(`TAW bundle 校验：${report.ok ? "✓ 通过" : "✗ 未通过"}（complete=${report.complete} valid=${report.valid}）`);
+    console.log(`TAW bundle 校验：${report.ok ? "✓ 通过" : "✗ 未通过"}（complete=${report.complete} valid=${report.valid} tagmanifest=${report.tagManifest ? "有" : "无"}）`);
     if (m) {
       console.log(`  来源：${m.source.kind}:${m.source.name} @ ${String(m.generatedAt)}；资产 ${m.assetCount}，关系 ${m.relationCount}`);
       if (Array.isArray(m.warnings) && m.warnings.length > 0) console.log(`  打包警告：${m.warnings.join("；")}`);
     }
+    for (const n of report.notes) console.log(`  · ${n}`);
     for (const f of report.files) {
       console.log(`  ${f.ok ? "✓" : "✗"} ${f.path}（${f.size} B，sha256 ${f.actual.slice(0, 16)}…）`);
     }

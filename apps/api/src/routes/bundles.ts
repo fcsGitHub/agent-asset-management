@@ -3,6 +3,7 @@
 // 调研吸收：HF snapshot_download（批量=解析后整体取走，自托管下沉到服务端单请求）
 // + BagIt（逐文件 sha256 清单）+ Frictionless Data Package（单一自描述描述符）。
 import type { FastifyInstance } from "fastify";
+import { createHash } from "node:crypto";
 import { q, withTeam } from "../db.js";
 import type { PoolClient } from "pg";
 import { ERR } from "../errors.js";
@@ -128,10 +129,25 @@ export async function bundleRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     const cache = new Map<string, Uint8Array>();
+    const manifestData = Buffer.from(JSON.stringify(plan.manifest, null, 2), "utf8");
+    const checksumData = Buffer.from(plan.checksumLines, "utf8");
     const entries: import("@taw/domain/bundle").ZipEntry[] = [
-      { path: "manifest.json", data: Buffer.from(JSON.stringify(plan.manifest, null, 2), "utf8") },
-      { path: "manifest-sha256.txt", data: Buffer.from(plan.checksumLines, "utf8") },
+      { path: "manifest.json", data: manifestData },
+      { path: "manifest-sha256.txt", data: checksumData },
     ];
+    // tag manifest（M66②，BagIt RFC 8493 tag 文件校验清单）：manifest 类文件自身的
+    // 摘要——描述符被替换从此包内可证（M63 记录的边界闭合）。
+    const sha = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
+    entries.push({
+      path: "tagmanifest-sha256.txt",
+      data: Buffer.from(
+        [
+          `${sha(manifestData)}  manifest.json`,
+          `${sha(checksumData)}  manifest-sha256.txt`,
+        ].sort().join("\n") + "\n",
+        "utf8"
+      ),
+    });
     for (const f of plan.files) {
       let buf = cache.get(f.digest);
       if (!buf) {

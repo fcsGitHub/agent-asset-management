@@ -88,8 +88,11 @@ export interface BundleVerifyReport {
   complete: boolean;
   /** 校验和全部匹配 */
   valid: boolean;
+  /** 是否含 tagmanifest-sha256.txt（M66②；旧包无 → manifest.json 完整性包内不可证） */
+  tagManifest: boolean;
   files: VerifyFileCheck[];
   errors: string[];
+  notes: string[];
   manifest: {
     tawBundle: number;
     generatedAt: unknown;
@@ -124,6 +127,7 @@ interface ManifestShape {
 
 const MANIFEST = "manifest.json";
 const CHECKSUM = "manifest-sha256.txt";
+const TAG_MANIFEST = "tagmanifest-sha256.txt";
 const SHA_LINE = /^([0-9a-f]{64})  (.+)$/;
 
 /**
@@ -132,14 +136,16 @@ const SHA_LINE = /^([0-9a-f]{64})  (.+)$/;
  */
 export function verifyBundle(buf: Buffer): BundleVerifyReport {
   const errors: string[] = [];
+  const notes: string[] = [];
   const files: VerifyFileCheck[] = [];
   let entries: ZipReadEntry[];
   try {
     entries = readStoreZip(buf);
   } catch (err) {
     return {
-      ok: false, complete: false, valid: false, files,
+      ok: false, complete: false, valid: false, tagManifest: false, files,
       errors: [`包无法读取：${err instanceof Error ? err.message : String(err)}`],
+      notes: [],
       manifest: null,
     };
   }
@@ -152,6 +158,29 @@ export function verifyBundle(buf: Buffer): BundleVerifyReport {
   const checksumEntry = byPath.get(CHECKSUM);
   if (!manifestEntry) errors.push(`缺少 ${MANIFEST}`);
   if (!checksumEntry) errors.push(`缺少 ${CHECKSUM}`);
+
+  // tag manifest（M66②，BagIt RFC 8493）：manifest 类文件自身的摘要清单。
+  // 存在才校验（旧包兼容）；缺省如实注记——manifest.json 完整性不在包内可证。
+  const tagEntry = byPath.get(TAG_MANIFEST);
+  if (tagEntry) {
+    for (const line of tagEntry.data.toString("utf8").split(/\r?\n/)) {
+      if (line === "") continue;
+      const m = SHA_LINE.exec(line);
+      if (!m) {
+        errors.push(`tagmanifest 坏行（应为「<64位sha256>␣␣<路径>」）：${line.slice(0, 120)}`);
+        continue;
+      }
+      const file = byPath.get(m[2]!);
+      if (!file) {
+        errors.push(`tagmanifest 列出但包中缺失：${m[2]}`);
+        continue;
+      }
+      const actual = createHash("sha256").update(file.data).digest("hex");
+      if (actual !== m[1]) errors.push(`tagmanifest 校验和不符：${m[2]}（期望 ${m[1]}，实际 ${actual}）`);
+    }
+  } else {
+    notes.push(`无 ${TAG_MANIFEST}（旧格式包）：manifest.json 自身完整性不在包内可证`);
+  }
 
   // 清单解析（坏行如实报，不静默跳过）
   const expected = new Map<string, string>();
@@ -167,8 +196,10 @@ export function verifyBundle(buf: Buffer): BundleVerifyReport {
     }
   }
 
-  // complete：payload 双射（manifest 两个自描述文件之外的都是 payload）
-  const payloadPaths = new Set(entries.map((e) => e.path).filter((p) => p !== MANIFEST && p !== CHECKSUM));
+  // complete：payload 双射（manifest 类自描述文件之外的都是 payload）
+  const payloadPaths = new Set(
+    entries.map((e) => e.path).filter((p) => p !== MANIFEST && p !== CHECKSUM && p !== TAG_MANIFEST)
+  );
   const listedButMissing = [...expected.keys()].filter((p) => !payloadPaths.has(p));
   for (const p of listedButMissing) errors.push(`清单列出但包中缺失：${p}`);
   for (const p of payloadPaths) {
@@ -237,6 +268,8 @@ export function verifyBundle(buf: Buffer): BundleVerifyReport {
   }
 
   const complete = errors.every((e) => !e.startsWith("清单列出但包中缺失") && !e.startsWith("包中存在但清单未列出") && !e.startsWith("缺少 "));
-  const valid = errors.every((e) => !e.startsWith("校验和不符") && !e.startsWith("checksum 清单坏行") && !e.includes("CRC32"));
-  return { ok: errors.length === 0, complete, valid, files, errors, manifest };
+  const valid = errors.every(
+    (e) => !e.startsWith("校验和不符") && !e.startsWith("checksum 清单坏行") && !e.includes("CRC32") && !e.startsWith("tagmanifest ")
+  );
+  return { ok: errors.length === 0, complete, valid, tagManifest: tagEntry !== undefined, files, errors, notes, manifest };
 }

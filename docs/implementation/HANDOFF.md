@@ -740,16 +740,43 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    草稿保存未附文件时新修订制品为空（修订快照语义，制品按修订携带）——发布该
    修订会丢制品；继承还是替换需治理确认（替换语义下「移除制品」才可能）。
    截图：m65-ui-scorecard。全量 65 套件 320 项全绿。
+   M66 已完成（批量候选轮，用户点名一次多候选：四项一次交付；调研笔记
+   research-M66-batch-candidates.md）。①**制品继承语义**（M65 发现的丢制品脚枪，
+   RFC 7386 merge-patch 口径）：branches 保存端点 artifacts 改 optional——缺省=
+   复制 head 制品行（只改属性的草稿不再丢制品；属性不变时 contentDigest 与 head
+   一致，幂等）；显式提供数组（含空数组）=整体替换（保留换文件/显式清空能力）；
+   DraftPanel 未选文件时省略 artifacts 字段。顺带修三处 revision_artifacts.size
+   bigint 字符串（M63 同款 bug 的余下位置：详情/修订端点/继承查询，SQL 补
+   size::int）。②**bundle tagmanifest**（BagIt RFC 8493 tag 文件清单，补 M63 记录
+   边界）：打包侧新增第三条目 tagmanifest-sha256.txt（manifest.json 与
+   manifest-sha256.txt 两行摘要）；校验侧存在才核对（旧包兼容：缺省如实注记
+   「manifest.json 完整性不在包内可证」）——manifest.json 元数据被改（checksum
+   与制品交叉核对都发现不了的路径）由 tagmanifest 抓获，M63 边界闭合；CLI
+   verify 输出补 tagmanifest 状态与注记。③**完整度目录汇总**：GET /assets/search
+   行级附 completenessScore（与详情卡同一条 computeCompleteness 定义；required
+   按类型链缓存；properties 计算后剥离不下发）；sort=completeness 升序低分优先
+   （SQL 无法按 JS 分数排序——候选集 ≤200 内计算后 JS 排序截断，界面如实注记）；
+   web 目录「完整度」列按档着色 + 排序选项。**顺带修 M65 遗留 bug**：详情端点
+   completeness 误用未挂制品的原始 revisions[0]（应 revisionsWithArts[0]）——
+   制品检查在详情侧恒 false（search 侧正确），M66 测试一致性断言暴露。④**引用
+   导出**（Zenodo Cite/GitHub Cite this repository 锚点）：@taw/domain/cite
+   buildCitation 纯函数（BibTeX @misc：key=taw_\<id前8位>、owner 缺失占位+note
+   如实标注、花括号转义；Markdown 粗体行）；GET /assets/:id/cite?format=
+   bibtex|markdown → 纯文本；详情页「BibTeX」按钮复制并计 copy_ref 热度。
+   tests/m66 四项（①缺省继承/显式替换/显式清空/摘要幂等；②产物含 tagmanifest
+   通过/manifest 元数据篡改由 tagmanifest 且仅由 tagmanifest 抓获/旧包兼容注记；
+   ③search 与详情同分+低分优先；④BibTeX 字段齐全+owner 占位+Markdown+跨团队
+   404+纯函数转义）。浏览器实测：目录完整度列+低分优先排序生效；详情 BibTeX
+   按钮请求 200 且响应体字段齐全（无头浏览器剪贴板权限拒绝致按钮态不翻转——
+   环境限制，与既有复制按钮同口径，网络证据坐实端点与接线）。截图：
+   m66-ui-catalog-completeness、m66-ui-bibtex-detail。全量 66 套件 324 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M65 后，按性价比排序）：草稿修订制品继承语义治理（M65 发现：
-   未附文件保存 → head 制品清空，发布即丢——继承-if-absent vs 显式替换需决策）；
-   bundle tagmanifest（manifest.json 自身入校验清单，补 M63 边界）；完整度目录
-   汇总（列表分数列/低分资产筛选，需后台聚合或排序端点）；调研吸收清单余项：
-   派生血缘字段（HF base_model）、属性自定义筛选器（OpenMetadata）、分类沿血缘
-   传播写侧（Atlas，需治理确认流）、引用导出 BibTeX/Markdown（Zenodo）、别名进
-   ⌘K、集合只读分享快照、Agent 对话区可折叠。AI 草稿质量反馈环仍需先攒真实
-   使用样本。暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由
-   用户直接点名需求。
+   可选后续方向（M66 后，按性价比排序）：调研吸收清单余项：派生血缘字段（HF
+   base_model）、属性自定义筛选器（OpenMetadata）、分类沿血缘传播写侧（Atlas，
+   需治理确认流）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠；完整度
+   汇总页（团队级水位/低分资产清单）。AI 草稿质量反馈环仍需先攒真实使用样本。
+   暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
+   点名需求。

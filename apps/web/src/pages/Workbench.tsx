@@ -58,7 +58,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
 interface TypeInfo {
   id: string; type_key: string; version: string; title: string;
@@ -104,7 +104,7 @@ function CopyRefBtn({ text, teamId, assetId }: { text: string; teamId: string; a
   const [ok, setOk] = useState(false);
   return (
     <button
-      title="复制规范引用（与 Agent 引用同格式，可直接粘贴到会话/工单）；复制会计入使用热度"
+      title="复制规范引用（与 Agent @ 引用同格式，可直接粘贴到会话/工单）；复制会计入使用热度"
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setOk(true);
@@ -114,6 +114,31 @@ function CopyRefBtn({ text, teamId, assetId }: { text: string; teamId: string; a
       }}
     >
       {ok ? "已复制引用" : "复制引用"}
+    </button>
+  );
+}
+
+/** 详情页「BibTeX」按钮（M66④，Zenodo「Cite」/GitHub「Cite this repository」锚点）：
+ * 服务端生成标准 @misc 条目，复制进 LaTeX/文献管理器；导出计 copy_ref 使用热度。 */
+function BibTeXBtn({ teamId, assetId }: { teamId: string; assetId: string }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <button
+      title="复制 BibTeX 引用（@misc，可直接进 LaTeX/文献管理器）；导出计入使用热度"
+      onClick={() => {
+        // 端点返回纯文本（application/x-bibtex），不走 JSON 助手
+        void fetch(`/api/v1/assets/${assetId}/cite?teamId=${encodeURIComponent(teamId)}&format=bibtex`, { credentials: "same-origin" })
+          .then((res) => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
+          .then((text) => navigator.clipboard.writeText(text))
+          .then(() => {
+            setOk(true);
+            window.setTimeout(() => setOk(false), 1600);
+            void api(`/assets/${assetId}/usage`, { method: "POST", body: { teamId, kind: "copy_ref" } }).catch(() => undefined);
+          })
+          .catch(() => undefined);
+      }}
+    >
+      {ok ? "已复制 BibTeX" : "BibTeX"}
     </button>
   );
 }
@@ -1409,10 +1434,11 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <option value="archived">已归档</option>
           <option value="all">全部</option>
         </select>
-        <select aria-label="排序方式" value={sort} onChange={(e) => setSort(e.target.value)} title="按关联数排序找核心资产，按使用热度找高频资产">
+        <select aria-label="排序方式" value={sort} onChange={(e) => setSort(e.target.value)} title="按关联数排序找核心资产，按使用热度找高频资产；完整度升序把最该补元数据的排前面（候选集 ≤200 内计算）">
           <option value="newest">最新登记</option>
           <option value="refs">关联最多</option>
           <option value="usage">最常使用</option>
+          <option value="completeness">完整度（低分优先）</option>
         </select>
       </div>
       {assets === null ? (
@@ -1432,6 +1458,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
               <th>类型版本</th>
               <th>状态</th>
               <th>关联</th>
+              <th title="元数据完整度（M65 六项加权：必填/负责人/关联/制品/别名/标签）">完整度</th>
               <th>修订摘要</th>
             </tr>
           </thead>
@@ -1449,6 +1476,14 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
                       : <span className="badge" style={{ background: "#2e6b4f", color: "#fff" }}>进行中</span>}
                 </td>
                 <td title="未撤回关系断言数（被引用与引用他人合计）">{a.relation_count ?? 0}</td>
+                <td>
+                  <span
+                    title="元数据完整度（点开详情看逐项检查与补全建议）"
+                    style={{ fontWeight: 700, color: (a.completenessScore ?? 100) >= 80 ? "#3e7d4e" : (a.completenessScore ?? 100) >= 50 ? "#8a6d3b" : "#a44646" }}
+                  >
+                    {a.completenessScore ?? "—"}
+                  </span>
+                </td>
                 <td><code>{a.content_digest.slice(0, 12)}…</code></td>
               </tr>
             ))}
@@ -1662,6 +1697,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
             </button>
           )}
           <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} teamId={teamId} assetId={detail.id} />
+          <BibTeXBtn teamId={teamId} assetId={detail.id} />
           {aliasMsg && <span className="error-text" style={{ alignSelf: "center" }}>{aliasMsg}</span>}
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>
@@ -1962,8 +1998,12 @@ function DraftPanel({
         const up = await uploadFile(teamId, file);
         artifacts = [{ digest: up.digest, role: "implementation", originalName: up.originalName, mediaType: up.mediaType || "application/octet-stream", size: up.size }];
       }
+      // 制品字段缺省=沿用 head（M66①）：未选文件时省略 artifacts，服务端继承 head
+      // 制品行；只在有新文件时显式提供（替换语义）。
+      const bodyPayload: Record<string, unknown> = { teamId, assetId: asset.id, properties };
+      if (artifacts.length > 0) bodyPayload.artifacts = artifacts;
       const res = await api<{ revisionId: string; seq: number; contentDigest: string }>(`/branches/${branchId}/revisions`, {
-        method: "POST", body: { teamId, assetId: asset.id, properties, artifacts },
+        method: "POST", body: bodyPayload,
       });
       // 与修订历史「内容摘要」同口径展示 contentDigest，而非每次都变的修订 UUID
       setMsg(`草稿已保存：r${res.seq}（摘要 ${res.contentDigest.slice(0, 8)}…）。可用该分支创建 CR。`);

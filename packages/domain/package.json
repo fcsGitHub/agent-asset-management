@@ -14,7 +14,8 @@
     "./schema-builder": "./src/schema-builder.ts",
     "./schema-form": "./src/schema-form.ts",
     "./bundle-verify": "./src/bundle-verify.ts",
-    "./completeness": "./src/completeness.ts"
+    "./completeness": "./src/completeness.ts",
+    "./cite": "./src/cite.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

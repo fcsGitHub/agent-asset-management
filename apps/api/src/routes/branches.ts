@@ -77,6 +77,8 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
         teamId: z.string().uuid(),
         assetId: z.string().uuid(),
         properties: z.object({}).passthrough().optional(),
+        // 制品继承语义（M66①，RFC 7386 merge-patch 口径）：缺省=沿用 head 制品
+        // （只改属性的草稿不再意外丢制品）；显式提供数组（含空数组）=整体替换。
         artifacts: z
           .array(
             z.object({
@@ -88,7 +90,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
             })
           )
           .max(20)
-          .default([]),
+          .optional(),
         expectedHeadRevisionId: z.string().uuid().optional(),
       }),
       req.body
@@ -157,9 +159,26 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
       // 子类型资产同时满足链上全部祖先定义，错误带 [typeKey vN] 前缀。
       const chain = await loadTypeChain(client, body.teamId, head.type_version_id);
       validateAgainstChain(chain, newProperties);
+      // 生效制品清单：缺省 → 复制 head 制品行；显式提供 → 整体替换（空数组=显式清空）
+      let effectiveArtifacts: { digest: string; role: string; originalName: string; mediaType: string; size: number }[];
+      if (body.artifacts === undefined) {
+        const { rows: headArts } = await client.query<{
+          blob_digest: string; artifact_role: string; original_name: string; media_type: string; size: number;
+        }>(
+          `SELECT blob_digest, artifact_role, original_name, media_type, size::int AS size FROM revision_artifacts
+            WHERE team_id = $1 AND revision_id = $2 ORDER BY blob_digest`,
+          [body.teamId, currentHeadId]
+        );
+        effectiveArtifacts = headArts.map((a) => ({
+          digest: a.blob_digest, role: a.artifact_role, originalName: a.original_name,
+          mediaType: a.media_type, size: a.size,
+        }));
+      } else {
+        effectiveArtifacts = body.artifacts;
+      }
       const canonical = stableStringify({
         p: newProperties,
-        arts: body.artifacts.map((a) => a.digest).sort(),
+        arts: effectiveArtifacts.map((a) => a.digest).sort(),
         type: asset.current_type_version_id,
       });
       const contentDigest = createHash("sha256").update(canonical).digest("hex");
@@ -169,7 +188,7 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [body.teamId, revisionId, body.assetId, head.type_version_id, JSON.stringify(newProperties), contentDigest, head.seq + 1, auth.userId]
       );
-      for (const art of body.artifacts) {
+      for (const art of effectiveArtifacts) {
         const { rows: blob } = await client.query(`SELECT 1 FROM blobs WHERE team_id = $1 AND digest = $2`, [
           body.teamId,
           art.digest,
