@@ -693,16 +693,39 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    新团队 dry-run（类型缺失如实跳过）→补注册同版类型→正式回导 2 资产+1 关系
    exit 0；进程退出用 exitCode 避免 Windows/libuv 断言。证据：
    docs/evidence/m63-cli-bundle-tools.txt。
+   M64 已完成（schema 表单贯穿草稿编辑 + 门禁提示前移，两个连续落选候选合并一轮；
+   调研笔记 research-M64-draft-form-gate-hint.md）。①抽取共享
+   components/SchemaForm.tsx：FieldInput/fieldHint/SchemaFields/chainFromTypes——
+   登记与草稿编辑同一套链重建与字段渲染（rjsf/JSON Forms 同一表单组件服务
+   create/edit 的惯例），M62 的链合并/部件/预检只此一份。②域层增补两纯函数：
+   propertiesToFormValues（类型化属性→表单字符串预填，六类型往返；schema 外属性
+   分离 extra 保留开放世界表达力；含逗号标量数组如实注记失真风险）+
+   chainRequiresTestEvidence（链上任一环声明即 required，与 checkTestGate 语义
+   同源）。③DraftPanel 双模式：表单模式（默认，head 属性预填 + 额外属性 JSON 区）
+   /JSON 模式（原文本域保留），互转不丢内容（表单→全量 JSON、JSON→表单+extra）；
+   保存前本地预检。④**行为发现：草稿保存是补丁语义**——服务端按
+   {...head.properties, ...body.properties} 合并后校验存储，清空的键沿用 head 值
+   （不删除）不 422；草稿侧预检按合并视图查（否则误拦服务端会接受的保存），
+   纯函数对裸值仍报缺必填（两层口径各有其用，测试分别断言）。⑤门禁提示前移：
+   登记表单选中类型后链上任一环 requires_test_evidence 即显示「🔒 此类型链声明
+   需测试证据…（登记与草稿不受阻，发布关卡强制）」——提示时机提前，不改变关卡
+   位置；草稿面板同款小字提示。tests/m64 四项：chainRequiresTestEvidence 任一环
+   语义；预填往返+extra 分离+逗号注记；GET /types 暴露 requires_test_evidence；
+   草稿端到端（预填→改字段→换算合并→201；预检拦枚举外值+服务端 M59 兜底 422；
+   补丁语义契约：清空键沿用 head 值 201 且新修订坐实；JSON 模式等价）。
+   浏览器实测：登记表单选 m64gated → 🔒 提示 + accuracy* 范围 0~1；M63 CLI Manual
+   详情「修改资产」→ 表单模式预填 note=handbook → 改 v2 → 保存 r2 成功 → JSON
+   模式互转保真 → 切回表单。截图：m64-ui-gate-hint、m64-ui-draft-form。全量
+   64 套件 317 项全绿（环境注记：宿主重启致 PG/graphdb 容器与 dev 服务退出，
+   docker compose 重新拉起后零代码改动全绿）。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M63 后，按性价比排序）：门禁类型 UI 提示前移（登记表单选中需
-   测试证据类型时提示）；分支草稿编辑器同享 schema 表单（M62 只覆盖登记侧，草稿
-   属性仍是 JSON 文本域）；bundle tagmanifest（manifest.json 自身入校验清单，补
-   M63 记录的边界）；调研吸收清单余项不变：派生血缘字段（HF base_model）、
-   owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性自定义筛选器
-   （OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、引用导出
-   BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠。
-   AI 草稿质量反馈环仍需先攒真实使用样本。暂缓项：无。如继续迭代，建议再做
-   用户走查/收集真实使用反馈，或由用户直接点名需求。
+   可选后续方向（M64 后，按性价比排序）：bundle tagmanifest（manifest.json 自身
+   入校验清单，补 M63 记录的边界）；调研吸收清单余项不变：派生血缘字段（HF
+   base_model）、owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性
+   自定义筛选器（OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、
+   引用导出 BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent
+   对话区可折叠。AI 草稿质量反馈环仍需先攒真实使用样本。暂缓项：无。如继续迭代，
+   建议再做用户走查/收集真实使用反馈，或由用户直接点名需求。

@@ -20,9 +20,10 @@ import { CrItemCard, CrComments, type CRComment, type CRItemDiff } from "../comp
 import { createGoPrefixHandler, isTypingTarget, type PageKey } from "../lib/shortcuts";
 import { TYPE_FAMILIES } from "../lib/typeFamily";
 import {
-  checkFormValues, formValuesToProperties, schemaToFormSpec,
-  type FormFieldSpec, type TypeDefLite,
+  chainRequiresTestEvidence, checkFormValues, formValuesToProperties,
+  propertiesToFormValues, schemaToFormSpec,
 } from "@taw/domain/schema-form";
+import { SchemaFields, chainFromTypes, type TypeRow } from "../components/SchemaForm";
 
 type ThemeMode = "auto" | "light" | "dark";
 const THEME_LABEL: Record<ThemeMode, string> = { auto: "跟随系统", light: "浅色", dark: "深色" };
@@ -62,6 +63,7 @@ interface AssetFacets { typeKeys: string[]; labels: { label: string; count: numb
 interface TypeInfo {
   id: string; type_key: string; version: string; title: string;
   parent_type_key?: string | null; parent_version?: string | null;
+  requires_test_evidence?: boolean;
   unit_vocabularies?: Record<string, string[]>;
   json_schema: {
     required?: string[];
@@ -1800,13 +1802,18 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
   );
 }
 
-/** 工作分支草稿：选/建分支 → 修改属性（可选附文件）→ 保存候选修订 → 创建 CR。 */
+/** 工作分支草稿：选/建分支 → 修改属性（schema 表单/JSON 双模式，M64）→ 保存候选修订 → 创建 CR。 */
 function DraftPanel({
   teamId, projectId, asset, role, onSaved,
 }: { teamId: string; projectId: string; asset: AssetDetail; role: string; onSaved: () => void }) {
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [branchId, setBranchId] = useState("");
-  const [propsJson, setPropsJson] = useState("");
+  const [types, setTypes] = useState<TypeRow[]>([]);
+  const [mode, setMode] = useState<"form" | "json">("form");
+  const [formValues, setFormValues] = useState<Record<string, string>>({});
+  const [extraJson, setExtraJson] = useState("{}");
+  const [prefillNotes, setPrefillNotes] = useState<string[]>([]);
+  const [propsJson, setPropsJson] = useState("{}");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -1821,6 +1828,25 @@ function DraftPanel({
       })
       .catch(() => setBranches([]));
   }, [teamId, projectId]);
+
+  useEffect(() => {
+    void api<TypeRow[]>("/types", { query: { teamId } }).then(setTypes).catch(() => undefined);
+  }, [teamId]);
+
+  const typeRow = types.find((t) => t.type_key === asset.type_key && t.version === asset.type_version);
+  const chain = useMemo(() => (typeRow ? chainFromTypes(types, typeRow) : []), [types, typeRow]);
+  const spec = useMemo(() => (chain.length > 0 ? schemaToFormSpec(chain) : null), [chain]);
+  const gated = chainRequiresTestEvidence(chain);
+
+  // 预填：head 属性 → 表单字符串（spec 就绪后执行；schema 外属性分离到额外属性区）
+  useEffect(() => {
+    if (!spec) return;
+    const head = asset.revisions[0];
+    const { values, extra, notes } = propertiesToFormValues(spec.fields, (head?.properties ?? {}) as Record<string, unknown>);
+    setFormValues(values);
+    setExtraJson(Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "{}");
+    setPrefillNotes(notes);
+  }, [spec, asset]);
 
   useEffect(() => {
     const head = asset.revisions[0];
@@ -1843,11 +1869,63 @@ function DraftPanel({
     }
   }
 
+  /** 双模式互转不丢内容：表单 → 全量 JSON；JSON → 表单字符串 + 额外属性区。 */
+  function switchMode(next: "form" | "json") {
+    if (next === mode) return;
+    if (next === "json") {
+      let extra: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(extraJson || "{}") as unknown;
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) extra = parsed;
+      } catch { /* 坏 extra：按空处理，进 JSON 后由用户修 */ }
+      const typed = spec ? formValuesToProperties(spec.fields, formValues).properties : {};
+      setPropsJson(JSON.stringify({ ...typed, ...extra }, null, 2));
+      setMode("json");
+      return;
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(propsJson || "{}") as Record<string, unknown>;
+    } catch {
+      setError("JSON 无法解析，先修正再切换到表单模式。");
+      return;
+    }
+    if (spec) {
+      const { values, extra } = propertiesToFormValues(spec.fields, parsed);
+      setFormValues(values);
+      setExtraJson(Object.keys(extra).length > 0 ? JSON.stringify(extra, null, 2) : "{}");
+    }
+    setMode("form");
+    setError("");
+  }
+
   async function saveDraft() {
     if (!branchId) { window.alert("先选择或创建工作分支。"); return; }
-    let properties: unknown;
-    try { properties = JSON.parse(propsJson || "{}"); } catch {
-      window.alert("属性 JSON 无法解析。"); return;
+    let properties: Record<string, unknown>;
+    if (mode === "form") {
+      if (!spec) { window.alert("类型定义未加载，无法用表单模式保存。"); return; }
+      const { properties: typed, problems } = formValuesToProperties(spec.fields, formValues);
+      let extra: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(extraJson || "{}") as unknown;
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          setError("额外属性区必须是 JSON 对象。"); return;
+        }
+        extra = parsed;
+      } catch {
+        setError("额外属性区 JSON 无法解析。"); return;
+      }
+      // 本地预检（咨询性）：草稿保存是补丁语义（服务端 {...head, ...body} 合并后
+      // 校验存储），预检按同一合并视图查——清空的字段沿用 head 值，不会误报缺必填。
+      const headProps = (asset.revisions[0]?.properties ?? {}) as Record<string, unknown>;
+      const mergedForCheck = { ...headProps, ...typed, ...extra };
+      const local = problems.length > 0 ? problems : checkFormValues(spec.fields, mergedForCheck);
+      if (local.length > 0) { setError(local.join("；")); return; }
+      properties = { ...typed, ...extra };
+    } else {
+      try { properties = JSON.parse(propsJson || "{}") as Record<string, unknown>; } catch {
+        window.alert("属性 JSON 无法解析。"); return;
+      }
     }
     setBusy(true); setError(""); setMsg("");
     try {
@@ -1899,11 +1977,40 @@ function DraftPanel({
         </select>
         <button onClick={() => void createBranch()}>新建分支…</button>
       </div>
-      <div className="field">
-        <label>属性（完整 JSON，保存为新的不可变候选修订）</label>
-        <textarea rows={6} value={propsJson} onChange={(e) => setPropsJson(e.target.value)}
-          style={{ fontFamily: "monospace", width: "100%" }} />
+      <div className="field" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <label style={{ margin: 0 }}>属性编辑</label>
+        <button onClick={() => switchMode("form")} disabled={mode === "form"} title="schema 驱动表单（与登记同一套链合并/部件/预检）">表单模式</button>
+        <button onClick={() => switchMode("json")} disabled={mode === "json"} title="原始 JSON 文本域（高级编辑兜底）">JSON 模式</button>
+        {gated && <span className="hint" style={{ fontSize: 11, margin: 0 }}>🔒 此类型链需测试证据：发布前须有 pass 测试运行</span>}
       </div>
+      {mode === "form" ? (
+        <>
+          {spec ? (
+            <SchemaFields
+              spec={spec}
+              values={formValues}
+              onChange={(k, v) => setFormValues({ ...formValues, [k]: v })}
+              legendExtra="，保存为新的不可变候选修订"
+            />
+          ) : (
+            <div className="state">类型定义加载中（schema 表单不可用前可切 JSON 模式）。</div>
+          )}
+          <div className="field">
+            <label>额外属性（schema 未声明；JSON 对象，保存时合并）</label>
+            <textarea rows={3} value={extraJson} onChange={(e) => setExtraJson(e.target.value)}
+              style={{ fontFamily: "var(--mono, monospace)", fontSize: 12, width: "100%" }} />
+          </div>
+          {prefillNotes.map((n, i) => (
+            <div key={i} className="hint" style={{ fontSize: 11 }}>{n}</div>
+          ))}
+        </>
+      ) : (
+        <div className="field">
+          <label>属性（完整 JSON，保存为新的不可变候选修订）</label>
+          <textarea rows={6} value={propsJson} onChange={(e) => setPropsJson(e.target.value)}
+            style={{ fontFamily: "var(--mono, monospace)", width: "100%" }} />
+        </div>
+      )}
       <div className="field">
         <label>替换制品文件（可选）</label>
         <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
@@ -2181,74 +2288,6 @@ function ReleasePanel({ project, me }: { project?: ProjectInfo; me: Me }) {
   );
 }
 
-/** 字段规格 → 输入部件（M62）：枚举/词表与布尔渲染下拉，数值带输入模式，object/array 为 JSON/列表。 */
-function FieldInput({ f, value, onChange }: { f: FormFieldSpec; value: string; onChange: (v: string) => void }) {
-  if (f.input === "enum") {
-    return (
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">—</option>
-        {(f.enumValues ?? []).map((v) => (
-          <option key={v} value={v}>{v}</option>
-        ))}
-      </select>
-    );
-  }
-  if (f.input === "boolean") {
-    return (
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">—</option>
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
-    );
-  }
-  if (f.input === "integer" || f.input === "number") {
-    return (
-      <input
-        inputMode={f.input === "integer" ? "numeric" : "decimal"}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={f.input === "integer" ? "整数" : "数字"}
-      />
-    );
-  }
-  if (f.input === "json") {
-    return (
-      <textarea
-        rows={3}
-        style={{ width: "100%", fontFamily: "var(--mono, monospace)", fontSize: 12 }}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={f.type === "array" ? 'JSON 数组，如 [{"name":"a"}]' : 'JSON 对象，如 {"name":"a"}'}
-      />
-    );
-  }
-  if (f.input === "list") {
-    return (
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={`逗号分隔的 ${f.items ?? "string"} 列表，如 a, b`}
-      />
-    );
-  }
-  return <input value={value} onChange={(e) => onChange(e.target.value)} />;
-}
-
-/** 字段约束的人读提示（范围/长度/格式/词表）；无约束返回空串不渲染。 */
-function fieldHint(f: FormFieldSpec): string {
-  const parts: string[] = [];
-  if (f.minimum !== undefined || f.maximum !== undefined) {
-    parts.push(`范围 ${f.minimum ?? "-∞"} ~ ${f.maximum ?? "+∞"}`);
-  }
-  if (f.minLength !== undefined || f.maxLength !== undefined) {
-    parts.push(`长度 ${f.minLength ?? 0}–${f.maxLength ?? "不限"}`);
-  }
-  if (f.pattern) parts.push(`格式 ${f.pattern}`);
-  if (f.vocabulary) parts.push(`受控词表 ${f.vocabulary}`);
-  return parts.join(" · ");
-}
-
 function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?: { name?: string; typeKeyHint?: string; nonce: number }; onDone: () => void }) {
   const [types, setTypes] = useState<TypeInfo[]>([]);
   const [typeKey, setTypeKey] = useState("");
@@ -2283,28 +2322,11 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
 
   const type = types.find((t) => t.type_key === typeKey);
 
-  // 类型链重建（子 → … → 根）：GET /types 已返回全量类型行，按 (parent_type_key,
-  // parent_version) 走链；深度/环防御与服务端 loadTypeChain 同口径。合并语义见
-  // @taw/domain/schema-form：字段 = 链上并集，required 取并集，约束取最派生一环。
-  const spec = useMemo(() => {
-    if (!type) return null;
-    const chain: TypeDefLite[] = [];
-    const seen = new Set<string>();
-    let cursor: TypeInfo | undefined = type;
-    while (cursor && chain.length <= 16 && !seen.has(cursor.id)) {
-      seen.add(cursor.id);
-      chain.push({
-        typeKey: cursor.type_key,
-        version: cursor.version,
-        jsonSchema: cursor.json_schema ?? {},
-        unitVocabularies: cursor.unit_vocabularies ?? {},
-      });
-      const pk = cursor.parent_type_key;
-      const pv = cursor.parent_version;
-      cursor = pk && pv ? types.find((t) => t.type_key === pk && t.version === pv) : undefined;
-    }
-    return schemaToFormSpec(chain);
-  }, [type, types]);
+  // 类型链重建与字段规格（M64 抽取到共享 SchemaForm；登记与草稿编辑同源）。
+  // 门禁提示前移：链上任一环声明 requires_test_evidence 即提示（发布关卡强制）。
+  const chain = useMemo(() => (type ? chainFromTypes(types, type) : []), [types, type]);
+  const spec = useMemo(() => (chain.length > 0 ? schemaToFormSpec(chain) : null), [chain]);
+  const gated = chainRequiresTestEvidence(chain);
 
   if (!project) return <div className="state">先选择项目。</div>;
 
@@ -2343,28 +2365,18 @@ function AssetRegister({ project, hint, onDone }: { project?: ProjectInfo; hint?
         <label>资产名称</label>
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </div>
-      {type && spec && spec.fields.length > 0 && (
-        <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8 }}>
-          <legend style={{ fontSize: 13, color: "var(--muted)" }}>
-            类型属性（* 必填；含继承链共 {spec.fields.length} 项，登记时按 v{type.version} 及全部祖先定义校验）
-          </legend>
-          {spec.fields.map((f) => (
-            <div className="field" key={f.key}>
-              <label>
-                {f.title || f.key}
-                {f.required ? " *" : ""}
-                {f.inheritedFrom && (
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>（继承自 {f.inheritedFrom}）</span>
-                )}
-              </label>
-              <FieldInput f={f} value={props[f.key] ?? ""} onChange={(v) => setProps({ ...props, [f.key]: v })} />
-              {fieldHint(f) && <div className="hint" style={{ fontSize: 11, marginTop: 2 }}>{fieldHint(f)}</div>}
-            </div>
-          ))}
-          {spec.notes.map((n, i) => (
-            <div key={i} className="hint" style={{ fontSize: 11 }}>{n}</div>
-          ))}
-        </fieldset>
+      {type && gated && (
+        <div className="hint" style={{ fontSize: 12 }}>
+          🔒 此类型链声明「需测试证据」：发布前必须有绑定候选修订内容的 pass 测试运行（登记与草稿不受阻，发布关卡强制）。
+        </div>
+      )}
+      {type && spec && (
+        <SchemaFields
+          spec={spec}
+          values={props}
+          onChange={(k, v) => setProps({ ...props, [k]: v })}
+          legendExtra={`，登记时按 v${type.version} 及全部祖先定义校验`}
+        />
       )}
       <div className="field">
         <label>制品文件（可选；内容寻址存储，重复文件自动去重）</label>

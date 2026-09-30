@@ -50,6 +50,8 @@ export interface TypeDefLite {
   version: string;
   jsonSchema: object;
   unitVocabularies: Record<string, string[]>;
+  /** 链上成员是否声明需测试证据（M64 门禁提示前移用；schema 生成不消费） */
+  requiresTestEvidence?: boolean;
 }
 
 type SchemaObj = Record<string, unknown>;
@@ -257,6 +259,73 @@ export function formValuesToProperties(fields: FormFieldSpec[], raw: Record<stri
     }
   }
   return { properties, problems };
+}
+
+// ---------------------------------------------------------------------------
+// 类型化属性 → 表单字符串（编辑预填，M64）：propertiesToFormValues 与
+// formValuesToProperties 互逆（六类型往返；对象/对象数组退化为 JSON 文本）。
+// schema 未声明的属性分离为 extra 保留（additionalProperties 开放时不丢表达力）。
+
+export interface PrefilledForm {
+  values: Record<string, string>;
+  /** schema 未声明属性原样保留（编辑回存时合并回去） */
+  extra: Record<string, unknown>;
+  /** 预填问题（值内含逗号的标量数组会往返失真等，如实提示走 JSON 模式） */
+  notes: string[];
+}
+
+function valueToFormString(f: FormFieldSpec, v: unknown, notes: string[]): string | null {
+  if (v === null || v === undefined) return null;
+  switch (f.input) {
+    case "boolean":
+      if (typeof v === "boolean") return v ? "true" : "false";
+      return null;
+    case "integer":
+    case "number":
+      return typeof v === "number" ? String(v) : null;
+    case "enum":
+    case "text":
+      return typeof v === "string" ? v : null;
+    case "list": {
+      if (!Array.isArray(v)) return null;
+      const allScalar = v.every((el) => typeof el === "string" || typeof el === "number" || typeof el === "boolean");
+      if (!allScalar) return JSON.stringify(v);
+      if (v.some((el) => typeof el === "string" && /[,，]/.test(el))) {
+        notes.push(`属性 "${f.key}" 的值内含逗号，逗号串预填会失真——请改用 JSON 模式编辑该属性`);
+      }
+      return v.map((el) => String(el)).join(", ");
+    }
+    case "json":
+      return JSON.stringify(v, null, 2);
+    default:
+      return typeof v === "string" ? v : JSON.stringify(v);
+  }
+}
+
+/** 类型化属性 → 表单字符串值 + schema 外属性。null/类型不符的值跳过（不臆造）。 */
+export function propertiesToFormValues(fields: FormFieldSpec[], properties: Record<string, unknown>): PrefilledForm {
+  const values: Record<string, string> = {};
+  const extra: Record<string, unknown> = {};
+  const notes: string[] = [];
+  const known = new Set(fields.map((f) => f.key));
+  for (const [key, v] of Object.entries(properties)) {
+    const f = fields.find((x) => x.key === key);
+    if (!f) {
+      if (!known.has(key)) extra[key] = v;
+      continue;
+    }
+    const s = valueToFormString(f, v, notes);
+    if (s !== null) values[key] = s;
+  }
+  return { values, extra, notes };
+}
+
+// ---------------------------------------------------------------------------
+// 门禁提示（M64）：链上任一环声明 requires_test_evidence 即 required——与
+// checkTestGate 的「required 来自类型链上任一定义声明」语义同源，登记表单据此前移提示。
+
+export function chainRequiresTestEvidence(chain: { requiresTestEvidence?: boolean }[]): boolean {
+  return chain.some((m) => m.requiresTestEvidence === true);
 }
 
 // ---------------------------------------------------------------------------
