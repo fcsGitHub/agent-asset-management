@@ -77,6 +77,7 @@ interface AssetDetail {
   labels: string[]; categories: { category_path: string; is_primary: boolean }[];
   aliases?: string[];
   usage?: { download: number; copy_ref: number; agent_read: number };
+  completeness?: { score: number; checks: { key: string; title: string; passed: boolean; detail: string; hint: string; weight: number }[] };
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
 interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
@@ -1648,6 +1649,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               </Fragment>
             ))}
         </div>
+        {detail.completeness && <CompletenessCard report={detail.completeness} />}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           {archived ? (
             <button onClick={() => void changeLifecycle("restore")}>恢复资产</button>
@@ -1799,6 +1801,32 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
       )}
       <NeighborhoodCard teamId={teamId} assetId={assetId} onOpenAsset={onOpenAsset} />
     </>
+  );
+}
+
+/** 完整度 scorecard 卡（M65，Backstage TechInsights 思想）：分数 + 逐项检查；未通过项给可执行下一步。 */
+function CompletenessCard({ report }: { report: NonNullable<AssetDetail["completeness"]> }) {
+  const tone = report.score >= 80 ? "#3e7d4e" : report.score >= 50 ? "#8a6d3b" : "#a44646";
+  return (
+    <div className="card" style={{ marginTop: 10, padding: "10px 12px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <strong style={{ fontSize: 14 }}>完整度</strong>
+        <span style={{ fontSize: 22, fontWeight: 700, color: tone }}>{report.score}</span>
+        <span className="hint" style={{ margin: 0, fontSize: 11.5 }}>/ 100 · 治理参考（引导不阻断：schema 必填仍由登记关卡强制）</span>
+      </div>
+      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+        {report.checks.map((c) => (
+          <div key={c.key} style={{ fontSize: 12.5 }}>
+            <span style={{ color: c.passed ? "#3e7d4e" : "#a44646", fontWeight: 700 }}>{c.passed ? "✓" : "✗"}</span>{" "}
+            <strong>{c.title}</strong>
+            <span style={{ color: "var(--muted)" }}>（{c.weight} 分）— {c.detail}</span>
+            {!c.passed && (
+              <div className="hint" style={{ margin: "2px 0 0 16px", fontSize: 11.5 }}>→ {c.hint}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

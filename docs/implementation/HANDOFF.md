@@ -718,14 +718,38 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    模式互转保真 → 切回表单。截图：m64-ui-gate-hint、m64-ui-draft-form。全量
    64 套件 317 项全绿（环境注记：宿主重启致 PG/graphdb 容器与 dev 服务退出，
    docker compose 重新拉起后零代码改动全绿）。
+   M65 已完成（资产元数据完整度 scorecard 与引导，M54 起挂账十轮按老化约定升格；
+   调研笔记 research-M65-completeness-scorecard.md）。锚点 Backstage TechInsights
+   Scorecard（布尔检查+权重+可执行提示）与 Catalog「必填阻断/推荐引导」分层。
+   ①@taw/domain/completeness：computeCompleteness 六项加权检查合计 100——
+   schema_required 25（链上必填属性齐备，与登记表单同一份 schemaToFormSpec 链
+   并集，兜住 M59 前存量欠账）、owner 20（惯例键 owner/ownerName/maintainer/
+   responsible/author/creator 之一非空，HF model card/Backstage spec.owner 惯例）、
+   relations 20（已确认关联>0，平台核心价值项）、artifacts 15（当前修订挂有
+   制品）、aliases 10、tags 10；每项 passed/detail/hint——未通过必须给可执行
+   下一步；引导不阻断（不新增登记门槛，M59 强度不变）。②GET /assets/:assetId
+   附 completeness：required 用 loadTypeChain+schemaToFormSpec（与表单同语义不
+   可能分叉），补一条 confirmed in+out 关系计数查询；owner/制品取 head 修订。
+   ③web 详情页完整度卡：分数按档着色（80+ 绿/50-79 黄/<50 红）+ 逐项 ✓/✗ +
+   未通过项 hint。边界如实：目录列表不滚动计算分数（需逐行拉属性，代价大，
+   记为后续候选）；owner 惯例键是约定不是 schema。tests/m65 三项：纯函数
+   （全过 100/逐项失败扣对应分且 hint 可执行/owner 惯例键/required 缺失点名/
+   权重算术自证）；API 端到端（两级链裸资产 55 分明细如实 → 补关系+别名 → 85
+   引导闭环；required 并集跨两级链）。浏览器实测：M63 CLI Manual 详情 45 分
+   （必填 25+关联 20；负责人/制品/别名/标签 ✗ 各带提示）。**顺带发现记入候选**：
+   草稿保存未附文件时新修订制品为空（修订快照语义，制品按修订携带）——发布该
+   修订会丢制品；继承还是替换需治理确认（替换语义下「移除制品」才可能）。
+   截图：m65-ui-scorecard。全量 65 套件 320 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M64 后，按性价比排序）：bundle tagmanifest（manifest.json 自身
-   入校验清单，补 M63 记录的边界）；调研吸收清单余项不变：派生血缘字段（HF
-   base_model）、owner/lifecycle 必填引导与完整度 scorecard（Backstage）、属性
-   自定义筛选器（OpenMetadata）、分类沿血缘传播写侧（Atlas，需治理确认流）、
-   引用导出 BibTeX/Markdown（Zenodo）、别名进 ⌘K、集合只读分享快照、Agent
-   对话区可折叠。AI 草稿质量反馈环仍需先攒真实使用样本。暂缓项：无。如继续迭代，
-   建议再做用户走查/收集真实使用反馈，或由用户直接点名需求。
+   可选后续方向（M65 后，按性价比排序）：草稿修订制品继承语义治理（M65 发现：
+   未附文件保存 → head 制品清空，发布即丢——继承-if-absent vs 显式替换需决策）；
+   bundle tagmanifest（manifest.json 自身入校验清单，补 M63 边界）；完整度目录
+   汇总（列表分数列/低分资产筛选，需后台聚合或排序端点）；调研吸收清单余项：
+   派生血缘字段（HF base_model）、属性自定义筛选器（OpenMetadata）、分类沿血缘
+   传播写侧（Atlas，需治理确认流）、引用导出 BibTeX/Markdown（Zenodo）、别名进
+   ⌘K、集合只读分享快照、Agent 对话区可折叠。AI 草稿质量反馈环仍需先攒真实
+   使用样本。暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由
+   用户直接点名需求。

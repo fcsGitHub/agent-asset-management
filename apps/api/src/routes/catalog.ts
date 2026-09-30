@@ -65,6 +65,8 @@ export { stableStringify };
 
 // 类型链装载与属性校验（M59 抽共享关卡）：登记/分支保存/dry-run 共用同一实现
 import { loadTypeChain, validateAgainstChain, type TypeDefRow } from "../ontology.js";
+import { schemaToFormSpec } from "@taw/domain/schema-form";
+import { computeCompleteness } from "@taw/domain/completeness";
 export type { TypeDefRow };
 
 /** 子定义必须收窄链上每个祖先定义；返回首个违规描述（无违规返回 null）。 */
@@ -1421,6 +1423,27 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       const usage = { download: 0, copy_ref: 0, agent_read: 0 };
       for (const r of usageRows) if (r.kind in usage) usage[r.kind as keyof typeof usage] = r.n;
+      // 完整度 scorecard（M65，Backstage TechInsights 思想）：读侧派生，不新增登记门槛。
+      // required 字段与登记表单同一合并语义（schemaToFormSpec 的链并集），不可能分叉。
+      const { rows: relCountRows } = await client.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM relation_assertions
+          WHERE team_id = $1 AND status = 'confirmed' AND (source_asset_id = $2 OR target_asset_id = $2)`,
+        [teamId, assetId]
+      );
+      const chain = await loadTypeChain(client, teamId, asset.type_version_id);
+      const requiredFields = schemaToFormSpec(
+        chain.map((d) => ({ typeKey: d.type_key, version: d.version, jsonSchema: d.json_schema, unitVocabularies: d.unit_vocabularies }))
+      ).fields.filter((f) => f.required).map((f) => f.key);
+      const head = revisions[0] as { properties?: Record<string, unknown>; artifacts?: unknown[] } | undefined;
+      const completeness = computeCompleteness({
+        requiredFields,
+        properties: head?.properties ?? {},
+        artifactsCount: head?.artifacts?.length ?? 0,
+        relationsCount: relCountRows[0]?.n ?? 0,
+        aliasesCount: aliasRows.length,
+        labelsCount: labels.length,
+        categoriesCount: categories.length,
+      });
       return {
         ...asset,
         revisions: revisionsWithArts,
@@ -1429,6 +1452,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         categories,
         aliases: aliasRows.map((r) => r.alias),
         usage,
+        completeness,
       };
     });
   });

@@ -13,7 +13,8 @@
     "./bundle": "./src/bundle.ts",
     "./schema-builder": "./src/schema-builder.ts",
     "./schema-form": "./src/schema-form.ts",
-    "./bundle-verify": "./src/bundle-verify.ts"
+    "./bundle-verify": "./src/bundle-verify.ts",
+    "./completeness": "./src/completeness.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"
