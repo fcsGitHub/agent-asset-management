@@ -12,11 +12,14 @@ function csrf(): string {
 
 export async function api<T = unknown>(
   path: string,
-  opts: { method?: string; body?: unknown; query?: Record<string, string> } = {}
+  opts: { method?: string; body?: unknown; query?: Record<string, string | string[]> } = {}
 ): Promise<T> {
   const method = opts.method ?? "GET";
   const url = new URL(`/api/v1${path}`, window.location.origin);
-  for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, v);
+  for (const [k, v] of Object.entries(opts.query ?? {})) {
+    if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, item);
+    else url.searchParams.set(k, v);
+  }
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   if (method !== "GET" && method !== "HEAD") headers["x-csrf-token"] = csrf();

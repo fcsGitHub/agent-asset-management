@@ -307,10 +307,13 @@ function RunBlock({ run, onOpenAsset, renderText }: { run: RunView; onOpenAsset?
   );
 }
 
-export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRunStateChange }: {
+export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRunStateChange, collapsed, onToggleCollapse }: {
   project?: ProjectRef; sessionId: string; sessionTitle?: string; onOpenAsset?: (assetId: string) => void;
   /** 运行状态上报（顶栏状态药丸）：有无正在流式运行的 run */
   onRunStateChange?: (running: boolean) => void;
+  /** 对话区收起（M67⑥）：组件保持挂载（SSE 订阅/输入状态不断线），只换渲染成细条 */
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }) {
   const [msgs, setMsgs] = useState<Msg[] | null>(null);
   const [runs, setRuns] = useState<RunView[]>([]);
@@ -627,6 +630,26 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
   }, [runs]);
   const ready = !!project && !!sessionId;
 
+  // 收起态（M67⑥）：细条 + 展开按钮；运行中如实显示流式药丸，收起不打断 SSE
+  if (collapsed) {
+    return (
+      <aside className="agent-pane agent-pane-rail" aria-label="Agent 对话区（已收起）">
+        <button
+          className="rail-expand"
+          title="展开对话区"
+          aria-label="展开对话区"
+          onClick={onToggleCollapse}
+        >
+          »
+        </button>
+        <button className="rail-tab" title={`AGENT · ${sessionTitle || project?.name || "未选择会话"}`} onClick={onToggleCollapse}>
+          <span className="rail-title">AGENT</span>
+        </button>
+        {anyStreaming && <span className="rail-live" title="Agent 运行中（收起不打断，展开查看）" />}
+      </aside>
+    );
+  }
+
   return (
     <aside className="agent-pane" aria-label="Agent 对话区">
       <div className="pane-label">
@@ -637,6 +660,15 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
             Σ {fmtTokens(totals.tokens)}
           </span>
         )}
+        <span style={{ flex: 1 }} />
+        <button
+          className="icon-btn"
+          title="收起对话区（再点细条展开；运行与订阅不中断）"
+          aria-label="收起对话区"
+          onClick={onToggleCollapse}
+        >
+          «
+        </button>
       </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {msgs === null && !error && (

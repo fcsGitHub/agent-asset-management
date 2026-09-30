@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import type { PageKey } from "../lib/shortcuts";
 
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; matched_alias?: string | null }
 
 interface Command {
   id: string;
@@ -129,7 +129,8 @@ export function CommandBar({
       id: `asset:${a.id}`,
       icon: a.lifecycle === "archived" ? "🗄" : "📦",
       title: a.name,
-      sub: `${a.type_key} v${a.type_version}${a.lifecycle === "archived" ? " · 已归档" : ""}`,
+      // 命中别名如实展示（M67④）：搜别名时结果行解释「为何命中这个资产」
+      sub: `${a.type_key} v${a.type_version}${a.matched_alias ? ` · 别名 ${a.matched_alias}` : ""}${a.lifecycle === "archived" ? " · 已归档" : ""}`,
       run: () => {
         onOpenAsset(a.id);
         onClose();

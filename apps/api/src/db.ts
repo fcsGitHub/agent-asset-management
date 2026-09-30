@@ -97,3 +97,28 @@ export async function withTeam<T>(
     client.release();
   }
 }
+
+/**
+ * 公开分享读事务（M67⑤）：只开 app.share_read 这一个非租户读通道——
+ * asset_collection_snapshots 的 public_share_read 策略据此放行 SELECT；
+ * 其余租户表没有同名策略，照常不可见。仅分享查看端点使用。
+ */
+export async function withShareRead<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.share_read', 'on', true)");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* 连接已损坏时忽略 */
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}

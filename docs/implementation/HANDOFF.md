@@ -770,13 +770,69 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    按钮请求 200 且响应体字段齐全（无头浏览器剪贴板权限拒绝致按钮态不翻转——
    环境限制，与既有复制按钮同口径，网络证据坐实端点与接线）。截图：
    m66-ui-catalog-completeness、m66-ui-bibtex-detail。全量 66 套件 324 项全绿。
+   M67 已完成（候选清偿轮，用户点名「一轮完成所有候选项」：M66 后七项候选一次
+   交付；调研笔记 research-M67-all-candidates.md）。①**派生血缘字段物化**（HF
+   base_model）：@taw/domain/lineage extractLineageRefs（base_model/baseModel/
+   base_model_ref/derived_from 四惯例字段，string/数组、去空去重）+ 详情附
+   lineageRefs + POST /assets/:id/lineage/materialize——名称精确（大小写不敏感）
+   或别名精确命中才建 derivedFrom 断言（模糊不自动建边，误连血缘比少连更糟），
+   建边走既有 createRelationAssertion（domain/range、禁环、重边防护复用）；
+   linked/already/unresolved/self 四态逐项如实回报；无血缘字段 422。②**属性
+   自定义筛选器**（OpenMetadata Explore）：@taw/domain/prop-filter parsePropFilters
+   （key=value / key:value，同键后项覆盖，非法项收集点名）→ search?prop=…
+   （可重复）`r.properties->>$k = $v` 全参数化等值过滤；目录筛选行输入框（空格
+   分隔多项）随 M54 URL 化一并恢复/写回（?view=assets&prop=owner=alice）。
+   ③**标签沿血缘传播写侧**（Atlas 分类传播+治理确认流）：planLabelPropagation
+   纯函数（BFS 沿「基座→派生物」——derivedFrom 断言方向是源(派生物)→目标(基座)，
+   传播方向相反，递归 CTE 取「以起点为基座」的全部派生链；环安全 visited；只
+   传播源自身标签、中间节点新加标签不级联，保守语义如实文档）；GET 预览返回
+   planDigest（sha256 稳定序列化），POST 必须 confirmPlanDigest（不符 409
+   PROPAGATION_PLAN_CHANGED，同 C08 share-check 的 TOCTOU 口径）；执行落
+   asset_labels（ON CONFLICT DO NOTHING）并递增 meta_version（元数据 ETag
+   乐观并发不被静默绕过）。④**别名进 ⌘K**：search 行附 matched_alias（命中 q
+   的第一个别名 lateral 子查询），⌘K 与 @ 引用候选副标题显示「别名 xxx」——
+   搜别名时解释为何命中。⑤**集合只读分享快照**（Zenodo/HF snapshot 冻结语义）：
+   迁移 0027 asset_collection_snapshots（payload jsonb 深拷贝、token 128-bit
+   唯一、不可变——无 UPDATE/DELETE 授权、不设集合 FK——集合删除后快照保留）；
+   POST /collections/:id/snapshots（管理权=创建者或管理员，分享是治理动作；
+   >500 条 422）+ GET /share/collections/:token **免登录只读**——RLS 双策略：
+   tenant_isolation（NULLIF 空串防御，同 0004 口径）+ public_share_read（仅当
+   事务内 SET LOCAL app.share_read='on' 才可 SELECT，db.ts withShareRead 是唯一
+   开启该 GUC 的代码路径，其余端点跨团队照常不可见）；公开响应不含 teamId/
+   用户 id/制品内容（只有元数据+内容摘要）；web 集合详情「分享快照」按钮（确认
+   弹窗）+ 快照链接列表 + /share/collection/:token 公开页（App 路由旁路登录）。
+   ⑥**Agent 对话区可折叠**：AgentPane collapsed 属性——收起渲染 34px 细条（竖排
+   AGENT tab + 运行中亮灯），组件保持挂载（SSE 订阅/输入状态不断线）；Workbench
+   记 localStorage（taw-agent-collapsed-v1）并隐藏拖动分隔条。⑦**完整度团队
+   水位**（TechInsights 汇总视图）：queryAssetRows/scoreAssetRows 抽共享管线
+   （search 与 summary 同一条 SQL+打分，不可能分叉），GET /assets/completeness-
+   summary → @taw/domain/completeness-summary summarizeCompleteness（count/平均/
+   三档分桶（与详情卡同阈值）/低分清单 <60 升序最多 20 条带未过项标题；候选集
+   ≤200 与 search 同界，超限如实注记）；目录页顶部水位卡 + 低分清单可点开直达
+   补元数据。
+   **顺带修两个真 bug**（全量跑暴露）：(a) 0027 租户策略漏了 0004 的 NULLIF
+   空串防御——连接复用时事务结束后 app.team_id 回退为空串（非 NULL），::uuid
+   抛 22P02；(b) **reply.send() 在 withTeam 事务回调内调用会先于 COMMIT 刷出
+   响应**，紧随的请求竞态读不到刚提交的行——单跑绿、全量跑必现（事件循环繁忙
+   使 COMMIT 排队更靠后），三处新写端点统一改为「事务内返回纯对象，COMMIT 后
+   再 send」（同 meta-share 既有口径）。tests/m67 十一项（纯函数四：lineage
+   提取/传播规划（BFS 多级+环+已覆盖）/prop 解析/汇总分桶；端到端七：物化大小写
+   不敏感+already+unresolved+422+lineageRefs、别名命中物化、prop 过滤+交集+422
+   点名、传播预览/错摘要 409/执行落库/二次无待传播、matched_alias、快照冻结+
+   免登录+增删不影响+坏 token 404+外团队 404+不泄漏 teamId、汇总分桶合计/低分
+   升序/裸资产带未过项）。浏览器实测（demo 团队）：目录水位卡（治理动作后平均
+   40→45、低分清单 11→9）+ 属性筛选唯一定位（URL 带 prop 参数）；ChildNet 详情
+   血缘卡物化（小写 base_model 命中大写 BaseNet ✅）；BaseNet 一键传播（确认
+   弹窗列下游与新增标签→「已传播 1 项标签到 1 个下游资产」）；集合分享快照创建
+   + /share/collection/:token 免登录公开页冻结渲染；对话区收起细条/展开恢复；
+   ⌘K 搜 m67basenet 命中显示「别名 m67basenet」。截图：m67-ui-watermark、
+   m67-ui-lineage-materialize、m67-ui-propagate、m67-ui-share-public、
+   m67-ui-agent-collapsed、m67-ui-cmdk-alias。全量 67 套件 335 项全绿。
    候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
    与暂缓项，不复读全量清单。
    暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
    （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
-   可选后续方向（M66 后，按性价比排序）：调研吸收清单余项：派生血缘字段（HF
-   base_model）、属性自定义筛选器（OpenMetadata）、分类沿血缘传播写侧（Atlas，
-   需治理确认流）、别名进 ⌘K、集合只读分享快照、Agent 对话区可折叠；完整度
-   汇总页（团队级水位/低分资产清单）。AI 草稿质量反馈环仍需先攒真实使用样本。
-   暂缓项：无。如继续迭代，建议再做用户走查/收集真实使用反馈，或由用户直接
-   点名需求。
+   可选后续方向（M67 后）：候选清单已清偿（M66 后七项全部落地）。剩余方向：
+   AI 草稿质量反馈环（仍需先攒真实使用样本，不伪造）；属性筛选的范围/正则算子、
+   嵌套属性（等值先满足绝大多数治理筛选用，记为后续候选）；如继续迭代，建议
+   再做用户走查/收集真实使用反馈，或由用户直接点名需求。

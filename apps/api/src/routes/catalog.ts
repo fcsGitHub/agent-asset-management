@@ -68,6 +68,9 @@ import { loadTypeChain, validateAgainstChain, type TypeDefRow } from "../ontolog
 import { schemaToFormSpec } from "@taw/domain/schema-form";
 import { computeCompleteness, OWNER_KEYS } from "@taw/domain/completeness";
 import { buildCitation } from "@taw/domain/cite";
+import { extractLineageRefs, planLabelPropagation } from "@taw/domain/lineage";
+import { parsePropFilters, type PropFilter } from "@taw/domain/prop-filter";
+import { summarizeCompleteness } from "@taw/domain/completeness-summary";
 export type { TypeDefRow };
 
 /** 子定义必须收窄链上每个祖先定义；返回首个违规描述（无违规返回 null）。 */
@@ -224,6 +227,176 @@ export async function createRelationAssertion(
   if (existingClient) await run(existingClient);
   else await withTeam(teamId, run);
   return { relationId: id, status };
+}
+
+/** 目录行查询（M67 抽共享）：search 与 completeness-summary 共用同一条 SQL 与过滤语义。
+ *  propFilters 逐项 `r.properties->>$k = $v`（->> 右参可参数化，无注入面；文本等值）。 */
+async function queryAssetRows(
+  teamId: string,
+  opts: {
+    q?: string; type?: string; label?: string; typePrefix?: string;
+    lifecycle: "active" | "archived" | "all";
+    propFilters: PropFilter[];
+    sort: "newest" | "refs" | "usage" | "completeness";
+    limit: number;
+  }
+): Promise<Record<string, unknown>[]> {
+  const params: unknown[] = [
+    teamId, opts.q ?? "", opts.type ?? "", opts.lifecycle, opts.label ?? "", opts.typePrefix ?? "", opts.sort, opts.limit,
+  ];
+  let propClause = "";
+  for (const f of opts.propFilters) {
+    const k = params.push(f.key);
+    const v = params.push(f.value);
+    propClause += ` AND r.properties->>$${k} = $${v}\n`;
+  }
+  return withTeam(teamId, async (client) => {
+    const result = await client.query(
+      `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
+              r.id AS head_revision_id, r.content_digest, r.created_at, r.properties,
+              (SELECT al.alias FROM asset_aliases al
+                WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
+                ORDER BY al.alias LIMIT 1) AS matched_alias,
+              EXISTS (
+                SELECT 1 FROM revision_artifacts ra
+                 WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
+              ) AS has_artifacts,
+              arc.n AS artifact_count,
+              rc.n AS relation_count,
+              uc.n AS usage_count,
+              alc.n AS alias_count,
+              lc.n AS label_count,
+              cc.n AS category_count
+         FROM assets a
+         JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+         JOIN LATERAL (
+           SELECT id, content_digest, created_at, properties FROM asset_revisions
+            WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
+         ) r ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM revision_artifacts ra
+            WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
+         ) arc ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM relation_assertions ra
+            WHERE ra.team_id = a.team_id AND ra.status <> 'withdrawn'
+              AND (ra.source_asset_id = a.id OR ra.target_asset_id = a.id)
+         ) rc ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM usage_events ue
+            WHERE ue.team_id = a.team_id AND ue.asset_id = a.id
+              AND ue.created_at > now() - interval '90 days'
+         ) uc ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM asset_aliases al
+            WHERE al.team_id = a.team_id AND al.asset_id = a.id
+         ) alc ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM asset_labels l
+            WHERE l.team_id = a.team_id AND l.asset_id = a.id
+         ) lc ON true
+         JOIN LATERAL (
+           SELECT count(*)::int AS n FROM asset_categories c
+            WHERE c.team_id = a.team_id AND c.asset_id = a.id
+         ) cc ON true
+        WHERE a.team_id = $1
+          AND ($2 = '' OR a.name ILIKE '%' || $2 || '%' OR EXISTS (
+                SELECT 1 FROM asset_aliases al
+                 WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
+              ))
+          AND ($3 = '' OR tv.type_key = $3)
+          AND ($4 = 'all' OR a.lifecycle = CASE WHEN $4 = 'archived' THEN 'archived' ELSE 'active' END)
+          AND ($5 = '' OR EXISTS (
+                SELECT 1 FROM asset_labels l
+                 WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $5
+              ))
+          AND ($6 = '' OR tv.type_key LIKE $6 || '%')
+${propClause}        ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
+      params
+    );
+    return result.rows as Record<string, unknown>[];
+  });
+}
+
+/** 行级打分管线（M66③/M67⑦ 共用）：required 按类型链缓存；计算后剥离 properties。
+ *  行上附 completenessScore + completenessChecks（search 返回前剥离 checks，summary 用）。 */
+async function scoreAssetRows(teamId: string, rows: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  const requiredCache = new Map<string, string[]>();
+  return withTeam(teamId, async (client) => {
+    const out: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      const tvId = String(row.type_version_id ?? "");
+      let requiredFields = requiredCache.get(tvId);
+      if (requiredFields === undefined) {
+        const chain = await loadTypeChain(client, teamId, tvId);
+        requiredFields = schemaToFormSpec(
+          chain.map((d) => ({ typeKey: d.type_key, version: d.version, jsonSchema: d.json_schema, unitVocabularies: d.unit_vocabularies }))
+        ).fields.filter((f) => f.required).map((f) => f.key);
+        requiredCache.set(tvId, requiredFields);
+      }
+      const report = computeCompleteness({
+        requiredFields,
+        properties: (row.properties ?? {}) as Record<string, unknown>,
+        artifactsCount: Number(row.artifact_count ?? 0),
+        relationsCount: Number(row.relation_count ?? 0),
+        aliasesCount: Number(row.alias_count ?? 0),
+        labelsCount: Number(row.label_count ?? 0),
+        categoriesCount: Number(row.category_count ?? 0),
+      });
+      delete row.properties;
+      delete row.type_version_id;
+      out.push({
+        ...row,
+        completenessScore: report.score,
+        completenessChecks: report.checks.map((c) => ({ title: c.title, passed: c.passed })),
+      });
+    }
+    return out;
+  });
+}
+
+/** 标签沿血缘传播规划（M67③）：derivedFrom 断言方向=源(派生物)→目标(基座)，
+ *  标签传播方向相反（基座→派生物，Atlas 下游传播）——递归取「以起点为基座」的
+ *  全部派生链，边统一转为 from=上游 base、to=下游派生物。 */
+async function buildPropagationPlan(
+  client: PoolClient,
+  teamId: string,
+  assetId: string
+): Promise<{ plan: ReturnType<typeof planLabelPropagation>; names: Map<string, string>; sourceLabels: string[] }> {
+  const { rows: edgeRows } = await client.query<{ base: string; node: string }>(
+    `WITH RECURSIVE down AS (
+       SELECT ra.target_asset_id AS base, ra.source_asset_id AS node
+         FROM relation_assertions ra
+         JOIN relation_type_versions tv ON tv.team_id = ra.team_id AND tv.id = ra.relation_type_version_id
+        WHERE ra.team_id = $1 AND tv.type_key = 'derivedFrom' AND ra.status <> 'withdrawn' AND ra.target_asset_id = $2
+       UNION
+       SELECT ra.target_asset_id, ra.source_asset_id
+         FROM relation_assertions ra
+         JOIN relation_type_versions tv ON tv.team_id = ra.team_id AND tv.id = ra.relation_type_version_id
+         JOIN down d ON ra.target_asset_id = d.node
+        WHERE ra.team_id = $1 AND tv.type_key = 'derivedFrom' AND ra.status <> 'withdrawn'
+     ) SELECT base, node FROM down`,
+    [teamId, assetId]
+  );
+  const edges = edgeRows.map((r) => ({ from: r.base, to: r.node }));
+  const ids = [...new Set([assetId, ...edges.flatMap((e) => [e.from, e.to])])];
+  const { rows: labelRows } = await client.query<{ asset_id: string; label: string }>(
+    `SELECT asset_id, label FROM asset_labels WHERE team_id = $1 AND asset_id = ANY($2::uuid[])`,
+    [teamId, ids]
+  );
+  const labelsByAsset: Record<string, string[]> = {};
+  for (const r of labelRows) {
+    (labelsByAsset[r.asset_id] ??= []).push(r.label);
+  }
+  const { rows: nameRows } = await client.query<{ id: string; name: string }>(
+    `SELECT id, name FROM assets WHERE team_id = $1 AND id = ANY($2::uuid[])`,
+    [teamId, ids]
+  );
+  return {
+    plan: planLabelPropagation({ sourceId: assetId, edges, labelsByAsset }),
+    names: new Map(nameRows.map((r) => [r.id, r.name])),
+    sourceLabels: labelsByAsset[assetId] ?? [],
+  };
 }
 
 export async function catalogRoutes(app: FastifyInstance): Promise<void> {
@@ -1121,117 +1294,222 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   // lifecycle 过滤：active（默认，排除归档）/ archived（仅归档）/ all
   // M53 分面：label（精确）与 typePrefix（前缀，支撑 文档/代码/测试/数据 家族快筛）
   // M54（Amundsen 排序信号）：relation_count 被引数；sort=refs 按关联数降序（默认最新登记）
+  // M67②：prop=key=value（可重复）按 head 修订属性等值过滤（OpenMetadata 任意属性筛选）
+  // M67④：行附 matched_alias（命中 q 的第一个别名）——⌘K/引用候选解释「为何命中」
   app.get("/assets/search", async (req) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
       teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string; typePrefix?: string; sort?: string;
+      prop?: string | string[];
     };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
+    const { filters: propFilters, problems } = parsePropFilters(query.prop);
+    if (problems.length > 0) {
+      throw ERR.INVALID(`属性筛选格式不正确：${problems.join("；")}`, problems);
+    }
     const limit = Math.min(Number(query.limit ?? 50), 200);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
     const sort =
       query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
-    const { rows } = await withTeam(teamId, async (client) => {
-      const result = await client.query(
-        `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
-                r.id AS head_revision_id, r.content_digest, r.created_at, r.properties,
-                EXISTS (
-                  SELECT 1 FROM revision_artifacts ra
-                   WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
-                ) AS has_artifacts,
-                arc.n AS artifact_count,
-                rc.n AS relation_count,
-                uc.n AS usage_count,
-                alc.n AS alias_count,
-                lc.n AS label_count,
-                cc.n AS category_count
-           FROM assets a
-           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
-           JOIN LATERAL (
-             SELECT id, content_digest, created_at, properties FROM asset_revisions
-              WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
-           ) r ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM revision_artifacts ra
-              WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
-           ) arc ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM relation_assertions ra
-              WHERE ra.team_id = a.team_id AND ra.status <> 'withdrawn'
-                AND (ra.source_asset_id = a.id OR ra.target_asset_id = a.id)
-           ) rc ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM usage_events ue
-              WHERE ue.team_id = a.team_id AND ue.asset_id = a.id
-                AND ue.created_at > now() - interval '90 days'
-           ) uc ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM asset_aliases al
-              WHERE al.team_id = a.team_id AND al.asset_id = a.id
-           ) alc ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM asset_labels l
-              WHERE l.team_id = a.team_id AND l.asset_id = a.id
-           ) lc ON true
-           JOIN LATERAL (
-             SELECT count(*)::int AS n FROM asset_categories c
-              WHERE c.team_id = a.team_id AND c.asset_id = a.id
-           ) cc ON true
-          WHERE a.team_id = $1
-            AND ($2 = '' OR a.name ILIKE '%' || $2 || '%' OR EXISTS (
-                  SELECT 1 FROM asset_aliases al
-                   WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
-                ))
-            AND ($3 = '' OR tv.type_key = $3)
-            AND ($4 = 'all' OR a.lifecycle = CASE WHEN $4 = 'archived' THEN 'archived' ELSE 'active' END)
-            AND ($5 = '' OR EXISTS (
-                  SELECT 1 FROM asset_labels l
-                   WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $5
-                ))
-            AND ($6 = '' OR tv.type_key LIKE $6 || '%')
-          ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
-        // sort=completeness 时先取满候选集（≤200），分数算完在 JS 内升序再截断
-        [teamId, query.q ?? "", query.type ?? "", lifecycle, query.label ?? "", query.typePrefix ?? "", sort, sort === "completeness" ? 200 : limit]
-      );
-      return result;
+    // sort=completeness 时先取满候选集（≤200），分数算完在 JS 内升序再截断
+    const rows = await queryAssetRows(teamId, {
+      q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", typePrefix: query.typePrefix ?? "",
+      lifecycle, propFilters, sort, limit: sort === "completeness" ? 200 : limit,
     });
-    // 行级完整度分数（M66③，与详情卡同一条 computeCompleteness 定义）：
-    // required 按类型链缓存（团队类型数有限）；计算后剥离 properties 不下发。
-    const requiredCache = new Map<string, string[]>();
-    const scored = await withTeam(teamId, async (client) => {
-      const out: Record<string, unknown>[] = [];
-      for (const row of rows as Record<string, unknown>[]) {
-        const tvId = String(row.type_version_id ?? "");
-        let requiredFields = requiredCache.get(tvId);
-        if (requiredFields === undefined) {
-          const chain = await loadTypeChain(client, teamId, tvId);
-          requiredFields = schemaToFormSpec(
-            chain.map((d) => ({ typeKey: d.type_key, version: d.version, jsonSchema: d.json_schema, unitVocabularies: d.unit_vocabularies }))
-          ).fields.filter((f) => f.required).map((f) => f.key);
-          requiredCache.set(tvId, requiredFields);
-        }
-        const completenessScore = computeCompleteness({
-          requiredFields,
-          properties: (row.properties ?? {}) as Record<string, unknown>,
-          artifactsCount: Number(row.artifact_count ?? 0),
-          relationsCount: Number(row.relation_count ?? 0),
-          aliasesCount: Number(row.alias_count ?? 0),
-          labelsCount: Number(row.label_count ?? 0),
-          categoriesCount: Number(row.category_count ?? 0),
-        }).score;
-        delete row.properties;
-        delete row.type_version_id;
-        out.push({ ...row, completenessScore });
-      }
-      return out;
-    });
+    const scored = await scoreAssetRows(teamId, rows);
+    const strip = (row: Record<string, unknown>) => {
+      delete row.completenessChecks;
+      return row;
+    };
     if (sort === "completeness") {
       scored.sort((a, b) => Number(a.completenessScore) - Number(b.completenessScore) || String(a.name).localeCompare(String(b.name)));
-      return scored.slice(0, limit);
+      return scored.slice(0, limit).map(strip);
     }
-    return scored;
+    return scored.map(strip);
+  });
+
+  // 团队完整度水位（M67⑦，TechInsights 汇总视图）：count/平均/三档分桶 + 低分清单。
+  // 与 search 同一条打分管线；候选集同界 ≤200（团队资产更多时如实注记，不假装全量）。
+  app.get("/assets/completeness-summary", async (req) => {
+    const auth = requireAuth(req);
+    const query = (req.query ?? {}) as { teamId?: string; lifecycle?: string };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const rows = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200 });
+    const scored = await scoreAssetRows(teamId, rows);
+    const entries = scored.map((r) => ({
+      id: String(r.id),
+      name: String(r.name),
+      score: Number(r.completenessScore ?? 0),
+      missingTitles: ((r.completenessChecks as { title: string; passed: boolean }[] | undefined) ?? [])
+        .filter((c) => !c.passed)
+        .map((c) => c.title),
+    }));
+    const summary = summarizeCompleteness(entries);
+    return {
+      ...summary,
+      sampled: scored.length,
+      note: scored.length >= 200 ? "团队资产超过 200，汇总基于最新登记的前 200 条（与目录低分排序同界）" : "",
+    };
+  });
+
+  // 派生血缘字段物化（M67①，HF base_model）：属性里声明的 base_model 等引用 →
+  // derivedFrom 断言。解析口径保守：名称精确（大小写不敏感）或别名精确；模糊不自动建边。
+  // 建边走既有 createRelationAssertion（domain/range、禁环、重边防护复用）。
+  app.post("/assets/:assetId/lineage/materialize", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const body = parseBody(z.object({ teamId: z.string().uuid() }), req.body);
+    await teamRole(auth.userId, body.teamId);
+    // 事务内返回纯对象，COMMIT 后再 send（避免响应先于提交刷出，见集合快照同款口径）
+    const out = await withTeam(body.teamId, async (client) => {
+      const { rows: arows } = await client.query<{ properties: Record<string, unknown> }>(
+        `SELECT r.properties FROM assets a
+           JOIN LATERAL (SELECT properties FROM asset_revisions
+                          WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1) r ON true
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [body.teamId, assetId]
+      );
+      if (!arows[0]) throw ERR.NOT_FOUND();
+      const refGroups = extractLineageRefs(arows[0].properties);
+      if (refGroups.length === 0) {
+        throw ERR.INVALID("head 属性未声明血缘字段（base_model / baseModel / base_model_ref / derived_from），无可物化内容");
+      }
+      const { rows: rt } = await client.query<{ id: string }>(
+        `SELECT id FROM relation_type_versions WHERE team_id = $1 AND type_key = 'derivedFrom' ORDER BY created_at DESC LIMIT 1`,
+        [body.teamId]
+      );
+      if (!rt[0]) throw ERR.CONFLICT("RELATION_TYPE_MISSING", "团队没有 derivedFrom 关系类型（默认类型未播种）");
+      const results: {
+        field: string; ref: string; status: "linked" | "already" | "unresolved" | "self";
+        targetId?: string; targetName?: string; message: string;
+      }[] = [];
+      let created = 0;
+      for (const group of refGroups) {
+        for (const ref of group.refs) {
+          const { rows: byName } = await client.query<{ id: string; name: string }>(
+            `SELECT id, name FROM assets WHERE team_id = $1 AND lower(name) = lower($2)`,
+            [body.teamId, ref]
+          );
+          let hit = byName[0];
+          let via = "名称";
+          if (!hit) {
+            const { rows: byAlias } = await client.query<{ id: string; name: string }>(
+              `SELECT a.id, a.name FROM asset_aliases al
+                 JOIN assets a ON a.team_id = al.team_id AND a.id = al.asset_id
+                WHERE al.team_id = $1 AND al.alias = lower($2)`,
+              [body.teamId, ref]
+            );
+            hit = byAlias[0];
+            via = "别名";
+          }
+          if (!hit) {
+            results.push({ field: group.field, ref, status: "unresolved", message: "按名称或别名未找到该资产——血缘引用保持文本，登记或改名后可再物化" });
+            continue;
+          }
+          if (hit.id === assetId) {
+            results.push({ field: group.field, ref, status: "self", targetId: hit.id, targetName: hit.name, message: "引用指向资产自身，跳过" });
+            continue;
+          }
+          try {
+            await createRelationAssertion(
+              body.teamId,
+              auth.userId,
+              {
+                relationTypeVersionId: rt[0].id,
+                sourceAssetId: assetId,
+                targetAssetId: hit.id,
+                evidenceNote: `${group.field} 字段物化（${via}命中「${ref}」，M67①）`,
+                confirm: true,
+              },
+              client
+            );
+            created += 1;
+            results.push({ field: group.field, ref, status: "linked", targetId: hit.id, targetName: hit.name, message: `已创建 derivedFrom 断言（${via}命中）` });
+          } catch (err) {
+            if (err instanceof AppError && err.statusCode === 409 && err.code === "DUPLICATE_ASSERTION") {
+              results.push({ field: group.field, ref, status: "already", targetId: hit.id, targetName: hit.name, message: "derivedFrom 断言已存在" });
+              continue;
+            }
+            throw err;
+          }
+        }
+      }
+      return { assetId, created, results };
+    });
+    return reply.code(200).send(out);
+  });
+
+  // 标签沿血缘传播（M67③，Atlas 分类传播 + 治理确认流）：GET 预览 + POST 确认执行。
+  // 两步之间拓扑可能变化——planDigest 不符 409（同 C08 share-check 的 TOCTOU 口径）。
+  app.get("/assets/:assetId/propagate-labels", async (req) => {
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows: src } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [teamId, assetId]);
+      if (!src[0]) throw ERR.NOT_FOUND();
+      const { plan, names, sourceLabels } = await buildPropagationPlan(client, teamId, assetId);
+      const planDigest = createHash("sha256").update(stableStringify({ assetId, plan })).digest("hex").slice(0, 16);
+      return {
+        assetId,
+        planDigest,
+        sourceLabels,
+        relationFamily: "derivedFrom",
+        targets: plan.targets.map((t) => ({ assetId: t.assetId, name: names.get(t.assetId) ?? t.assetId, labelsToAdd: t.labelsToAdd })),
+        notes: plan.notes,
+      };
+    });
+  });
+
+  app.post("/assets/:assetId/propagate-labels", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), confirmPlanDigest: z.string().min(4).max(32) }),
+      req.body
+    );
+    await teamRole(auth.userId, body.teamId);
+    const out = await withTeam(body.teamId, async (client) => {
+      const { rows: src } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [body.teamId, assetId]);
+      if (!src[0]) throw ERR.NOT_FOUND();
+      const { plan } = await buildPropagationPlan(client, body.teamId, assetId);
+      const planDigest = createHash("sha256").update(stableStringify({ assetId, plan })).digest("hex").slice(0, 16);
+      if (planDigest !== body.confirmPlanDigest) {
+        throw ERR.CONFLICT("PROPAGATION_PLAN_CHANGED", "传播计划已过期（预览后血缘或标签发生了变化），请重新预览确认");
+      }
+      if (plan.targets.length === 0) {
+        return { appliedAssets: 0, appliedLabels: 0, notes: plan.notes };
+      }
+      let appliedLabels = 0;
+      for (const t of plan.targets) {
+        for (const label of t.labelsToAdd) {
+          await client.query(
+            `INSERT INTO asset_labels (team_id, asset_id, label) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+            [body.teamId, t.assetId, label]
+          );
+          appliedLabels += 1;
+        }
+      }
+      // 传播改了标签——递增 meta_version，让元数据 ETag 乐观并发能感知（不静默绕过）
+      await client.query(`UPDATE assets SET meta_version = meta_version + 1 WHERE team_id = $1 AND id = $2`, [
+        body.teamId, assetId,
+      ]);
+      return {
+        appliedAssets: plan.targets.length,
+        appliedLabels,
+        notes: [`已把源标签 ${plan.targets.flatMap((t) => t.labelsToAdd).length} 项沿 derivedFrom 下游传播`],
+      };
+    });
+    return reply.code(200).send(out);
   });
 
   // 分面清单（M53，吸收 CKAN facet 思路）：目录筛选下拉的数据源——
@@ -1556,6 +1834,9 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         aliases: aliasRows.map((r) => r.alias),
         usage,
         completeness,
+        // 派生血缘字段提示（M67①，HF base_model）：head 属性里声明的血缘引用——
+        // 展示为可物化提示，不自动建边（物化走 POST /assets/:id/lineage/materialize）
+        lineageRefs: extractLineageRefs(head?.properties ?? {}),
       };
     });
   });

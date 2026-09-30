@@ -2,9 +2,12 @@
 // 人工策展的跨类型资产组：权威榜单 / 新人入门包 / 评审材料包。与自动检索互补——
 // 集合成员是人的判断（含每条备注），机器检索负责发现，集合负责沉淀。
 // 管理权（改名/改描述/删集合）= 创建者或管理员；条目增删改备注 = 全员日常协作（同 Issues）。
+// M67⑤ 只读分享快照（Zenodo/HF snapshot 冻结语义）：深拷贝当前内容 + 128-bit token，
+// GET /share/collections/:token 免登录只读；分享是治理动作 → 管理权同集合管理。
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { q, withTeam } from "../db.js";
+import { randomBytes } from "node:crypto";
+import { q, withTeam, withShareRead } from "../db.js";
 import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
@@ -256,5 +259,112 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
     );
     if (!rowCount) throw ERR.NOT_FOUND();
     return reply.code(200).send({ ok: true });
+  });
+
+  // ---------- 只读分享快照（M67⑤）----------
+  // 冻结当前集合内容（名称/描述/条目元数据/head 内容摘要）+ 签发 token。
+  // 快照不含 teamId/用户 id/制品内容——对外只分享元数据与内容指纹。
+  app.post("/collections/:collectionId/snapshots", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { collectionId } = req.params as { collectionId: string };
+    if (!/^[0-9a-f-]{36}$/.test(collectionId)) throw ERR.NOT_FOUND();
+    const body = parseBody(z.object({ teamId: z.string().uuid() }), req.body);
+    const role = await teamRole(auth.userId, body.teamId);
+    await requireCollectionManagePermission(body.teamId, collectionId, auth.userId, role);
+    // 事务内只返回纯对象，COMMIT 后再 send——reply.send() 在事务回调内调用会在
+    // COMMIT 前刷出响应，紧随的读取会竞态扑空（M67 走查发现，同 meta-share 口径）
+    const out = await withTeam(body.teamId, async (client) => {
+      const { rows: cols } = await client.query<{ name: string; description: string }>(
+        `SELECT name, description FROM asset_collections WHERE team_id = $1 AND id = $2`,
+        [body.teamId, collectionId]
+      );
+      if (!cols[0]) throw ERR.NOT_FOUND();
+      const { rows: items } = await client.query(
+        `SELECT i.note, i.added_at,
+                a.name AS asset_name, a.lifecycle,
+                tv.type_key, tv.version AS type_version,
+                (SELECT r.content_digest FROM asset_revisions r
+                  WHERE r.team_id = a.team_id AND r.asset_id = a.id ORDER BY r.seq DESC LIMIT 1) AS content_digest
+           FROM asset_collection_items i
+           JOIN assets a ON a.team_id = i.team_id AND a.id = i.asset_id
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE i.team_id = $1 AND i.collection_id = $2
+          ORDER BY i.added_at DESC`,
+        [body.teamId, collectionId]
+      );
+      if (items.length > 500) {
+        throw ERR.INVALID(`集合条目 ${items.length} 条超过分享快照上限（500），请先精简集合`);
+      }
+      const payload = {
+        collectionName: cols[0].name,
+        description: cols[0].description,
+        items: items.map((r: Record<string, unknown>) => ({
+          name: r.asset_name,
+          typeKey: r.type_key,
+          typeVersion: r.type_version,
+          lifecycle: r.lifecycle,
+          note: r.note,
+          addedAt: r.added_at,
+          contentDigest: r.content_digest,
+        })),
+      };
+      const snapshotId = newId();
+      const token = randomBytes(16).toString("hex");
+      await client.query(
+        `INSERT INTO asset_collection_snapshots (team_id, id, collection_id, token, collection_name, description, created_by, payload)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [body.teamId, snapshotId, collectionId, token, cols[0].name, cols[0].description, auth.userId, JSON.stringify(payload)]
+      );
+      return {
+        snapshotId,
+        token,
+        shareUrl: `/share/collection/${token}`,
+        itemCount: items.length,
+      };
+    });
+    return reply.code(201).send(out);
+  });
+
+  // 团队内快照清单（管理端：查看历史分享链接）
+  app.get("/collections/:collectionId/snapshots", async (req) => {
+    const auth = requireAuth(req);
+    const { collectionId } = req.params as { collectionId: string };
+    if (!/^[0-9a-f-]{36}$/.test(collectionId)) throw ERR.NOT_FOUND();
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    return withTeam(teamId, async (client) => {
+      const { rows } = await client.query<{ id: string; token: string; item_count: number; created_at: Date }>(
+        `SELECT id, token, jsonb_array_length(payload->'items')::int AS item_count, created_at
+           FROM asset_collection_snapshots
+          WHERE team_id = $1 AND collection_id = $2
+          ORDER BY created_at DESC`,
+        [teamId, collectionId]
+      );
+      return rows.map((r) => ({ snapshotId: r.id, token: r.token, shareUrl: `/share/collection/${r.token}`, itemCount: r.item_count, createdAt: r.created_at }));
+    });
+  });
+}
+
+// 免登录只读分享查看：RLS 走 public_share_read 策略（withShareRead 事务内
+// SET LOCAL app.share_read='on'——只有这一个代码路径能开该通道，其余端点照常被
+// 租户策略拦住）。内容=payload 深拷贝，永不随集合后续变化；不回显 teamId。
+export async function collectionShareRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/share/collections/:token", async (req) => {
+    const { token } = req.params as { token: string };
+    if (!/^[0-9a-f]{32}$/.test(token)) throw ERR.NOT_FOUND();
+    return withShareRead(async (client) => {
+      const { rows } = await client.query<{ collection_name: string; payload: Record<string, unknown>; created_at: Date }>(
+        `SELECT collection_name, payload, created_at FROM asset_collection_snapshots WHERE token = $1`,
+        [token]
+      );
+      if (!rows[0]) throw ERR.NOT_FOUND();
+      return {
+        collectionName: rows[0].collection_name,
+        createdAt: rows[0].created_at,
+        payload: rows[0].payload,
+      };
+    });
   });
 }

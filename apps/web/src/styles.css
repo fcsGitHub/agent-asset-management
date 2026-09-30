@@ -236,6 +236,32 @@ body.pane-dragging iframe, body.pane-dragging .chat-scroll { pointer-events: non
   border-radius: 999px; padding: 1px 8px; font-family: ui-monospace, monospace;
 }
 
+/* 对话区收起细条（M67⑥）：组件保持挂载只换渲染；运行中细条上如实亮灯 */
+.agent-pane-rail {
+  width: 34px; min-width: 34px; align-items: center; gap: 8px;
+  padding: 10px 0;
+}
+.rail-expand {
+  flex: none; width: 26px; height: 26px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+  cursor: pointer; line-height: 1;
+}
+.rail-expand:hover { background: var(--accent-soft); border-color: var(--accent-line); }
+.rail-tab {
+  flex: 1; min-height: 0; width: 100%; cursor: pointer;
+  background: transparent; border: none; color: var(--faint);
+  writing-mode: vertical-rl; text-orientation: mixed;
+  font-size: 10.5px; letter-spacing: 0.14em; font-weight: 650;
+  overflow: hidden; white-space: nowrap;
+}
+.rail-tab:hover { color: var(--ink); }
+.rail-live {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok, #2e6b4f);
+  animation: rail-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rail-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
 .chat-scroll {
   flex: 1; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
   padding: 6px 16px 12px; display: flex; flex-direction: column; gap: 13px;

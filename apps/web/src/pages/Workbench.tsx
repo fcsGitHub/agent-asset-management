@@ -24,6 +24,7 @@ import {
   propertiesToFormValues, schemaToFormSpec,
 } from "@taw/domain/schema-form";
 import { SchemaFields, chainFromTypes, type TypeRow } from "../components/SchemaForm";
+import { formatPropFilters, parsePropFilters } from "@taw/domain/prop-filter";
 
 type ThemeMode = "auto" | "light" | "dark";
 const THEME_LABEL: Record<ThemeMode, string> = { auto: "跟随系统", light: "浅色", dark: "深色" };
@@ -58,7 +59,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number; matched_alias?: string | null }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
 interface TypeInfo {
   id: string; type_key: string; version: string; title: string;
@@ -78,6 +79,7 @@ interface AssetDetail {
   aliases?: string[];
   usage?: { download: number; copy_ref: number; agent_read: number };
   completeness?: { score: number; checks: { key: string; title: string; passed: boolean; detail: string; hint: string; weight: number }[] };
+  lineageRefs?: { field: string; refs: string[] }[];
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
 interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
@@ -306,6 +308,11 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
   // M57 默认 44%→36%（用户反馈对话框过大）；存储键升 v2——旧键里持久化的 44 是
   // 挂载即写造成的"伪用户选择"，不继承，拖动后按新键记忆
   const DEFAULT_PANE_PCT = 36;
+  // 对话区折叠（M67⑥）：收起成细条（组件保持挂载，SSE/输入不断线），状态记忆
+  const [agentCollapsed, setAgentCollapsed] = useState<boolean>(() => localStorage.getItem("taw-agent-collapsed-v1") === "1");
+  useEffect(() => {
+    localStorage.setItem("taw-agent-collapsed-v1", agentCollapsed ? "1" : "0");
+  }, [agentCollapsed]);
   const [panePct, setPanePct] = useState<number>(() => {
     const v = Number(localStorage.getItem("taw-pane-pct-v2"));
     return v >= 22 && v <= 65 ? v : DEFAULT_PANE_PCT;
@@ -900,9 +907,12 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             sessionTitle={sessions.find((s) => s.sessionId === sessionId)?.title}
             onOpenAsset={openAssetFromSearch}
             onRunStateChange={handleRunState}
+            collapsed={agentCollapsed}
+            onToggleCollapse={() => setAgentCollapsed((v) => !v)}
           />
           <div
             className="pane-divider"
+            style={agentCollapsed ? { display: "none" } : undefined}
             role="separator"
             aria-orientation="vertical"
             aria-label="调整对话区宽度"
@@ -1051,6 +1061,9 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   const [newDesc, setNewDesc] = useState("");
   const [msg, setMsg] = useState("");
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
+  // 只读分享快照（M67⑤）：冻结当前内容 + 免登录查看链接
+  const [snapshots, setSnapshots] = useState<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>([]);
+  const [shareMsg, setShareMsg] = useState("");
   const isAdmin = role === "admin";
   const canManage = (d: CollectionDetail) => isAdmin || d.created_by === userId;
 
@@ -1076,10 +1089,15 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   useEffect(() => {
     setDetail(null);
     setNoteDraft({});
+    setSnapshots([]);
+    setShareMsg("");
     if (!project || !selId) return;
     void api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } })
       .then(setDetail)
       .catch((e) => setMsg(e instanceof ApiError ? e.message : "加载集合详情失败"));
+    void api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>(
+      `/collections/${selId}/snapshots`, { query: { teamId: project.teamId } }
+    ).then(setSnapshots).catch(() => setSnapshots([]));
   }, [selId, project?.teamId, project]);
 
   async function createCollection() {
@@ -1154,6 +1172,23 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
     setDetail(await api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } }));
   }
 
+  // 创建只读分享快照（M67⑤）：冻结当前内容签发 token；集合后续增删不影响已分享快照
+  async function createSnapshot() {
+    if (!project || !detail) return;
+    if (!window.confirm(`创建「${detail.name}」的只读分享快照？\n当前 ${detail.items.length} 项内容将被冻结，生成免登录查看链接（集合后续变化不影响快照）。`)) return;
+    try {
+      const res = await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number }>(
+        `/collections/${detail.id}/snapshots`, { method: "POST", body: { teamId: project.teamId } }
+      );
+      setShareMsg(`快照已创建：${res.itemCount} 项，链接 ${window.location.origin}${res.shareUrl}`);
+      setSnapshots(await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>(
+        `/collections/${detail.id}/snapshots`, { query: { teamId: project.teamId } }
+      ));
+    } catch (e) {
+      setShareMsg(e instanceof ApiError ? e.message : "创建快照失败");
+    }
+  }
+
   if (!project) return <div className="state">选择或创建一个项目开始。</div>;
   return (
     <>
@@ -1223,12 +1258,27 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
                   )}
                   {canManage(detail) && (
                     <>
+                      <button onClick={() => void createSnapshot()} title="冻结当前内容生成免登录只读链接（Zenodo 快照语义；集合后续变化不影响已分享快照）">分享快照…</button>
                       <button onClick={() => void renameCollection()} title="改名（创建者或管理员）">改名…</button>
                       <button style={{ color: "var(--red)" }} onClick={() => void deleteCollection()} title="删除集合（创建者或管理员）">删除集合</button>
                     </>
                   )}
                 </span>
               </h3>
+              {shareMsg && <div className="ok-text" style={{ margin: "4px 0 6px", fontSize: 12.5 }}>{shareMsg}</div>}
+              {snapshots.length > 0 && (
+                <div style={{ fontSize: 12.5, margin: "4px 0 8px", color: "var(--muted, #666)" }}>
+                  分享快照（{snapshots.length}）：
+                  {snapshots.map((s) => (
+                    <span key={s.snapshotId} style={{ marginRight: 12 }}>
+                      <a className="ref-chip" href={s.shareUrl} target="_blank" rel="noreferrer"
+                        title={`只读快照 · ${s.itemCount} 项 · ${new Date(s.createdAt).toLocaleString()}`}>
+                        🔗 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项）
+                      </a>
+                    </span>
+                  ))}
+                </div>
+              )}
               {detail.description && <p style={{ margin: "4px 0 10px", opacity: 0.8 }}>{detail.description}</p>}
               {detail.items.length === 0 ? (
                 <div className="state">集合为空——在资产详情页点「加入集合」，或对 Agent 说「把 X 加入集合 {detail.name}」。</div>
@@ -1344,6 +1394,10 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   const [family, setFamily] = useState(initialParams.get("family") ?? "");
   const [label, setLabel] = useState(initialParams.get("label") ?? "");
   const [sort, setSort] = useState(initialParams.get("sort") === "refs" ? "refs" : "newest");
+  // 属性自定义筛选（M67②，OpenMetadata 任意属性过滤）：输入框空格分隔多项 key=value；
+  // 随其余筛选参数一并 URL 化（?view=assets&prop=owner=alice）
+  const [propFilter, setPropFilter] = useState(() => formatPropFilters(parsePropFilters(initialParams.getAll("prop")).filters));
+  const propFilters = useMemo(() => parsePropFilters(propFilter).filters, [propFilter]);
 
   useEffect(() => {
     const sp = new URLSearchParams();
@@ -1352,10 +1406,11 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     if (type) sp.set("type", type);
     if (family) sp.set("family", family);
     if (label) sp.set("label", label);
+    for (const f of propFilters) sp.append("prop", `${f.key}=${f.value}`);
     if (lifecycle !== "active") sp.set("lifecycle", lifecycle);
     if (sort !== "newest") sp.set("sort", sort);
     window.history.replaceState(null, "", `?${sp.toString()}`);
-  }, [keyword, type, family, label, lifecycle, sort]);
+  }, [keyword, type, family, label, lifecycle, sort, propFilters]);
 
   // 分面清单（M53）：类型/标签下拉与家族 chips 的真实数据源
   useEffect(() => {
@@ -1369,18 +1424,20 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   useEffect(() => {
     setAssets(null);
     if (!project) return;
-    void api<AssetRow[]>("/assets/search", {
-      query: { teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort },
-    })
+    const query: Record<string, string | string[]> = {
+      teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort,
+    };
+    if (propFilters.length > 0) query.prop = propFilters.map((f) => `${f.key}=${f.value}`);
+    void api<AssetRow[]>("/assets/search", { query })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
-  }, [project, keyword, lifecycle, type, family, label, sort]);
+  }, [project, keyword, lifecycle, type, family, label, sort, propFilters]);
 
   if (!project) return <div className="state">先选择项目。</div>;
   if (error) return <div className="state error">{error}</div>;
   const familyActive = (prefix: string) => family === prefix && !type;
   const clearAll = () => { setType(""); setFamily(""); setLabel(""); };
-  const hasFilter = !!(type || family || label);
+  const hasFilter = !!(type || family || label || propFilters.length > 0);
   return (
     <div className="card">
       <h3>
@@ -1389,6 +1446,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           登记新资产
         </button>
       </h3>
+      <CompletenessWatermark teamId={project.teamId} onOpen={onOpen} />
       <div className="facet-row" role="group" aria-label="按类别快筛">
         <button
           className={`facet-chip${!hasFilter ? " active" : ""}`}
@@ -1412,6 +1470,14 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
       </div>
       <div className="field field-row">
         <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+        <input
+          placeholder="属性筛选，如 owner=alice（多项空格分隔）"
+          aria-label="按属性筛选"
+          title="按 head 修订属性等值过滤（OpenMetadata 任意属性筛选）；多项空格分隔，随 URL 可分享"
+          value={propFilter}
+          onChange={(e) => setPropFilter(e.target.value)}
+          style={{ maxWidth: 260 }}
+        />
         <select
           aria-label="按类型过滤"
           value={type}
@@ -1504,6 +1570,106 @@ interface CRDetail {
   comments: CRComment[];
 }
 interface ChannelHead { asset_id: string; asset_name: string; revision_id: string; revision_seq: number; version_label: string | null; updated_at: string }
+
+/** 详情页「派生血缘」卡（M67①，HF model card base_model）：属性里声明的血缘引用展示为
+ *  可物化提示——一键把 base_model 等引用物化为 derivedFrom 断言（保守解析：名称/别名精确命中；
+ *  未命中如实展示，不自动模糊建边）。 */
+function LineageCard({ teamId, assetId, refs, onDone }: {
+  teamId: string; assetId: string; refs: { field: string; refs: string[] }[]; onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{ created: number; results: { field: string; ref: string; status: string; targetName?: string; message: string }[] } | null>(null);
+  async function materialize() {
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      const res = await api<{ created: number; results: { field: string; ref: string; status: string; targetName?: string; message: string }[] }>(
+        `/assets/${assetId}/lineage/materialize`, { method: "POST", body: { teamId } }
+      );
+      setResult(res);
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "物化失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  const statusIcon: Record<string, string> = { linked: "✅", already: "ℹ️", unresolved: "⚠️", self: "ℹ️" };
+  return (
+    <div className="card" style={{ marginTop: 10, padding: "10px 14px" }}>
+      <h4 style={{ margin: 0 }}>
+        派生血缘（属性声明）
+        <button className="secondary" style={{ marginLeft: 10, padding: "2px 10px" }} disabled={busy} onClick={() => void materialize()}
+          title="把属性中声明的血缘引用物化为 derivedFrom 关联断言（名称/别名精确命中才建边；建边走既有 domain/range 与禁环校验）">
+          {busy ? "物化中…" : "物化为 derivedFrom 关联"}
+        </button>
+        {error && <span className="error-text" style={{ marginLeft: 8 }}>{error}</span>}
+      </h4>
+      <div style={{ fontSize: 12.5, marginTop: 6, color: "var(--muted, #666)" }}>
+        {refs.map((g) => (
+          <span key={g.field} style={{ marginRight: 14 }}>
+            <code>{g.field}</code>：{g.refs.map((r) => `「${r}」`).join(" ")}
+          </span>
+        ))}
+      </div>
+      {result && (
+        <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12.5 }}>
+          {result.results.map((r, i) => (
+            <li key={`${r.field}-${r.ref}-${i}`}>
+              {statusIcon[r.status] ?? "·"} <code>{r.field}</code>=「{r.ref}」{r.targetName ? ` → ${r.targetName}` : ""} — {r.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** 「沿血缘传播标签」按钮（M67③，Atlas 分类传播 + 治理确认流）：预览（planDigest）→
+ *  弹窗确认下游与将新增标签 → 确认执行；预览与执行之间拓扑变化会被服务端 409 拦下。 */
+function PropagateLabelsBtn({ teamId, assetId, onDone }: { teamId: string; assetId: string; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  async function run() {
+    setBusy(true);
+    setMsg("");
+    try {
+      const preview = await api<{
+        planDigest: string; sourceLabels: string[];
+        targets: { assetId: string; name: string; labelsToAdd: string[] }[];
+        notes: string[];
+      }>(`/assets/${assetId}/propagate-labels`, { query: { teamId } });
+      if (preview.targets.length === 0) {
+        setMsg(preview.notes[0] ?? "无可传播对象");
+        return;
+      }
+      const lines = preview.targets.map((t) => `「${t.name}」+ ${t.labelsToAdd.join(" / ")}`).join("\n");
+      if (!window.confirm(`将沿 derivedFrom 血缘把本资产标签（${preview.sourceLabels.join(" / ")}）传播到 ${preview.targets.length} 个下游资产：\n\n${lines}\n\n确认执行？（中间节点自己加的标签不级联；执行后各资产标签可在其详情页管理）`)) {
+        return;
+      }
+      const res = await api<{ appliedAssets: number; appliedLabels: number }>(
+        `/assets/${assetId}/propagate-labels`,
+        { method: "POST", body: { teamId, confirmPlanDigest: preview.planDigest } }
+      );
+      setMsg(`已传播 ${res.appliedLabels} 项标签到 ${res.appliedAssets} 个下游资产`);
+      onDone();
+    } catch (e) {
+      setMsg(e instanceof ApiError ? e.message : "传播失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <button onClick={() => void run()} disabled={busy} title="把本资产当前标签沿 derivedFrom 血缘传播到全部下游（Atlas 分类传播思想；两步确认，预览摘要不符会被服务端拒绝）">
+        {busy ? "传播中…" : "沿血缘传播标签…"}
+      </button>
+      {msg && <span className="ok-text" style={{ alignSelf: "center" }}>{msg}</span>}
+    </>
+  );
+}
 
 function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpenAsset }: { teamId: string; projectId: string; assetId: string; role: string; onOpenGraph?: (assetId: string) => void; onOpenAsset?: (assetId: string) => void }) {
   const [detail, setDetail] = useState<AssetDetail | null>(null);
@@ -1685,11 +1851,17 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
             ))}
         </div>
         {detail.completeness && <CompletenessCard report={detail.completeness} />}
+        {(detail.lineageRefs ?? []).length > 0 && (
+          <LineageCard teamId={teamId} assetId={detail.id} refs={detail.lineageRefs!} onDone={() => void reload()} />
+        )}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           {archived ? (
             <button onClick={() => void changeLifecycle("restore")}>恢复资产</button>
           ) : (
             <button onClick={() => void changeLifecycle("archive")}>归档资产…</button>
+          )}
+          {!archived && detail.labels.length > 0 && (
+            <PropagateLabelsBtn teamId={teamId} assetId={detail.id} onDone={() => void reload()} />
           )}
           {onOpenGraph && (
             <button onClick={() => onOpenGraph(detail.id)} title="在关系图谱中以该资产为中心查看">
@@ -1862,6 +2034,59 @@ function CompletenessCard({ report }: { report: NonNullable<AssetDetail["complet
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** 目录完整度水位卡（M67⑦，Backstage TechInsights 团队视图）：
+ *  平均分 + 三档分桶（与详情卡同阈值），低分清单（<60 升序）可点开直达补元数据。 */
+interface CompletenessSummaryView {
+  count: number; average: number;
+  buckets: { green: number; yellow: number; red: number };
+  low: { id: string; name: string; score: number; missingTitles: string[] }[];
+  lowThreshold: number; sampled: number; note: string;
+}
+function CompletenessWatermark({ teamId, onOpen }: { teamId: string; onOpen: (id: string) => void }) {
+  const [summary, setSummary] = useState<CompletenessSummaryView | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    setSummary(null);
+    void api<CompletenessSummaryView>("/assets/completeness-summary", { query: { teamId } })
+      .then(setSummary)
+      .catch(() => setSummary(null));
+  }, [teamId]);
+  if (!summary || summary.count === 0) return null;
+  const scoreColor = (n: number) => (n >= 80 ? "#2e6b4f" : n >= 50 ? "#8a6d1a" : "#a33a3a");
+  return (
+    <div style={{ margin: "8px 0 4px", fontSize: 12.5, color: "var(--muted, #666)" }}>
+      <span style={{ fontWeight: 650, color: "var(--ink, inherit)" }}>完整度水位</span>{" "}
+      平均 <strong style={{ color: scoreColor(summary.average) }}>{summary.average}</strong> 分 ·{" "}
+      <span title="80+ 分">🟢 {summary.buckets.green}</span>{" "}
+      <span title="50-79 分">🟡 {summary.buckets.yellow}</span>{" "}
+      <span title="<50 分">🔴 {summary.buckets.red}</span>{" "}
+      （共 {summary.count} 项）
+      {summary.low.length > 0 && (
+        <button
+          className="secondary"
+          style={{ marginLeft: 8, padding: "1px 8px", fontSize: 12 }}
+          onClick={() => setOpen((v) => !v)}
+          title={`${summary.lowThreshold} 分以下的资产，按分数升序——点名称直达详情补元数据`}
+        >
+          {open ? "收起低分清单" : `低分清单（${summary.low.length}）`}
+        </button>
+      )}
+      {summary.note && <span style={{ marginLeft: 8, opacity: 0.75 }}>({summary.note})</span>}
+      {open && (
+        <ul style={{ margin: "6px 0 0", padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 4 }}>
+          {summary.low.map((e) => (
+            <li key={e.id} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+              <span className="badge" style={{ background: scoreColor(e.score), color: "#fff", minWidth: 34, textAlign: "center" }}>{e.score}</span>
+              <button className="md-asset-link" onClick={() => onOpen(e.id)}>{e.name}</button>
+              <span style={{ opacity: 0.75 }}>缺：{e.missingTitles.join("、") || "—"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
