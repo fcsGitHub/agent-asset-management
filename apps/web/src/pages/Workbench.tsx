@@ -59,7 +59,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
-interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number; matched_alias?: string | null }
+interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number; matched_alias?: string | null; pinned?: boolean }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
 interface TypeInfo {
   id: string; type_key: string; version: string; title: string;
@@ -80,6 +80,7 @@ interface AssetDetail {
   usage?: { download: number; copy_ref: number; agent_read: number };
   completeness?: { score: number; checks: { key: string; title: string; passed: boolean; detail: string; hint: string; weight: number }[] };
   lineageRefs?: { field: string; refs: string[] }[];
+  pinned?: boolean;
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
 interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
@@ -1061,8 +1062,8 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   const [newDesc, setNewDesc] = useState("");
   const [msg, setMsg] = useState("");
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
-  // 只读分享快照（M67⑤）：冻结当前内容 + 免登录查看链接；M68① 吊销（泄漏治理出口）
-  const [snapshots, setSnapshots] = useState<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null }[]>([]);
+  // 只读分享快照（M67⑤）：冻结当前内容 + 免登录查看链接；M68① 吊销；M69① 有效期
+  const [snapshots, setSnapshots] = useState<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null; expiresAt?: string | null; expired?: boolean }[]>([]);
   const [shareMsg, setShareMsg] = useState("");
   const isAdmin = role === "admin";
   const canManage = (d: CollectionDetail) => isAdmin || d.created_by === userId;
@@ -1172,15 +1173,24 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
     setDetail(await api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } }));
   }
 
-  // 创建只读分享快照（M67⑤）：冻结当前内容签发 token；集合后续增删不影响已分享快照
+  // 创建只读分享快照（M67⑤）：冻结当前内容签发 token；集合后续增删不影响已分享快照。
+  // M69①：可选有效期（天）——到期公开链接自动失效（GitHub PAT 过期锚点），留空=永久
   async function createSnapshot() {
     if (!project || !detail) return;
-    if (!window.confirm(`创建「${detail.name}」的只读分享快照？\n当前 ${detail.items.length} 项内容将被冻结，生成免登录查看链接（集合后续变化不影响快照）。`)) return;
+    const daysRaw = window.prompt(`创建「${detail.name}」的只读分享快照。\n有效期（天，留空 = 永久有效；到期后公开链接自动失效）：`, "30");
+    if (daysRaw === null) return;
+    const days = daysRaw.trim() === "" ? null : Number(daysRaw.trim());
+    if (days !== null && (!Number.isFinite(days) || days <= 0)) {
+      setShareMsg("有效期必须是正数天数（或留空表示永久）。");
+      return;
+    }
+    if (!window.confirm(`当前 ${detail.items.length} 项内容将被冻结，生成免登录查看链接（集合后续变化不影响快照${days ? `；有效期 ${days} 天` : "；永久有效"}）。`)) return;
+    const expiresAt = days ? new Date(Date.now() + days * 86400_000).toISOString() : undefined;
     try {
       const res = await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number }>(
-        `/collections/${detail.id}/snapshots`, { method: "POST", body: { teamId: project.teamId } }
+        `/collections/${detail.id}/snapshots`, { method: "POST", body: { teamId: project.teamId, expiresAt } }
       );
-      setShareMsg(`快照已创建：${res.itemCount} 项，链接 ${window.location.origin}${res.shareUrl}`);
+      setShareMsg(`快照已创建：${res.itemCount} 项，链接 ${window.location.origin}${res.shareUrl}${days ? `（有效期 ${days} 天）` : "（永久有效）"}`);
       await reloadSnapshots();
     } catch (e) {
       setShareMsg(e instanceof ApiError ? e.message : "创建快照失败");
@@ -1190,7 +1200,7 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   async function reloadSnapshots() {
     if (!project || !selId) return;
     try {
-      setSnapshots(await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null }[]>(
+      setSnapshots(await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null; expiresAt?: string | null; expired?: boolean }[]>(
         `/collections/${selId}/snapshots`, { query: { teamId: project.teamId } }
       ));
     } catch {
@@ -1291,17 +1301,23 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
               {snapshots.length > 0 && (
                 <div style={{ fontSize: 12.5, margin: "4px 0 8px", color: "var(--muted, #666)" }}>
                   分享快照（{snapshots.length}）：
-                  {snapshots.map((s) => (
+                  {snapshots.map((s) => {
+                    const expired = s.expired || (s.expiresAt ? new Date(s.expiresAt).getTime() <= Date.now() : false);
+                    return (
                     <span key={s.snapshotId} style={{ marginRight: 12 }}>
                       {s.revokedAt ? (
                         <span className="chip-dim" title={`已吊销于 ${new Date(s.revokedAt).toLocaleString()}——链接不再有效，内容仅团队内可查`}>
                           🚫 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项 · 已吊销）
                         </span>
+                      ) : expired ? (
+                        <span className="chip-dim" title={`已过期（有效期至 ${s.expiresAt ? new Date(s.expiresAt).toLocaleString() : ""}）——公开链接自动失效，内容仅团队内可查`}>
+                          ⏰ {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项 · 已过期）
+                        </span>
                       ) : (
                         <>
                           <a className="ref-chip" href={s.shareUrl} target="_blank" rel="noreferrer"
-                            title={`只读快照 · ${s.itemCount} 项 · ${new Date(s.createdAt).toLocaleString()}`}>
-                            🔗 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项）
+                            title={`只读快照 · ${s.itemCount} 项 · ${new Date(s.createdAt).toLocaleString()}${s.expiresAt ? ` · 有效期至 ${new Date(s.expiresAt).toLocaleString()}` : " · 永久有效"}`}>
+                            🔗 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项{s.expiresAt ? ` · ${new Date(s.expiresAt).toLocaleDateString()} 到期` : ""}）
                           </a>
                           {canManage(detail) && (
                             <button className="secondary" style={{ marginLeft: 4, padding: "0 6px", fontSize: 11.5 }}
@@ -1313,7 +1329,8 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
                         </>
                       )}
                     </span>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
               {detail.description && <p style={{ margin: "4px 0 10px", opacity: 0.8 }}>{detail.description}</p>}
@@ -1435,6 +1452,8 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   // 随其余筛选参数一并 URL 化（?view=assets&prop=owner=alice）
   const [propFilter, setPropFilter] = useState(() => formatPropFilters(parsePropFilters(initialParams.getAll("prop")).filters));
   const propFilters = useMemo(() => parsePropFilters(propFilter).filters, [propFilter]);
+  // 个人收藏（M69③）：只看收藏开关随 URL 化（pinned=1）
+  const [pinnedOnly, setPinnedOnly] = useState(initialParams.get("pinned") === "1");
 
   useEffect(() => {
     const sp = new URLSearchParams();
@@ -1444,10 +1463,11 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     if (family) sp.set("family", family);
     if (label) sp.set("label", label);
     for (const f of propFilters) sp.append("prop", `${f.key}${f.op}${f.value}`);
+    if (pinnedOnly) sp.set("pinned", "1");
     if (lifecycle !== "active") sp.set("lifecycle", lifecycle);
     if (sort !== "newest") sp.set("sort", sort);
     window.history.replaceState(null, "", `?${sp.toString()}`);
-  }, [keyword, type, family, label, lifecycle, sort, propFilters]);
+  }, [keyword, type, family, label, lifecycle, sort, propFilters, pinnedOnly]);
 
   // 分面清单（M53）：类型/标签下拉与家族 chips 的真实数据源
   useEffect(() => {
@@ -1465,16 +1485,45 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
       teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort,
     };
     if (propFilters.length > 0) query.prop = propFilters.map((f) => `${f.key}${f.op}${f.value}`);
+    if (pinnedOnly) query.pinned = "true";
     void api<AssetRow[]>("/assets/search", { query })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
-  }, [project, keyword, lifecycle, type, family, label, sort, propFilters]);
+  }, [project, keyword, lifecycle, type, family, label, sort, propFilters, pinnedOnly]);
+
+  // 收藏切换（M69③）：局部更新行，不整页重载
+  async function togglePin(a: AssetRow) {
+    if (!project) return;
+    try {
+      if (a.pinned) {
+        await api(`/assets/${a.id}/pin`, { method: "DELETE", query: { teamId: project.teamId } });
+      } else {
+        await api(`/assets/${a.id}/pin`, { method: "POST", body: { teamId: project.teamId } });
+      }
+      setAssets((prev) => (prev ? prev.map((r) => (r.id === a.id ? { ...r, pinned: !r.pinned } : r)) : prev));
+    } catch {
+      /* 切换失败保持原状 */
+    }
+  }
+
+  // 清单导出（M69②）：与目录同一套过滤参数直连导出端点（导出动作进团队动态）
+  const exportHref = (format: "csv" | "json") => {
+    const sp = new URLSearchParams({ teamId: project!.teamId, format, lifecycle });
+    if (keyword) sp.set("q", keyword);
+    if (type) sp.set("type", type);
+    if (family) sp.set("typePrefix", family);
+    if (label) sp.set("label", label);
+    for (const f of propFilters) sp.append("prop", `${f.key}${f.op}${f.value}`);
+    if (pinnedOnly) sp.set("pinned", "true");
+    if (sort !== "newest") sp.set("sort", sort);
+    return `/api/v1/assets/export?${sp.toString()}`;
+  };
 
   if (!project) return <div className="state">先选择项目。</div>;
   if (error) return <div className="state error">{error}</div>;
   const familyActive = (prefix: string) => family === prefix && !type;
   const clearAll = () => { setType(""); setFamily(""); setLabel(""); };
-  const hasFilter = !!(type || family || label || propFilters.length > 0);
+  const hasFilter = !!(type || family || label || propFilters.length > 0 || pinnedOnly);
   return (
     <div className="card">
       <h3>
@@ -1482,6 +1531,16 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
         <button className="secondary" style={{ marginLeft: 12 }} onClick={onRegister}>
           登记新资产
         </button>
+        <span style={{ float: "right", display: "flex", gap: 6 }}>
+          <a className="ref-chip" href={exportHref("csv")} download
+            title="把当前筛选结果导出为 CSV（RFC 4180 + BOM；导出动作进团队动态；属性明细不下发，与目录同可见面）">
+            ⬇ 导出 CSV
+          </a>
+          <a className="ref-chip" href={exportHref("json")} download
+            title="把当前筛选结果导出为 JSON（结构化清单；导出动作进团队动态）">
+            ⬇ 导出 JSON
+          </a>
+        </span>
       </h3>
       <CompletenessWatermark teamId={project.teamId} onOpen={onOpen} />
       <div className="facet-row" role="group" aria-label="按类别快筛">
@@ -1543,6 +1602,14 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <option value="usage">最常使用</option>
           <option value="completeness">完整度（低分优先）</option>
         </select>
+        <button
+          className={`facet-chip${pinnedOnly ? " active" : ""}`}
+          style={{ flex: "none" }}
+          onClick={() => setPinnedOnly((v) => !v)}
+          title="只看我收藏（★）的资产——收藏随个人账号，他人不可见（GitHub stars 思想）"
+        >
+          ★ 只看收藏
+        </button>
       </div>
       {assets === null ? (
         <div className="state">加载中…</div>
@@ -1568,7 +1635,17 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           <tbody>
             {assets.map((a) => (
               <tr key={a.id} onClick={() => onOpen(a.id)}>
-                <td>{a.name}{a.has_artifacts && <span title="当前修订含制品文件，点开详情可下载" style={{ marginLeft: 6 }}>📎</span>}</td>
+                <td>
+                  <button
+                    aria-label={a.pinned ? `取消收藏 ${a.name}` : `收藏 ${a.name}`}
+                    title={a.pinned ? "取消收藏（个人视角，他人不可见）" : "收藏：常用资产一键可达（个人视角，他人不可见）"}
+                    style={{ border: "none", background: "transparent", cursor: "pointer", padding: "0 4px 0 0", color: a.pinned ? "#d9a62e" : "var(--faint, #999)", fontSize: 14 }}
+                    onClick={(e) => { e.stopPropagation(); void togglePin(a); }}
+                  >
+                    {a.pinned ? "★" : "☆"}
+                  </button>
+                  {a.name}{a.has_artifacts && <span title="当前修订含制品文件，点开详情可下载" style={{ marginLeft: 6 }}>📎</span>}
+                </td>
                 <td><span className="badge">{a.type_key}</span></td>
                 <td>{a.type_version}</td>
                 <td>
@@ -1704,6 +1781,36 @@ function PropagateLabelsBtn({ teamId, assetId, onDone }: { teamId: string; asset
         {busy ? "传播中…" : "沿血缘传播标签…"}
       </button>
       {msg && <span className="ok-text" style={{ alignSelf: "center" }}>{msg}</span>}
+    </>
+  );
+}
+
+/** 详情页收藏按钮（M69③）：乐观切换，失败回滚如实提示 */
+function PinDetailBtn({ teamId, assetId, initialPinned }: { teamId: string; assetId: string; initialPinned: boolean }) {
+  const [pinned, setPinned] = useState(initialPinned);
+  const [error, setError] = useState("");
+  async function toggle() {
+    const next = !pinned;
+    setPinned(next);
+    setError("");
+    try {
+      if (next) await api(`/assets/${assetId}/pin`, { method: "POST", body: { teamId } });
+      else await api(`/assets/${assetId}/pin`, { method: "DELETE", query: { teamId } });
+    } catch (e) {
+      setPinned(!next);
+      setError(e instanceof ApiError ? e.message : "操作失败");
+    }
+  }
+  return (
+    <>
+      <button
+        onClick={() => void toggle()}
+        title={pinned ? "取消收藏（个人视角，他人不可见）" : "收藏：常用资产一键可达（个人视角，他人不可见）"}
+        style={{ color: pinned ? "#d9a62e" : "inherit" }}
+      >
+        {pinned ? "★ 已收藏" : `☆ 收藏`}
+      </button>
+      {error && <span className="error-text" style={{ alignSelf: "center" }}>{error}</span>}
     </>
   );
 }
@@ -1907,6 +2014,7 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           )}
           <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} teamId={teamId} assetId={detail.id} />
           <BibTeXBtn teamId={teamId} assetId={detail.id} />
+          <PinDetailBtn teamId={teamId} assetId={detail.id} initialPinned={detail.pinned === true} />
           {aliasMsg && <span className="error-text" style={{ alignSelf: "center" }}>{aliasMsg}</span>}
           {lifecycleMsg && <span className="ok-text" style={{ alignSelf: "center" }}>{lifecycleMsg}</span>}
         </div>

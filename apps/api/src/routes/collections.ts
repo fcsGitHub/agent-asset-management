@@ -269,7 +269,17 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(req);
     const { collectionId } = req.params as { collectionId: string };
     if (!/^[0-9a-f-]{36}$/.test(collectionId)) throw ERR.NOT_FOUND();
-    const body = parseBody(z.object({ teamId: z.string().uuid() }), req.body);
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), expiresAt: z.string().max(40).optional() }),
+      req.body
+    );
+    // 有效期（M69①，GitHub PAT 过期锚点）：可选 ISO 时间；读时比对（过期 → 公开 410），
+    // 不加定时清理（需调度基建）。留空=永久。
+    let expiresAt: Date | null = null;
+    if (body.expiresAt !== undefined && body.expiresAt !== "") {
+      expiresAt = new Date(body.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) throw ERR.INVALID("expiresAt 必须是合法的 ISO 时间");
+    }
     const role = await teamRole(auth.userId, body.teamId);
     await requireCollectionManagePermission(body.teamId, collectionId, auth.userId, role);
     // 事务内只返回纯对象，COMMIT 后再 send——reply.send() 在事务回调内调用会在
@@ -312,21 +322,22 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
       const snapshotId = newId();
       const token = randomBytes(16).toString("hex");
       await client.query(
-        `INSERT INTO asset_collection_snapshots (team_id, id, collection_id, token, collection_name, description, created_by, payload)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [body.teamId, snapshotId, collectionId, token, cols[0].name, cols[0].description, auth.userId, JSON.stringify(payload)]
+        `INSERT INTO asset_collection_snapshots (team_id, id, collection_id, token, collection_name, description, created_by, payload, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [body.teamId, snapshotId, collectionId, token, cols[0].name, cols[0].description, auth.userId, JSON.stringify(payload), expiresAt]
       );
       // 治理动作进团队动态（M68③）：audit_events append-only，动态流直接读
       await client.query(
         `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
          VALUES ($1,$2,'collection.snapshot_create','collection',$3,$4,$5)`,
-        [body.teamId, auth.userId, collectionId, req.id, JSON.stringify({ snapshotId, token, itemCount: items.length })]
+        [body.teamId, auth.userId, collectionId, req.id, JSON.stringify({ snapshotId, token, itemCount: items.length, expiresAt: expiresAt?.toISOString() ?? null })]
       );
       return {
         snapshotId,
         token,
         shareUrl: `/share/collection/${token}`,
         itemCount: items.length,
+        expiresAt: expiresAt?.toISOString() ?? null,
       };
     });
     return reply.code(201).send(out);
@@ -370,8 +381,8 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     return withTeam(teamId, async (client) => {
-      const { rows } = await client.query<{ id: string; token: string; item_count: number; created_at: Date; revoked_at: Date | null }>(
-        `SELECT id, token, jsonb_array_length(payload->'items')::int AS item_count, created_at, revoked_at
+      const { rows } = await client.query<{ id: string; token: string; item_count: number; created_at: Date; revoked_at: Date | null; expires_at: Date | null }>(
+        `SELECT id, token, jsonb_array_length(payload->'items')::int AS item_count, created_at, revoked_at, expires_at
            FROM asset_collection_snapshots
           WHERE team_id = $1 AND collection_id = $2
           ORDER BY created_at DESC`,
@@ -380,6 +391,7 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
       return rows.map((r) => ({
         snapshotId: r.id, token: r.token, shareUrl: `/share/collection/${r.token}`,
         itemCount: r.item_count, createdAt: r.created_at, revokedAt: r.revoked_at,
+        expiresAt: r.expires_at, expired: r.expires_at ? r.expires_at.getTime() <= Date.now() : false,
       }));
     });
   });
@@ -393,8 +405,10 @@ export async function collectionShareRoutes(app: FastifyInstance): Promise<void>
     const { token } = req.params as { token: string };
     if (!/^[0-9a-f]{32}$/.test(token)) throw ERR.NOT_FOUND();
     return withShareRead(async (client) => {
-      const { rows } = await client.query<{ collection_name: string; payload: Record<string, unknown>; created_at: Date; revoked_at: Date | null }>(
-        `SELECT collection_name, payload, created_at, revoked_at FROM asset_collection_snapshots WHERE token = $1`,
+      const { rows } = await client.query<{ collection_name: string; payload: Record<string, unknown>; created_at: Date; revoked_at: Date | null; expires_at: Date | null; expired: boolean }>(
+        `SELECT collection_name, payload, created_at, revoked_at, expires_at,
+                (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+           FROM asset_collection_snapshots WHERE token = $1`,
         [token]
       );
       if (!rows[0]) throw ERR.NOT_FOUND();
@@ -402,9 +416,14 @@ export async function collectionShareRoutes(app: FastifyInstance): Promise<void>
       if (rows[0].revoked_at) {
         throw new AppError("SHARE_REVOKED", 410, "该分享快照已被吊销，链接不再有效");
       }
+      // 已过期 → 410（读时比对，M69①；不加定时清理——需要调度基建）
+      if (rows[0].expired) {
+        throw new AppError("SHARE_EXPIRED", 410, "该分享快照已过有效期，链接不再有效");
+      }
       return {
         collectionName: rows[0].collection_name,
         createdAt: rows[0].created_at,
+        expiresAt: rows[0].expires_at,
         payload: rows[0].payload,
       };
     });

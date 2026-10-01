@@ -229,8 +229,9 @@ export async function createRelationAssertion(
   return { relationId: id, status };
 }
 
-/** 目录行查询（M67 抽共享）：search 与 completeness-summary 共用同一条 SQL 与过滤语义。
- *  propFilters 逐项 `r.properties->>$k = $v`（->> 右参可参数化，无注入面；文本等值）。 */
+/** 目录行查询（M67 抽共享）：search / completeness-summary / export 共用同一条 SQL 与过滤语义。
+ *  propFilters 逐项 `r.properties->>$k = $v`（->> 右参可参数化，无注入面；文本等值）。
+ *  userId 存在时行附 pinned（当前用户视角，M69③）且 pinnedOnly 可过滤「我的收藏」。 */
 async function queryAssetRows(
   teamId: string,
   opts: {
@@ -239,6 +240,8 @@ async function queryAssetRows(
     propFilters: PropFilter[];
     sort: "newest" | "refs" | "usage" | "completeness";
     limit: number;
+    userId?: string;
+    pinnedOnly?: boolean;
   }
 ): Promise<Record<string, unknown>[]> {
   const params: unknown[] = [
@@ -259,6 +262,13 @@ async function queryAssetRows(
       propClause += ` AND CASE WHEN ${textExpr} ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (${textExpr})::numeric ELSE NULL END ${cmp} $${v}::numeric\n`;
     }
   }
+  let pinExpr = "false";
+  let pinClause = "";
+  if (opts.userId) {
+    const u = params.push(opts.userId);
+    pinExpr = `EXISTS (SELECT 1 FROM user_asset_pins up WHERE up.team_id = a.team_id AND up.asset_id = a.id AND up.user_id = $${u})`;
+    if (opts.pinnedOnly) pinClause = ` AND ${pinExpr}`;
+  }
   return withTeam(teamId, async (client) => {
     const result = await client.query(
       `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
@@ -266,6 +276,7 @@ async function queryAssetRows(
               (SELECT al.alias FROM asset_aliases al
                 WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
                 ORDER BY al.alias LIMIT 1) AS matched_alias,
+              ${pinExpr} AS pinned,
               EXISTS (
                 SELECT 1 FROM revision_artifacts ra
                  WHERE ra.team_id = a.team_id AND ra.revision_id = r.id
@@ -320,7 +331,7 @@ async function queryAssetRows(
                  WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $5
               ))
           AND ($6 = '' OR tv.type_key LIKE $6 || '%')
-${propClause}        ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
+${propClause}${pinClause}        ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
       params
     );
     return result.rows as Record<string, unknown>[];
@@ -1309,7 +1320,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
       teamId?: string; q?: string; type?: string; label?: string; limit?: string; lifecycle?: string; typePrefix?: string; sort?: string;
-      prop?: string | string[];
+      prop?: string | string[]; pinned?: string;
     };
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
@@ -1326,6 +1337,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const rows = await queryAssetRows(teamId, {
       q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", typePrefix: query.typePrefix ?? "",
       lifecycle, propFilters, sort, limit: sort === "completeness" ? 200 : limit,
+      userId: auth.userId, pinnedOnly: query.pinned === "true" || query.pinned === "1",
     });
     const scored = await scoreAssetRows(teamId, rows);
     const strip = (row: Record<string, unknown>) => {
@@ -1339,6 +1351,132 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return scored.map(strip);
   });
 
+  // ---------- 个人收藏（M69③，GitHub stars 锚点）----------
+  // pin 是个人便利不是团队治理：不写审计/不进动态（与别名同口径）；跨用户隔离
+  // 由行级 pinned 按 auth.userId 计算保证（他人 pin 不可见）。
+  app.post("/assets/:assetId/pin", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const body = parseBody(z.object({ teamId: z.string().uuid() }), req.body);
+    await teamRole(auth.userId, body.teamId);
+    const out = await withTeam(body.teamId, async (client) => {
+      const { rows: a } = await client.query(`SELECT 1 FROM assets WHERE team_id = $1 AND id = $2`, [body.teamId, assetId]);
+      if (!a[0]) throw ERR.NOT_FOUND();
+      await client.query(
+        `INSERT INTO user_asset_pins (team_id, user_id, asset_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [body.teamId, auth.userId, assetId]
+      );
+      return { assetId, pinned: true };
+    });
+    return reply.code(200).send(out);
+  });
+
+  app.delete("/assets/:assetId/pin", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    const out = await withTeam(teamId, async (client) => {
+      await client.query(`DELETE FROM user_asset_pins WHERE team_id = $1 AND user_id = $2 AND asset_id = $3`, [
+        teamId, auth.userId, assetId,
+      ]);
+      return { assetId, pinned: false };
+    });
+    return reply.code(200).send(out);
+  });
+
+  // ---------- 目录清单导出（M69②，CKAN/Dataverse 数据清单口径）----------
+  // 过滤参数与 search 完全同一套、走同一条 queryAssetRows/scoreAssetRows 管线
+  // （导出与目录不可能分叉）。属性明细不下发（与目录同可见面），JSON 如实注记。
+  // 导出是敏感可见动作：盖章 asset.export 审计（与 audit.export 同口径）。
+  app.get("/assets/export", async (req, reply) => {
+    const auth = requireAuth(req);
+    const query = (req.query ?? {}) as {
+      teamId?: string; q?: string; type?: string; label?: string; lifecycle?: string; typePrefix?: string; sort?: string;
+      prop?: string | string[]; pinned?: string; format?: string;
+    };
+    const teamId = String(query.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    const rawFormat = String(query.format ?? "").trim().toLowerCase();
+    if (rawFormat && rawFormat !== "csv" && rawFormat !== "json") throw ERR.INVALID("format 仅支持 csv 或 json");
+    const format = rawFormat === "json" ? "json" : "csv";
+    const { filters: propFilters, problems } = parsePropFilters(query.prop);
+    if (problems.length > 0) {
+      throw ERR.INVALID(`属性筛选格式不正确：${problems.join("；")}`, problems);
+    }
+    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const sort =
+      query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
+    const EXPORT_CAP = 500;
+    const rows = await queryAssetRows(teamId, {
+      q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", typePrefix: query.typePrefix ?? "",
+      lifecycle, propFilters, sort, limit: EXPORT_CAP,
+      userId: auth.userId, pinnedOnly: query.pinned === "true" || query.pinned === "1",
+    });
+    const scored = await scoreAssetRows(teamId, rows);
+    for (const r of scored) delete r.completenessChecks;
+    const truncated = scored.length >= EXPORT_CAP;
+    await withTeam(teamId, async (client) => {
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
+         VALUES ($1,$2,'asset.export','team',$3,$4,$5)`,
+        [teamId, auth.userId, teamId, req.id, JSON.stringify({
+          format, count: scored.length, truncated,
+          filters: { q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", lifecycle, typePrefix: query.typePrefix ?? "", prop: propFilters.map((f) => `${f.key}${f.op}${f.value}`), pinned: query.pinned === "true" || query.pinned === "1" },
+        })]
+      );
+    });
+    const entry = (r: Record<string, unknown>) => ({
+      name: String(r.name ?? ""),
+      typeKey: String(r.type_key ?? ""),
+      typeVersion: String(r.type_version ?? ""),
+      lifecycle: String(r.lifecycle ?? ""),
+      relationCount: Number(r.relation_count ?? 0),
+      usage90d: Number(r.usage_count ?? 0),
+      aliasCount: Number(r.alias_count ?? 0),
+      labelCount: Number(r.label_count ?? 0),
+      hasArtifacts: r.has_artifacts === true,
+      completenessScore: Number(r.completenessScore ?? 0),
+      contentDigest: String(r.content_digest ?? ""),
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at ?? ""),
+      pinned: r.pinned === true,
+    });
+    const stamp = `taw-assets-${teamId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}`;
+    const items = scored.map(entry);
+    if (format === "json") {
+      reply.header("content-type", "application/json; charset=utf-8");
+      reply.header("content-disposition", `attachment; filename="${stamp}.json"`);
+      return JSON.stringify({
+        teamId,
+        exportedAt: new Date().toISOString(),
+        truncated,
+        total: items.length,
+        note: "属性明细不在导出中（与目录同可见面）；完整属性与制品请走 bundle 下载。",
+        items,
+      }, null, 2);
+    }
+    const csvEscape = (v: string): string => `"${v.replace(/"/g, '""')}"`;
+    const header = "name,type_key,type_version,lifecycle,relation_count,usage_90d,alias_count,label_count,has_artifacts,completeness_score,content_digest,created_at,pinned";
+    const lines: string[] = [header];
+    for (const it of items) {
+      lines.push([
+        csvEscape(it.name), csvEscape(it.typeKey), csvEscape(it.typeVersion), csvEscape(it.lifecycle),
+        csvEscape(String(it.relationCount)), csvEscape(String(it.usage90d)), csvEscape(String(it.aliasCount)),
+        csvEscape(String(it.labelCount)), csvEscape(it.hasArtifacts ? "yes" : "no"),
+        csvEscape(String(it.completenessScore)), csvEscape(it.contentDigest), csvEscape(it.createdAt),
+        csvEscape(it.pinned ? "yes" : "no"),
+      ].join(","));
+    }
+    if (truncated) lines.push(`# 已达导出上限 ${EXPORT_CAP} 条，更多结果未包含（请用筛选缩小范围）`);
+    reply.header("content-type", "text/csv; charset=utf-8");
+    reply.header("content-disposition", `attachment; filename="${stamp}.csv"`);
+    return "\uFEFF" + lines.join("\r\n");
+  });
+
   // 团队完整度水位（M67⑦，TechInsights 汇总视图）：count/平均/三档分桶 + 低分清单。
   // 与 search 同一条打分管线；候选集同界 ≤200（团队资产更多时如实注记，不假装全量）。
   app.get("/assets/completeness-summary", async (req) => {
@@ -1348,7 +1486,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
-    const rows = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200 });
+    const rows = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200, userId: auth.userId });
     const scored = await scoreAssetRows(teamId, rows);
     const entries = scored.map((r) => ({
       id: String(r.id),
@@ -1823,6 +1961,11 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
           GROUP BY kind`,
         [teamId, assetId]
       );
+      // 个人收藏视角（M69③）：当前用户是否收藏过
+      const { rows: pinRows } = await client.query(
+        `SELECT 1 FROM user_asset_pins WHERE team_id = $1 AND user_id = $2 AND asset_id = $3`,
+        [teamId, auth.userId, assetId]
+      );
       const usage = { download: 0, copy_ref: 0, agent_read: 0 };
       for (const r of usageRows) if (r.kind in usage) usage[r.kind as keyof typeof usage] = r.n;
       // 完整度 scorecard（M65，Backstage TechInsights 思想）：读侧派生，不新增登记门槛。
@@ -1855,6 +1998,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         aliases: aliasRows.map((r) => r.alias),
         usage,
         completeness,
+        pinned: !!pinRows[0],
         // 派生血缘字段提示（M67①，HF base_model）：head 属性里声明的血缘引用——
         // 展示为可物化提示，不自动建边（物化走 POST /assets/:id/lineage/materialize）
         lineageRefs: extractLineageRefs(head?.properties ?? {}),

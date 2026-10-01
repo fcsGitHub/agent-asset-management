@@ -36,7 +36,7 @@ export function describeIntent(i: NlIntentPayload): string {
         "asset.lineage_materialize": "物化血缘关联", "asset.labels_propagate": "沿血缘传播标签",
         "collection.snapshot_create": "创建分享快照", "collection.snapshot_revoke": "吊销分享快照",
         "review_prepared": "准备审核快照", "release_published": "发布到通道",
-        "release_rollback": "通道回滚", "audit.export": "导出审计",
+        "release_rollback": "通道回滚", "audit.export": "导出审计", "asset.export": "导出资产清单",
       };
       return `查看动态：${actionNames[i.params.activityAction] ?? i.params.activityAction}`;
     }

@@ -875,3 +875,44 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    过期时间 expires_at（读取时比对可做、到期自动清理需调度基建）；属性筛选 OR
    组合/正则（需括号语法，等值+范围已覆盖治理主流）；如继续迭代，建议再做
    用户走查/收集真实使用反馈，或由用户直接点名需求。
+   M69 已完成（日常取用轮，三项；调研笔记 research-M69-usage-efficiency.md）。
+   ①**分享快照有效期**（GitHub PAT 过期锚点）：迁移 0029 加 expires_at（创建时
+   可选 ISO；UI 按天数换算，默认 30 天、留空=永久）；公开端点读时比对
+   `expires_at <= now()` → **410 SHARE_EXPIRED**（与吊销同为 Gone 但文案区分
+   「过期」与「吊销」；同时命中吊销优先——更具体的管理动作）；不加定时清理
+   （需调度基建，与已退役项同口径）；团队内清单 ⏰ 已过期/「xx 到期」徽标。
+   ②**目录清单导出**（CKAN/Dataverse 数据清单口径）：GET /assets/export?format=
+   csv|json——过滤参数与 search 完全同一套（q/type/label/lifecycle/typePrefix/
+   prop/pinned/sort），走同一条 queryAssetRows/scoreAssetRows 管线（导出与目录
+   不可能分叉）；CSV（RFC 4180 引号转义 + BOM + CRLF + attachment 文件名）列=
+   名称/类型/版本/生命周期/关联数/近90天使用/别名数/标签数/是否含制品/完整度分/
+   内容摘要/登记时间/是否收藏；JSON 结构化（teamId/exportedAt/truncated/total/
+   note/items）；**属性明细不下发**（与目录同可见面，JSON note 如实注记；完整
+   属性走 bundle）；上限 500 行，达到上限 CSV 尾行/JSON truncated 如实标注；
+   导出是敏感可见动作：盖章 asset.export 审计（与 audit.export 同口径，detail
+   记格式/条数/过滤范围），动作名进动态过滤与 ⌘K 跳转名；目录页「⬇ 导出
+   CSV/JSON」按钮直连当前筛选。③**个人收藏 pin**（GitHub stars/HF likes 锚点）：
+   user_asset_pins（迁移 0029；PK(team,user,asset)；资产删除级联；个人便利不是
+   治理——不写审计/不进动态，与别名同口径）；POST/DELETE /assets/:id/pin；
+   search 行级 pinned（当前用户视角）+ pinned=true 过滤；queryAssetRows 抽
+   userId/pinnedOnly 参数（search/summary/export 三端点同源）；目录行 ☆/★
+   切换（局部更新不整页刷新）+「★ 只看收藏」开关（URL pinned=1）+ 详情页
+   收藏按钮（乐观切换失败回滚）；跨用户隔离：行级 pinned 按 auth.userId 计算，
+   他人 pin 不可见。tests/m69 三项（①过期 410/未来 200 回显/永久 null/非法 422/
+   吊销优先/清单过期态；②CSV BOM 用原始字节验证（fetch text() 会剥 BOM——
+   走查发现）+表头+筛选行+JSON 结构化+边界注记+format 422+审计≥2+外团队 404；
+   ③行级视角/只看收藏/跨用户隔离（第二名成员经 /teams/:id/members 加入——
+   pin 视角互不混入）/幂等/详情 pinned/取消后为空）。浏览器实测（demo 团队）：
+   目录 ☆→★、「只看收藏」唯一定位收藏资产（URL pinned=1）；导出端点 200 +
+   text/csv + attachment 文件名 + 表头齐全 + pinned 过滤生效；快照创建 prompt
+   输 7 天 → 列表「2026/10/8 到期」标注，过期 token 公开页如实「已过有效期」，
+   到期/已过期/已吊销三态并存。截图：m69-ui-pins、m69-ui-share-expired、
+   m69-ui-share-expiry。全量 69 套件 343 项全绿。
+   候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
+   与暂缓项，不复读全量清单。
+   暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
+   （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
+   可选后续方向（M69 后）：AI 草稿质量反馈环（仍需真实使用样本，不伪造）；属性
+   筛选 OR 组合/正则（需括号语法）；pin 的团队级聚合（「最多人收藏」排序——等
+   真实使用积累，不预造指标）；如继续迭代，建议再做用户走查/收集真实使用反馈，
+   或由用户直接点名需求。

@@ -339,6 +339,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     "release_published": "发布到通道",
     "release_rollback": "通道回滚",
     "audit.export": "导出审计",
+    "asset.export": "导出资产清单",
     "semantic.queue.export": "导出语义队列",
     "relation.withdraw": "撤回关系断言",
     "project.member.add": "添加项目成员",
