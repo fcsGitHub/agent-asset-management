@@ -1061,8 +1061,8 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   const [newDesc, setNewDesc] = useState("");
   const [msg, setMsg] = useState("");
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
-  // 只读分享快照（M67⑤）：冻结当前内容 + 免登录查看链接
-  const [snapshots, setSnapshots] = useState<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>([]);
+  // 只读分享快照（M67⑤）：冻结当前内容 + 免登录查看链接；M68① 吊销（泄漏治理出口）
+  const [snapshots, setSnapshots] = useState<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null }[]>([]);
   const [shareMsg, setShareMsg] = useState("");
   const isAdmin = role === "admin";
   const canManage = (d: CollectionDetail) => isAdmin || d.created_by === userId;
@@ -1095,7 +1095,7 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
     void api<CollectionDetail>(`/collections/${selId}`, { query: { teamId: project.teamId } })
       .then(setDetail)
       .catch((e) => setMsg(e instanceof ApiError ? e.message : "加载集合详情失败"));
-    void api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>(
+    void api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null }[]>(
       `/collections/${selId}/snapshots`, { query: { teamId: project.teamId } }
     ).then(setSnapshots).catch(() => setSnapshots([]));
   }, [selId, project?.teamId, project]);
@@ -1181,11 +1181,33 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
         `/collections/${detail.id}/snapshots`, { method: "POST", body: { teamId: project.teamId } }
       );
       setShareMsg(`快照已创建：${res.itemCount} 项，链接 ${window.location.origin}${res.shareUrl}`);
-      setSnapshots(await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string }[]>(
-        `/collections/${detail.id}/snapshots`, { query: { teamId: project.teamId } }
-      ));
+      await reloadSnapshots();
     } catch (e) {
       setShareMsg(e instanceof ApiError ? e.message : "创建快照失败");
+    }
+  }
+
+  async function reloadSnapshots() {
+    if (!project || !selId) return;
+    try {
+      setSnapshots(await api<{ snapshotId: string; token: string; shareUrl: string; itemCount: number; createdAt: string; revokedAt?: string | null }[]>(
+        `/collections/${selId}/snapshots`, { query: { teamId: project.teamId } }
+      ));
+    } catch {
+      setSnapshots([]);
+    }
+  }
+
+  // 吊销分享快照（M68①）：链接泄漏后的治理出口——公开端点随即 410
+  async function revokeSnapshot(snapshotId: string) {
+    if (!project || !detail) return;
+    if (!window.confirm("吊销该分享快照？链接立即失效（公开访问将返回「已吊销」），快照内容保留在团队内可查。")) return;
+    try {
+      await api(`/collections/${detail.id}/snapshots/${snapshotId}/revoke`, { method: "POST", body: { teamId: project.teamId } });
+      setShareMsg("快照已吊销，链接不再有效。");
+      await reloadSnapshots();
+    } catch (e) {
+      setShareMsg(e instanceof ApiError ? e.message : "吊销失败");
     }
   }
 
@@ -1271,10 +1293,25 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
                   分享快照（{snapshots.length}）：
                   {snapshots.map((s) => (
                     <span key={s.snapshotId} style={{ marginRight: 12 }}>
-                      <a className="ref-chip" href={s.shareUrl} target="_blank" rel="noreferrer"
-                        title={`只读快照 · ${s.itemCount} 项 · ${new Date(s.createdAt).toLocaleString()}`}>
-                        🔗 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项）
-                      </a>
+                      {s.revokedAt ? (
+                        <span className="chip-dim" title={`已吊销于 ${new Date(s.revokedAt).toLocaleString()}——链接不再有效，内容仅团队内可查`}>
+                          🚫 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项 · 已吊销）
+                        </span>
+                      ) : (
+                        <>
+                          <a className="ref-chip" href={s.shareUrl} target="_blank" rel="noreferrer"
+                            title={`只读快照 · ${s.itemCount} 项 · ${new Date(s.createdAt).toLocaleString()}`}>
+                            🔗 {new Date(s.createdAt).toLocaleDateString()}（{s.itemCount} 项）
+                          </a>
+                          {canManage(detail) && (
+                            <button className="secondary" style={{ marginLeft: 4, padding: "0 6px", fontSize: 11.5 }}
+                              onClick={() => void revokeSnapshot(s.snapshotId)}
+                              title="吊销该分享链接（泄漏治理出口；公开访问随即返回「已吊销」）">
+                              吊销
+                            </button>
+                          )}
+                        </>
+                      )}
                     </span>
                   ))}
                 </div>
@@ -1406,7 +1443,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     if (type) sp.set("type", type);
     if (family) sp.set("family", family);
     if (label) sp.set("label", label);
-    for (const f of propFilters) sp.append("prop", `${f.key}=${f.value}`);
+    for (const f of propFilters) sp.append("prop", `${f.key}${f.op}${f.value}`);
     if (lifecycle !== "active") sp.set("lifecycle", lifecycle);
     if (sort !== "newest") sp.set("sort", sort);
     window.history.replaceState(null, "", `?${sp.toString()}`);
@@ -1427,7 +1464,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     const query: Record<string, string | string[]> = {
       teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort,
     };
-    if (propFilters.length > 0) query.prop = propFilters.map((f) => `${f.key}=${f.value}`);
+    if (propFilters.length > 0) query.prop = propFilters.map((f) => `${f.key}${f.op}${f.value}`);
     void api<AssetRow[]>("/assets/search", { query })
       .then(setAssets)
       .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
@@ -1471,12 +1508,12 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
       <div className="field field-row">
         <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
         <input
-          placeholder="属性筛选，如 owner=alice（多项空格分隔）"
+          placeholder="属性筛选，如 owner=alice score>=0.9（空格分隔）"
           aria-label="按属性筛选"
-          title="按 head 修订属性等值过滤（OpenMetadata 任意属性筛选）；多项空格分隔，随 URL 可分享"
+          title="按 head 修订属性过滤（OpenMetadata 口径）：key=value 文本等值 / key>=v、key<=v 数值范围；点号嵌套路径（metrics.accuracy）；多项空格分隔，随 URL 可分享"
           value={propFilter}
           onChange={(e) => setPropFilter(e.target.value)}
-          style={{ maxWidth: 260 }}
+          style={{ maxWidth: 280 }}
         />
         <select
           aria-label="按类型过滤"

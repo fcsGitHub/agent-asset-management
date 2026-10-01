@@ -8,7 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { q, withTeam, withShareRead } from "../db.js";
-import { ERR } from "../errors.js";
+import { ERR, AppError } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 
@@ -316,6 +316,12 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [body.teamId, snapshotId, collectionId, token, cols[0].name, cols[0].description, auth.userId, JSON.stringify(payload)]
       );
+      // 治理动作进团队动态（M68③）：audit_events append-only，动态流直接读
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
+         VALUES ($1,$2,'collection.snapshot_create','collection',$3,$4,$5)`,
+        [body.teamId, auth.userId, collectionId, req.id, JSON.stringify({ snapshotId, token, itemCount: items.length })]
+      );
       return {
         snapshotId,
         token,
@@ -326,7 +332,36 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(out);
   });
 
-  // 团队内快照清单（管理端：查看历史分享链接）
+  // 吊销分享快照（M68①，泄漏治理出口）：管理权同创建；公开端点随即 410。
+  // 列级 UPDATE 授权只允许改 revoked_at/revoked_by——payload 在 DB 层仍不可动。
+  app.post("/collections/:collectionId/snapshots/:snapshotId/revoke", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { collectionId, snapshotId } = req.params as { collectionId: string; snapshotId: string };
+    if (!/^[0-9a-f-]{36}$/.test(collectionId) || !/^[0-9a-f-]{36}$/.test(snapshotId)) throw ERR.NOT_FOUND();
+    const body = parseBody(z.object({ teamId: z.string().uuid() }), req.body);
+    const role = await teamRole(auth.userId, body.teamId);
+    await requireCollectionManagePermission(body.teamId, collectionId, auth.userId, role);
+    const out = await withTeam(body.teamId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE asset_collection_snapshots SET revoked_at = now(), revoked_by = $3
+          WHERE team_id = $1 AND collection_id = $2 AND id = $4 AND revoked_at IS NULL`,
+        [body.teamId, collectionId, auth.userId, snapshotId]
+      );
+      if (rowCount) {
+        await client.query(
+          `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
+           VALUES ($1,$2,'collection.snapshot_revoke','collection',$3,$4,$5)`,
+          [body.teamId, auth.userId, collectionId, req.id, JSON.stringify({ snapshotId })]
+        );
+      }
+      // 重复吊销幂等 ok（alreadyRevoked 如实标注）
+      return { ok: true, alreadyRevoked: !rowCount };
+    });
+    return reply.code(200).send(out);
+  });
+
+  // 团队内快照清单（管理端：查看历史分享链接与吊销态）
   app.get("/collections/:collectionId/snapshots", async (req) => {
     const auth = requireAuth(req);
     const { collectionId } = req.params as { collectionId: string };
@@ -335,14 +370,17 @@ export async function collectionRoutes(app: FastifyInstance): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     return withTeam(teamId, async (client) => {
-      const { rows } = await client.query<{ id: string; token: string; item_count: number; created_at: Date }>(
-        `SELECT id, token, jsonb_array_length(payload->'items')::int AS item_count, created_at
+      const { rows } = await client.query<{ id: string; token: string; item_count: number; created_at: Date; revoked_at: Date | null }>(
+        `SELECT id, token, jsonb_array_length(payload->'items')::int AS item_count, created_at, revoked_at
            FROM asset_collection_snapshots
           WHERE team_id = $1 AND collection_id = $2
           ORDER BY created_at DESC`,
         [teamId, collectionId]
       );
-      return rows.map((r) => ({ snapshotId: r.id, token: r.token, shareUrl: `/share/collection/${r.token}`, itemCount: r.item_count, createdAt: r.created_at }));
+      return rows.map((r) => ({
+        snapshotId: r.id, token: r.token, shareUrl: `/share/collection/${r.token}`,
+        itemCount: r.item_count, createdAt: r.created_at, revokedAt: r.revoked_at,
+      }));
     });
   });
 }
@@ -355,11 +393,15 @@ export async function collectionShareRoutes(app: FastifyInstance): Promise<void>
     const { token } = req.params as { token: string };
     if (!/^[0-9a-f]{32}$/.test(token)) throw ERR.NOT_FOUND();
     return withShareRead(async (client) => {
-      const { rows } = await client.query<{ collection_name: string; payload: Record<string, unknown>; created_at: Date }>(
-        `SELECT collection_name, payload, created_at FROM asset_collection_snapshots WHERE token = $1`,
+      const { rows } = await client.query<{ collection_name: string; payload: Record<string, unknown>; created_at: Date; revoked_at: Date | null }>(
+        `SELECT collection_name, payload, created_at, revoked_at FROM asset_collection_snapshots WHERE token = $1`,
         [token]
       );
       if (!rows[0]) throw ERR.NOT_FOUND();
+      // 已吊销 → 410 Gone（如实：持有者应知道链接被主动吊销，而非 404 装不存在）
+      if (rows[0].revoked_at) {
+        throw new AppError("SHARE_REVOKED", 410, "该分享快照已被吊销，链接不再有效");
+      }
       return {
         collectionName: rows[0].collection_name,
         createdAt: rows[0].created_at,

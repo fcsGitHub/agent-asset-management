@@ -246,9 +246,18 @@ async function queryAssetRows(
   ];
   let propClause = "";
   for (const f of opts.propFilters) {
-    const k = params.push(f.key);
+    // M68②：点号嵌套路径走 #>>（数组参数），一级属性走 ->>；范围比较先验数值正则
+    // （非数值行排除而不是 22P02 抛错），路径与值全部参数化
+    const dotted = f.key.includes(".");
+    const p = params.push(dotted ? f.key.split(".") : f.key);
     const v = params.push(f.value);
-    propClause += ` AND r.properties->>$${k} = $${v}\n`;
+    const textExpr = dotted ? `r.properties #>> $${p}::text[]` : `r.properties->>$${p}`;
+    if (f.op === "=") {
+      propClause += ` AND ${textExpr} = $${v}\n`;
+    } else {
+      const cmp = f.op === ">=" ? ">=" : "<=";
+      propClause += ` AND CASE WHEN ${textExpr} ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN (${textExpr})::numeric ELSE NULL END ${cmp} $${v}::numeric\n`;
+    }
   }
   return withTeam(teamId, async (client) => {
     const result = await client.query(
@@ -1440,6 +1449,12 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
           }
         }
       }
+      // 治理动作进团队动态（M68③）：物化了哪些引用、各自结果
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
+         VALUES ($1,$2,'asset.lineage_materialize','asset',$3,$4,$5)`,
+        [body.teamId, auth.userId, assetId, req.id, JSON.stringify({ created, results: results.map((r) => ({ ref: r.ref, status: r.status })) })]
+      );
       return { assetId, created, results };
     });
     return reply.code(200).send(out);
@@ -1503,6 +1518,12 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       await client.query(`UPDATE assets SET meta_version = meta_version + 1 WHERE team_id = $1 AND id = $2`, [
         body.teamId, assetId,
       ]);
+      // 治理动作进团队动态（M68③）
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, request_id, detail)
+         VALUES ($1,$2,'asset.labels_propagate','asset',$3,$4,$5)`,
+        [body.teamId, auth.userId, assetId, req.id, JSON.stringify({ appliedAssets: plan.targets.length, appliedLabels })]
+      );
       return {
         appliedAssets: plan.targets.length,
         appliedLabels,

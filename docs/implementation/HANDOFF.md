@@ -836,3 +836,42 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    AI 草稿质量反馈环（仍需先攒真实使用样本，不伪造）；属性筛选的范围/正则算子、
    嵌套属性（等值先满足绝大多数治理筛选用，记为后续候选）；如继续迭代，建议
    再做用户走查/收集真实使用反馈，或由用户直接点名需求。
+   M68 已完成（治理收口轮，M67 走查发现的三个「能力有了、治理出口没跟上」缺口；
+   调研笔记 research-M68-governance-closeout.md）。①**分享快照吊销**（泄漏治理
+   出口，GitHub PAT/Zenodo revoke 锚点）：迁移 0028 加 revoked_at/revoked_by 两列
+   + **列级 UPDATE 授权**（GRANT UPDATE (revoked_at, revoked_by)——payload/token
+   在 DB 层仍不可改，吊销是唯一被授权的更新路径）；POST /collections/:id/
+   snapshots/:sid/revoke（管理权同创建；重复吊销幂等 alreadyRevoked 如实标注）；
+   公开端点对已吊销 token 返回 **410 SHARE_REVOKED**（Gone 语义如实——持有者应
+   知道链接被主动吊销而非 404 装不存在）；团队内清单标注 🚫 已吊销 + UI 吊销
+   按钮（确认弹窗）；吊销后可再创建新快照（治理出口不是死路）。②**属性筛选
+   算子扩展**（OpenMetadata 完整口径）：prop-filter 解析器支持 key>=v / key<=v
+   数值范围与**点号嵌套路径**（metrics.accuracy → properties #>> 数组参数）；
+   SQL 侧范围比较用 `CASE WHEN 文本 ~ 数值正则 THEN ::numeric ELSE NULL END`——
+   非数值行被排除而不是 22P02 抛错；最早算符位置切分且两字符算符优先（>= 不会
+   切成 > + =x，值含 = 字符按最早算符归值）；同键同算符才覆盖、同键不同算符
+   各自保留；等值语义与 M67 完全兼容（m67 断言仅适配新 op 形状）。
+   **顺带修一处真 bug**：Workbench URL 写回与请求拼接两处仍硬编码 `=`（M67 旧
+   形状），op 被丢——浏览器走查抓到（URL 显示 score%3D0.9、结果集空），改为
+   `${key}${op}${value}`。③**治理动作进团队动态**（audit_events 人机混排时间线，
+   零新表）：血缘物化（asset.lineage_materialize，detail 逐引用结果）/标签传播
+   （asset.labels_propagate，detail 下游数与标签数）/快照创建（collection.
+   snapshot_create，detail token+条数）/快照吊销（collection.snapshot_revoke）
+   四个动作在业务事务内写审计（团队级 project_id=NULL 同资产归档口径）；
+   ACTION_LABELS 与 ⌘K 动态跳转名同步补条目（中文名从服务端下发，前端无副本）。
+   tests/m68 五项（纯函数两：算子/嵌套/两字符优先/同键覆盖/非法点名、值含 =
+   按最早算符归值；端到端三：范围+嵌套+非数值行排除+等值回归+组合交集+非数字
+   422、吊销 200→410→清单标注→幂等→外团队 404→可再创建、动态四动作可查+中文名
+   下发+action 过滤恰一条）。浏览器实测（demo 团队）：score>=0.9 唯一定位高分
+   资产（URL 含 %3E%3D 算符、输入框回显）；集合快照吊销确认弹窗→列表 🚫 已
+   吊销→公开页如实显示「该分享快照已被吊销」；动态页过滤下拉新增四动作、时间线
+   第一条即刚才的吊销（人机混排实时闭环）。截图：m68-ui-prop-range、
+   m68-ui-share-revoked、m68-ui-activity-governance。全量 68 套件 340 项全绿。
+   候选约定（自 M25 起）：老化优先——连续落选项自动升为下轮必做；汇报只列新增候选
+   与暂缓项，不复读全量清单。
+   暂缓项：无。已退役：「动态页导出定时快照」——需要作业调度基建的产品级决策
+   （引入 worker/cron 属架构扩展，非迭代轮粒度），不再作为迭代候选。
+   可选后续方向（M68 后）：AI 草稿质量反馈环（仍需真实使用样本，不伪造）；快照
+   过期时间 expires_at（读取时比对可做、到期自动清理需调度基建）；属性筛选 OR
+   组合/正则（需括号语法，等值+范围已覆盖治理主流）；如继续迭代，建议再做
+   用户走查/收集真实使用反馈，或由用户直接点名需求。

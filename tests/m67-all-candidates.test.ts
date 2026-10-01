@@ -86,7 +86,8 @@ describe("M67 纯函数：lineage / prop-filter / completeness-summary", () => {
 
   it("parsePropFilters：合法/分隔符非法/空值/同键覆盖/formatPropFilters 往返", () => {
     const { filters, problems } = parsePropFilters(["owner=alice", "stage:prod", "owner=bob", "bad", "k="]);
-    expect(filters).toEqual([{ key: "owner", value: "bob" }, { key: "stage", value: "prod" }]);
+    // M68② 起筛选项带算符（op），等值语义与 M67 完全一致
+    expect(filters).toEqual([{ key: "owner", op: "=", value: "bob" }, { key: "stage", op: "=", value: "prod" }]);
     expect(problems).toHaveLength(2);
     expect(formatPropFilters(filters)).toBe("owner=bob stage=prod");
     expect(parsePropFilters(undefined).filters).toEqual([]);
