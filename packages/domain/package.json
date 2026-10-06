@@ -19,7 +19,8 @@
     "./lineage": "./src/lineage.ts",
     "./prop-filter": "./src/prop-filter.ts",
     "./completeness-summary": "./src/completeness-summary.ts",
-    "./sbom": "./src/sbom.ts"
+    "./sbom": "./src/sbom.ts",
+    "./ontology-tree": "./src/ontology-tree.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

@@ -162,8 +162,8 @@ export async function graphRoutes(app: FastifyInstance): Promise<void> {
           WHERE a.team_id = $1
             AND tv.type_key = ANY($2::text[])
             AND ($3 = '' OR a.name ILIKE '%' || $3 || '%')
-            AND ($4 = 'all' OR a.lifecycle = CASE WHEN $4 = 'archived' THEN 'archived' ELSE 'active' END)
-          ORDER BY a.name LIMIT $5`,
+            AND ($4 = 'all' OR ($4 = 'active' AND a.lifecycle IN ('active', 'deprecated')) OR a.lifecycle = $4)
+          ORDER BY (a.lifecycle = 'deprecated'), a.name LIMIT $5`,
         [teamId, keys, String(query.q ?? ""), lifecycle, limit]
       )
     );

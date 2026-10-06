@@ -64,7 +64,7 @@ async function teamRole(userId: string, teamId: string): Promise<string> {
 export { stableStringify };
 
 // 类型链装载与属性校验（M59 抽共享关卡）：登记/分支保存/dry-run 共用同一实现
-import { loadTypeChain, validateAgainstChain, type TypeDefRow } from "../ontology.js";
+import { loadTypeChain, validateAgainstChain, typeKeyClosure, loadOntology, type TypeDefRow } from "../ontology.js";
 import { schemaToFormSpec } from "@taw/domain/schema-form";
 import { computeCompleteness, OWNER_KEYS } from "@taw/domain/completeness";
 import { buildCitation } from "@taw/domain/cite";
@@ -233,7 +233,11 @@ export async function createRelationAssertion(
  *  propFilters 逐项 `r.properties->>$k = $v`（->> 右参可参数化，无注入面；文本等值）。
  *  userId 存在时行附 pinned（当前用户视角，M69③）且 pinnedOnly 可过滤「我的收藏」。
  *  lifecycle（M70）：active（默认）= active + deprecated——弃用资产仍可见仍可取用，带
- *  警示不隐藏（HF deprecated models / Docker Hub deprecated images 口径）；归档才是隐藏。 */
+ *  警示不隐藏（HF deprecated models / Docker Hub deprecated images 口径）；归档才是隐藏。
+ *  type（M71①）：类闭包展开——type=父类同时命中全部子类 type_key（Wikidata P279* /
+ *  Foundry Interfaces 口径），与 graph.assetsByType、Agent asset.search 同一语义；
+ *  未知类型返回空（闭包为空如实返回，不静默放宽为不过滤）。响应带 typeClosure 供
+ *  调用方如实标注展开（行上 type_key 仍是各自实际类型）。 */
 async function queryAssetRows(
   teamId: string,
   opts: {
@@ -245,7 +249,7 @@ async function queryAssetRows(
     userId?: string;
     pinnedOnly?: boolean;
   }
-): Promise<Record<string, unknown>[]> {
+): Promise<{ rows: Record<string, unknown>[]; typeClosure: string[] | null }> {
   const params: unknown[] = [
     teamId, opts.q ?? "", opts.type ?? "", opts.lifecycle, opts.label ?? "", opts.typePrefix ?? "", opts.sort, opts.limit,
   ];
@@ -272,6 +276,12 @@ async function queryAssetRows(
     if (opts.pinnedOnly) pinClause = ` AND ${pinExpr}`;
   }
   return withTeam(teamId, async (client) => {
+    let typeKeys: string[] | null = null;
+    if (opts.type) {
+      typeKeys = await typeKeyClosure(client, teamId, opts.type);
+      if (typeKeys.length === 0) return { rows: [], typeClosure: [] };
+    }
+    const keysParam = params.push(typeKeys ?? []);
     const result = await client.query(
       `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
               r.id AS head_revision_id, r.content_digest, r.created_at, r.properties,
@@ -326,7 +336,7 @@ async function queryAssetRows(
                 SELECT 1 FROM asset_aliases al
                  WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
               ))
-          AND ($3 = '' OR tv.type_key = $3)
+          AND ($3 = '' OR tv.type_key = ANY($${keysParam}::text[]))
           AND ($4 = 'all' OR ($4 = 'active' AND a.lifecycle IN ('active', 'deprecated')) OR a.lifecycle = $4)
           AND ($5 = '' OR EXISTS (
                 SELECT 1 FROM asset_labels l
@@ -336,7 +346,7 @@ async function queryAssetRows(
 ${propClause}${pinClause}        ORDER BY (CASE WHEN $7 = 'refs' THEN rc.n WHEN $7 = 'usage' THEN uc.n END) DESC NULLS LAST, a.created_at DESC LIMIT $8`,
       params
     );
-    return result.rows as Record<string, unknown>[];
+    return { rows: result.rows as Record<string, unknown>[], typeClosure: typeKeys };
   });
 }
 
@@ -1079,6 +1089,20 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     return out.join("\n") + "\n";
   }
 
+  // ---------- 本体树（M71②，Foundry Ontology Manager / Atlas 类型系统浏览锚点） ----------
+  // 类型层次树 + 每类型非归档资产计数 + 闭包计数（closureAssetCount = 目录类闭包过滤的
+  // 真实命中数）+ 模式声明属性键/必填键 + 关系注册表（domain/range/断言数）。
+  // UI（目录层次化类型下拉/闭包提示）与 Agent 本体工具（ontology.types/typeInfo）
+  // 同源；树构建走 @taw/domain/ontology-tree 纯函数，数据装载走 ontology.ts loadOntology。
+  app.get("/ontology/tree", async (req) => {
+    const auth = requireAuth(req);
+    const teamId = String((req.query as { teamId?: string } | null)?.teamId ?? "");
+    if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
+    await teamRole(auth.userId, teamId);
+    await seedDefaultTypes(teamId, auth.userId);
+    return withTeam(teamId, async (client) => loadOntology(client, teamId));
+  });
+
   app.get("/ontology/export", async (req, reply) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as { teamId?: string; format?: string };
@@ -1340,7 +1364,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const sort =
       query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
     // sort=completeness 时先取满候选集（≤200），分数算完在 JS 内升序再截断
-    const rows = await queryAssetRows(teamId, {
+    const { rows } = await queryAssetRows(teamId, {
       q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", typePrefix: query.typePrefix ?? "",
       lifecycle, propFilters, sort, limit: sort === "completeness" ? 200 : limit,
       userId: auth.userId, pinnedOnly: query.pinned === "true" || query.pinned === "1",
@@ -1418,7 +1442,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const sort =
       query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
     const EXPORT_CAP = 500;
-    const rows = await queryAssetRows(teamId, {
+    const { rows } = await queryAssetRows(teamId, {
       q: query.q ?? "", type: query.type ?? "", label: query.label ?? "", typePrefix: query.typePrefix ?? "",
       lifecycle, propFilters, sort, limit: EXPORT_CAP,
       userId: auth.userId, pinnedOnly: query.pinned === "true" || query.pinned === "1",
@@ -1492,7 +1516,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
     const lifecycle = parseLifecycle(query.lifecycle);
-    const rows = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200, userId: auth.userId });
+    const { rows } = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200, userId: auth.userId });
     const scored = await scoreAssetRows(teamId, rows);
     const entries = scored.map((r) => ({
       id: String(r.id),
@@ -1702,10 +1726,26 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         `SELECT DISTINCT category_path FROM asset_categories WHERE team_id = $1 ORDER BY 1 LIMIT 200`,
         [teamId]
       );
+      // 观测属性键（M71④，DataHub facet 由数据聚合而来锚点）：head 修订 properties 的
+      // 一级键聚合 top50——跨门类公共键（owner/platform…）可发现，属性筛选不必记忆键名。
+      // 只列一级键：嵌套路径（metrics.accuracy）如实不含，提示见 UI title。
+      const { rows: propKeys } = await client.query<{ key: string; count: number }>(
+        `SELECT k AS key, COUNT(*)::int AS count
+           FROM assets a
+           JOIN LATERAL (
+             SELECT properties FROM asset_revisions
+              WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1
+           ) r ON true
+           CROSS JOIN LATERAL jsonb_object_keys(r.properties) k
+          WHERE a.team_id = $1 AND a.lifecycle <> 'archived' AND jsonb_typeof(r.properties) = 'object'
+          GROUP BY k ORDER BY count DESC, k LIMIT 50`,
+        [teamId]
+      );
       return {
         typeKeys: types.map((r) => r.type_key),
         labels: labels.map((r) => ({ label: r.label, count: r.count })),
         categories: cats.map((r) => r.category_path),
+        propertyKeys: propKeys.map((r) => ({ key: r.key, count: r.count })),
       };
     });
   });

@@ -60,7 +60,15 @@ interface ProjectInfo { teamId: string; projectId: string; name: string; code: s
 interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
 interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number; matched_alias?: string | null; pinned?: boolean }
-interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[] }
+interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[]; propertyKeys?: { key: string; count: number }[] }
+// 本体树节点（M71②，GET /ontology/tree）：closureAssetCount = 选该类型做类闭包过滤的
+// 真实命中资产数（自身 + 全部子类）；subclassKeys 供「已展开」提示如实列出。
+interface OntologyTreeNode {
+  key: string; title: string; version: string; parentKey: string | null;
+  assetCount: number; closureAssetCount: number; subclassKeys: string[];
+  propertyKeys: string[]; requiredKeys: string[]; requiresTestEvidence: boolean;
+  children: OntologyTreeNode[];
+}
 interface TypeInfo {
   id: string; type_key: string; version: string; title: string;
   parent_type_key?: string | null; parent_version?: string | null;
@@ -1443,20 +1451,39 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
 function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onOpen: (id: string) => void; onRegister: () => void }) {
   const [assets, setAssets] = useState<AssetRow[] | null>(null);
   const [error, setError] = useState("");
+  // 刷新中标记（M71⑥ stale-while-revalidate）：筛选变更不清空旧结果，表格半透明指示
+  // 正在刷新——消除「每键击整表卸载闪『加载中…』再重挂载」的抖动；仅首次加载（或切换
+  // 项目）显示整块加载态。
+  const [refreshing, setRefreshing] = useState(false);
   // 筛选条件 URL 化（M54）：初始从查询串恢复（可收藏可分享），变更写回 replaceState
   const initialParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  // 输入防抖（M71⑥）：关键词/属性筛选即时回显、300ms 后才提交到查询与 URL——
+  // 之前每键击一次请求 + 一次 replaceState，结果行来回跳动（抖动根因之一）。
+  const [keywordInput, setKeywordInput] = useState(initialParams.get("q") ?? "");
   const [keyword, setKeyword] = useState(initialParams.get("q") ?? "");
+  useEffect(() => {
+    const t = window.setTimeout(() => setKeyword(keywordInput), 300);
+    return () => window.clearTimeout(t);
+  }, [keywordInput]);
   // 生命周期过滤（M70 语义分层）：active 默认= 进行中+已弃用（弃用可见带警示）；可单看 deprecated
   const initialLifecycle = ["deprecated", "archived", "all"].includes(initialParams.get("lifecycle") ?? "") ? initialParams.get("lifecycle")! : "active";
   const [lifecycle, setLifecycle] = useState(initialLifecycle);
   const [facets, setFacets] = useState<AssetFacets | null>(null);
+  // 本体类型树（M71②，/ontology/tree）：层次化类型下拉 + 类闭包展开提示的数据源
+  const [typeTree, setTypeTree] = useState<OntologyTreeNode[] | null>(null);
   const [type, setType] = useState(initialParams.get("type") ?? "");
   const [family, setFamily] = useState(initialParams.get("family") ?? "");
   const [label, setLabel] = useState(initialParams.get("label") ?? "");
   const [sort, setSort] = useState(initialParams.get("sort") === "refs" ? "refs" : "newest");
   // 属性自定义筛选（M67②，OpenMetadata 任意属性过滤）：输入框空格分隔多项 key=value；
-  // 随其余筛选参数一并 URL 化（?view=assets&prop=owner=alice）
-  const [propFilter, setPropFilter] = useState(() => formatPropFilters(parsePropFilters(initialParams.getAll("prop")).filters));
+  // 随其余筛选参数一并 URL 化（?view=assets&prop=owner=alice）；M71④ 属性键 datalist
+  // 由 facets.propertyKeys（观测键）补全——跨门类公共键可发现，不必记忆。
+  const [propFilterInput, setPropFilterInput] = useState(() => formatPropFilters(parsePropFilters(initialParams.getAll("prop")).filters));
+  const [propFilter, setPropFilter] = useState(propFilterInput);
+  useEffect(() => {
+    const t = window.setTimeout(() => setPropFilter(propFilterInput), 300);
+    return () => window.clearTimeout(t);
+  }, [propFilterInput]);
   const propFilters = useMemo(() => parsePropFilters(propFilter).filters, [propFilter]);
   // 个人收藏（M69③）：只看收藏开关随 URL 化（pinned=1）
   const [pinnedOnly, setPinnedOnly] = useState(initialParams.get("pinned") === "1");
@@ -1482,20 +1509,56 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
     void api<AssetFacets>("/assets/facets", { query: { teamId: project.teamId } })
       .then(setFacets)
       .catch(() => setFacets({ typeKeys: [], labels: [], categories: [] }));
+    // 本体树与分面并行拉取（M71②）：层次化类型下拉 + 闭包计数
+    void api<{ tree: OntologyTreeNode[] }>("/ontology/tree", { query: { teamId: project.teamId } })
+      .then((r) => setTypeTree(r.tree))
+      .catch(() => setTypeTree(null));
   }, [project]);
 
+  // 切换项目时旧团队的数据不得残留（此时才清空、允许整块加载态）
   useEffect(() => {
     setAssets(null);
+    setError("");
+  }, [project?.teamId, project?.projectId]);
+
+  useEffect(() => {
     if (!project) return;
+    let cancelled = false;
+    setRefreshing(true);
     const query: Record<string, string | string[]> = {
       teamId: project.teamId, q: keyword, lifecycle, type, label, typePrefix: family, sort,
     };
     if (propFilters.length > 0) query.prop = propFilters.map((f) => `${f.key}${f.op}${f.value}`);
     if (pinnedOnly) query.pinned = "true";
     void api<AssetRow[]>("/assets/search", { query })
-      .then(setAssets)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
+      .then((rows) => {
+        if (cancelled) return;
+        setAssets(rows);
+        setError("");
+        setRefreshing(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof ApiError ? e.message : "加载失败");
+        setRefreshing(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, keyword, lifecycle, type, family, label, sort, propFilters, pinnedOnly]);
+
+  // 层次化类型选项（M71②）：只列「本类或其子类下有资产」的类型（闭包命中数 > 0），
+  // 子类按深度缩进展示；本体树不可用时回退平铺 facets.typeKeys（与旧行为一致）
+  const typeFlat = useMemo(() => {
+    if (!typeTree) return null;
+    const out: { node: OntologyTreeNode; depth: number }[] = [];
+    const walk = (n: OntologyTreeNode, depth: number) => {
+      if (n.closureAssetCount > 0) out.push({ node: n, depth });
+      for (const c of n.children) walk(c, depth + 1);
+    };
+    for (const r of typeTree) walk(r, 0);
+    return out;
+  }, [typeTree]);
+  const selectedTypeNode = type ? typeFlat?.find((f) => f.node.key === type)?.node ?? null : null;
 
   // 收藏切换（M69③）：局部更新行，不整页重载
   async function togglePin(a: AssetRow) {
@@ -1571,15 +1634,27 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
         ))}
       </div>
       <div className="field field-row">
-        <input placeholder="按名称搜索…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+        <input
+          placeholder="按名称搜索…"
+          aria-label="按名称搜索"
+          value={keywordInput}
+          onChange={(e) => setKeywordInput(e.target.value)}
+          title="关键词即时输入、停顿 300ms 后才发起检索（防抖，结果不再逐键跳动）"
+        />
         <input
           placeholder="属性筛选，如 owner=alice score>=0.9（空格分隔）"
           aria-label="按属性筛选"
-          title="按 head 修订属性过滤（OpenMetadata 口径）：key=value 文本等值 / key>=v、key<=v 数值范围；点号嵌套路径（metrics.accuracy）；多项空格分隔，随 URL 可分享"
-          value={propFilter}
-          onChange={(e) => setPropFilter(e.target.value)}
+          title="按 head 修订属性过滤（OpenMetadata 口径）：key=value 文本等值 / key>=v、key<=v 数值范围；点号嵌套路径（metrics.accuracy）；多项空格分隔，随 URL 可分享。输入时可从下拉选观测到的属性键（仅一级键）"
+          value={propFilterInput}
+          onChange={(e) => setPropFilterInput(e.target.value)}
           style={{ maxWidth: 280 }}
+          list="asset-prop-key-suggestions"
         />
+        <datalist id="asset-prop-key-suggestions" aria-hidden="true">
+          {(facets?.propertyKeys ?? []).map((p) => (
+            <option key={p.key} value={p.key}>{p.key}（{p.count} 项在用）</option>
+          ))}
+        </datalist>
         <select
           aria-label="按类型过滤"
           value={type}
@@ -1587,9 +1662,17 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
             setType(e.target.value);
             if (e.target.value) setFamily("");
           }}
+          title="类闭包过滤（M71）：选父类型自动命中其全部子类资产（Wikidata 子类口径），与 Agent 检索同一语义；子类缩进展示，括号内为闭包命中数"
         >
           <option value="">全部类型</option>
-          {(facets?.typeKeys ?? []).map((k) => <option key={k} value={k}>{k}</option>)}
+          {typeFlat && typeFlat.length > 0
+            ? typeFlat.map(({ node, depth }) => (
+                <option key={node.key} value={node.key}>
+                  {depth > 0 ? `${"　".repeat(depth)}└ ` : ""}{node.key}（{node.closureAssetCount}
+                  {node.subclassKeys.length > 0 ? `，含 ${node.subclassKeys.length} 子类` : ""}）
+                </option>
+              ))
+            : (facets?.typeKeys ?? []).map((k) => <option key={k} value={k}>{k}</option>)}
         </select>
         <select aria-label="按标签过滤" value={label} onChange={(e) => setLabel(e.target.value)}>
           <option value="">全部标签</option>
@@ -1618,6 +1701,12 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
           ★ 只看收藏
         </button>
       </div>
+      {selectedTypeNode && selectedTypeNode.subclassKeys.length > 0 && (
+        <div style={{ margin: "0 0 6px", fontSize: 12, color: "var(--faint, #999)" }}>
+          类闭包已展开：<code>{selectedTypeNode.key}</code> 含 {selectedTypeNode.subclassKeys.length} 个子类
+          （{selectedTypeNode.subclassKeys.join("、")}），命中共 {selectedTypeNode.closureAssetCount} 项——行上类型为各自实际类型。
+        </div>
+      )}
       {assets === null ? (
         <div className="state">加载中…</div>
       ) : assets.length === 0 ? (
@@ -1629,7 +1718,9 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
             : "暂无资产。上传文件并登记后出现在这里。"}
         </div>
       ) : (
-        <table className="list">
+        <div className="list-wrap" data-refreshing={refreshing ? "true" : "false"} aria-busy={refreshing}
+          title={refreshing ? "正在按新筛选条件刷新…" : undefined}>
+          <table className="list">
           <thead>
             <tr>
               <th>名称</th>
@@ -1678,6 +1769,7 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

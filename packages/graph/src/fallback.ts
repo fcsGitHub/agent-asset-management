@@ -4,7 +4,9 @@
 import { GraphUnavailableError, typeClosureKeys } from "./queries.js";
 import type { PgExec } from "./projection.js";
 
-/** SQL 闭包：版本级递归 + type_key 去重（RLS 上下文由 exec 决定）。 */
+/** SQL 闭包：版本级递归 + type_key 去重（RLS 上下文由 exec 决定）。
+ *  M71：子版本同样须 status='active'——与 apps/api typeKeyClosure 同一版本感知语义
+ *  （停用版本不再出现在当前本体视图；此前递归段不看子版本状态，两处闭包语义分叉）。 */
 export async function sqlTypeClosure(exec: PgExec, teamId: string, typeKey: string): Promise<string[]> {
   const { rows } = await exec(
     `WITH RECURSIVE tree AS (
@@ -13,6 +15,7 @@ export async function sqlTypeClosure(exec: PgExec, teamId: string, typeKey: stri
        UNION
        SELECT c.id, c.type_key FROM asset_type_versions c
         JOIN tree t ON c.team_id = $1 AND c.parent_type_version_id = t.id
+        WHERE c.team_id = $1 AND c.status = 'active'
      ) SELECT DISTINCT type_key FROM tree`,
     [teamId, typeKey]
   );

@@ -960,3 +960,49 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    暂缓项：无新增。可选后续方向（M70 后）：SPDX 第二输出格式（有真实消费方再
    加）；弃用影响面清单（Dependabot 式多下游聚合视图——等真实多下游场景）；
    版本级弃用（与通道回滚关系需先想清楚）；AI 草稿质量反馈环（同 M69 口径）。
+
+### M71 本体关联轮（已完成）
+
+用户点名：把资产管理与本体关联相结合（跨门类搜索/管理）+ 结合 Agent 方便操作 +
+调研同类产品 + 功能丰富 + 漏洞修复 + 交互优化防抖动。调研（research-M71-
+ontology-catalog.md，Palantir Foundry Ontology 文档本轮 WebFetch 实读；Atlas/
+DataHub/Wikidata/OpenMetadata 公开文档既有知识）坐实核心差距：**类型层次（M8
+subClassOf）存在但目录搜索 type 过滤是精确匹配——选父类搜不到子类资产**；Agent 只有
+graph.assetsByType 有闭包语义，通用 asset.search 没有；Agent 完全没有「浏览本体本身」
+的工具；属性筛选要求记忆键名。交付五项 + 三处真 bug：
+①**目录类闭包展开**（Wikidata P279*/Foundry Interfaces 锚点）——apps/api ontology.ts
+新增 typeKeyClosure（版本感知递归 CTE：根与子版本均须 active）；queryAssetRows type
+过滤改闭包（search/export/summary 三端点同源自动一致）；行上 type_key 仍为各自实际
+类型（展开如实可见），闭包键集经 /ontology/tree 呈现；未知类型空结果不静默放宽；
+闭包×属性筛选同候选集取交集。@taw/graph fallback.sqlTypeClosure 对齐同一版本语义
+（B3：此前递归段不看子版本状态）。
+②**本体树端点 GET /ontology/tree**（Foundry Ontology Manager 锚点）——每 type_key
+最新 active 版本：parentKey/资产计数/closureAssetCount（=目录闭包过滤真实命中数）/
+模式声明属性键/必填键/requiresTestEvidence + 关系注册表（domain/range/断言数）；树
+构建纯函数 @taw/domain/ontology-tree（层次+闭包计数+悬空父引用升根如实标注+环防御
++展平带 depth+relationsForClosure 空清单=该侧开放语义）。
+③**Agent 本体工具**（Foundry AIP「Agent 第一入口是本体层」锚点）——ontology.types
+（浏览门类树带闭包计数/属性键/必填键，q 过滤）+ ontology.typeInfo（类型链子→父全
+级+必填并集+子类闭包+适用关系 asSource/asTarget+计数；幽灵类型如实报错引导）+
+asset.search type 参数闭包对齐（与人类目录同一语义，不再精确匹配漏子类）。
+④**属性键发现**（DataHub facet 由数据聚合锚点）——/assets/facets 附 propertyKeys
+（head 修订 jsonb_object_keys 聚合 top50 带计数，非归档口径）；目录属性筛选输入框挂
+datalist（跨门类公共键 owner/platform 可发现，不必记忆）。
+⑤**目录防抖动（真 bug 修复）**——AssetList 此前每次筛选变化 setAssets(null) 整表
+卸载闪「加载中…」重挂载、关键词每键击一次请求+一次 URL 写回（B2）；改 stale-while-
+revalidate（旧结果保留、.list-wrap data-refreshing 半透明过渡、仅首次/切项目整块
+加载态）+ 关键词/属性输入 300ms 防抖（即时回显延迟提交）。
+**B1（M70 漏改真 bug）**：/ontology/assets-by-type 的 lifecycle 过滤仍是 M70 前旧
+口径（CASE WHEN active 归档二值）——默认 active 视图把已弃用资产排除，与 M70 修正
+过的目录/Agent 链路不一致；已对齐（active=active+deprecated，弃用排后）。
+tests/m71 八项（纯函数三+端到端五）；全量 71 套件 359 项全绿（+8 零回归）。浏览器
+实测（demo 三级层级 vehicle←sat←optical+旁支+弃用项）：层次下拉「vehicle（4，含
+2 子类）／└ sat（3，含 1 子类）／└ optical（1）」、选父类提示行列子类与命中数+4
+行跨类型命中+URL 写回、本体页闭包检索卡（图同步后）4 项含弃用行排最后（B1 修复前
+被排除）、防抖动实测 5 键击仅 1 次 search 请求表格全程在位零闪断、datalist 四键带
+计数、闭包×owner=Bob 唯一命中。截图三张：m71-ui-closure-catalog、
+m71-ui-closure-prop-filter、m71-ui-ontology-closure-deprecated。环境注记：走查发现
+4000/5175 被上一会话孤儿进程占用致浏览器打到旧代码，杀进程重启后全过。
+暂缓项：无新增。可选后续方向（M71 后）：类型多继承/接口类型（Foundry Interfaces
+全量——需 schema 级改造）；独立业务术语表（labels 已覆盖轻量场景）；全文/向量语义
+检索（需搜索引擎基建）；观测属性键进 Agent 工具（ontology.* 已带模式声明键）。

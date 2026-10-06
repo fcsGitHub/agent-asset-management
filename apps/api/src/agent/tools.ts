@@ -6,6 +6,8 @@
 import type { PoolClient } from "pg";
 import { canonicalDigest } from "@taw/domain/digest";
 import { GraphUnavailableError, findShortestPath, neighborhood, resolveTypeClosure } from "@taw/graph";
+import { loadOntology, typeKeyClosure } from "../ontology.js";
+import { flattenOntologyTree, relationsForClosure } from "@taw/domain/ontology-tree";
 
 export type ToolTier = "read" | "draft";
 
@@ -37,16 +39,23 @@ export const READONLY_TOOLS: ToolDef[] = [
     tier: "read",
     description:
       "按名称关键词与类型检索本团队资产目录，返回资产与最新修订摘要。" +
+      "type 是类闭包过滤（Wikidata 子类口径）：给父类自动包含全部子类，与人类目录同一语义。" +
       "含进行中与已弃用资产（lifecycle 字段如实标注，已弃用应提醒用户），不含归档资产。",
     parameters: {
       type: "object",
       properties: {
         q: { type: "string", description: "名称关键词" },
-        type: { type: "string", description: "类型键（可选），如 simulation.model" },
+        type: { type: "string", description: "类型键（可选），如 simulation.model；含全部子类" },
       },
       required: [],
     },
     async execute(client, ctx, args) {
+      const type = String(args.type ?? "");
+      let typeKeys: string[] | null = null;
+      if (type) {
+        typeKeys = await typeKeyClosure(client, ctx.teamId, type);
+        if (typeKeys.length === 0) return [];
+      }
       const { rows } = await client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, r.id AS head_revision_id, r.content_digest
            FROM assets a
@@ -55,12 +64,109 @@ export const READONLY_TOOLS: ToolDef[] = [
                           WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1) r ON true
           WHERE a.team_id = $1
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
-            AND ($3 = '' OR tv.type_key = $3)
+            AND ($3 = '' OR tv.type_key = ANY($4::text[]))
             AND a.lifecycle <> 'archived'
           ORDER BY (a.lifecycle = 'deprecated'), a.created_at DESC LIMIT 20`,
-        [ctx.teamId, String(args.q ?? ""), String(args.type ?? "")]
+        [ctx.teamId, String(args.q ?? ""), type, typeKeys ?? []]
       );
       return rows;
+    },
+  },
+  {
+    name: "ontology.types",
+    tier: "read",
+    description:
+      "浏览本团队本体（资产类型注册表的层次树）：每个类型带中文名、父类、资产计数（closureAssetCount = " +
+      "选它过滤目录会命中的资产数，含全部子类）、模式声明的属性键与必填键。回答「团队有哪些门类」" +
+      "「哪类资产带 owner 字段」「哪类资产最多」等问题的第一入口；查单个类型细节用 ontology.typeInfo。",
+    parameters: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "按类型键或中文名过滤（可选，不区分大小写包含）" },
+      },
+      required: [],
+    },
+    async execute(client, ctx, args) {
+      const { tree } = await loadOntology(client, ctx.teamId);
+      const q = String(args.q ?? "").trim().toLowerCase();
+      const flat = flattenOntologyTree(tree);
+      const hit = q
+        ? flat.filter(
+            (n) => n.key.toLowerCase().includes(q) || n.title.toLowerCase().includes(q)
+          )
+        : flat;
+      return {
+        count: hit.length,
+        types: hit.map((n) => ({
+          typeKey: n.key,
+          title: n.title,
+          parentKey: n.parentKey,
+          depth: n.depth,
+          assetCount: n.assetCount,
+          closureAssetCount: n.closureAssetCount,
+          subclassKeys: n.subclassKeys,
+          propertyKeys: n.propertyKeys,
+          requiredKeys: n.requiredKeys,
+          requiresTestEvidence: n.requiresTestEvidence,
+        })),
+      };
+    },
+  },
+  {
+    name: "ontology.typeInfo",
+    tier: "read",
+    description:
+      "查单个资产类型的登记口径（本体层细节）：类型链（自身+全部祖先，子类型须满足链上全部定义）与每级" +
+      "必填字段、模式声明属性键、子类闭包、该闭包可挂的关系类型（domain/range 口径，asSource/asTarget " +
+      "标注适用侧）与资产计数。回答「登记 X 要填什么」「哪些关系能连它」「它有哪些子类」。",
+    parameters: {
+      type: "object",
+      properties: {
+        typeKey: { type: "string", description: "资产类型键，如 simulation.model" },
+      },
+      required: ["typeKey"],
+    },
+    async execute(client, ctx, args) {
+      const typeKey = String(args.typeKey ?? "").trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9.\-]{0,63}$/.test(typeKey)) {
+        throw new Error("typeKey 非法：字母开头，仅含字母/数字/点/连字符，如 simulation.model");
+      }
+      const { tree, relations } = await loadOntology(client, ctx.teamId);
+      const flat = flattenOntologyTree(tree);
+      const node = flat.find((n) => n.key === typeKey);
+      if (!node) {
+        throw new Error(
+          `类型「${typeKey}」不在本团队本体中（可先用 ontology.types 浏览现有类型）`
+        );
+      }
+      // 类型链（子→父→…→根）：沿 parentKey 上溯（树构建已做环防御）
+      const byKey = new Map(flat.map((n) => [n.key, n]));
+      const chain: { typeKey: string; title: string; version: string; requiredKeys: string[]; propertyKeys: string[] }[] = [];
+      let cursor: (typeof node) | null = node;
+      while (cursor) {
+        chain.push({
+          typeKey: cursor.key,
+          title: cursor.title,
+          version: cursor.version,
+          requiredKeys: cursor.requiredKeys,
+          propertyKeys: cursor.propertyKeys,
+        });
+        cursor = cursor.parentKey ? (byKey.get(cursor.parentKey) ?? null) : null;
+      }
+      const closureKeys = [node.key, ...node.subclassKeys];
+      return {
+        typeKey: node.key,
+        title: node.title,
+        version: node.version,
+        parentKey: node.parentKey,
+        chain,
+        requiredAll: [...new Set(chain.flatMap((c) => c.requiredKeys))].sort(),
+        subclassKeys: node.subclassKeys,
+        assetCount: node.assetCount,
+        closureAssetCount: node.closureAssetCount,
+        requiresTestEvidence: node.requiresTestEvidence,
+        relations: relationsForClosure(closureKeys, relations),
+      };
     },
   },
   {

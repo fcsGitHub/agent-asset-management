@@ -649,6 +649,11 @@ table.list th { background: var(--surface-2); color: var(--ink-2); font-weight: 
 table.list tbody tr { transition: background var(--dur-fast) var(--ease); }
 table.list tbody tr:hover { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); cursor: pointer; }
 
+/* 目录刷新态（M71⑥ stale-while-revalidate）：筛选变更保留旧结果、容器过渡到半透明
+   指示刷新中——不再整表卸载闪「加载中…」重挂载（防抖动） */
+.list-wrap { transition: opacity 0.18s ease; }
+.list-wrap[data-refreshing="true"] { opacity: 0.55; }
+
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 5px 12px; font-size: 13.5px; }
 .kv .k { color: var(--muted); }
 
