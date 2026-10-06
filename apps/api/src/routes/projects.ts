@@ -331,8 +331,11 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   const ACTION_LABELS: Record<string, string> = {
     "asset.archive": "归档资产",
     "asset.restore": "恢复资产",
+    "asset.deprecate": "弃用资产",
+    "asset.undeprecate": "取消弃用",
     "asset.lineage_materialize": "物化血缘关联",
     "asset.labels_propagate": "沿血缘传播标签",
+    "asset.sbom": "导出 SBOM",
     "collection.snapshot_create": "创建分享快照",
     "collection.snapshot_revoke": "吊销分享快照",
     "review_prepared": "准备审核快照",

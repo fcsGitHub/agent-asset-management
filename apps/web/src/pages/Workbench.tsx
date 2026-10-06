@@ -81,6 +81,10 @@ interface AssetDetail {
   completeness?: { score: number; checks: { key: string; title: string; passed: boolean; detail: string; hint: string; weight: number }[] };
   lineageRefs?: { field: string; refs: string[] }[];
   pinned?: boolean;
+  // 弃用元数据（M70）：标记时间/原因/继任者——详情横幅与 Agent 告警的数据源
+  deprecatedAt?: string | null;
+  deprecationNote?: string | null;
+  successor?: { id: string; name: string; lifecycle: string } | null;
 }
 interface Relations { outgoing: RelRow[]; incoming: RelRow[] }
 interface RelRow { id: string; type_key: string; status: string; source_name: string; target_name: string; source_asset_id?: string; target_asset_id?: string; source_lifecycle?: string; target_lifecycle?: string }
@@ -1442,7 +1446,9 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
   // 筛选条件 URL 化（M54）：初始从查询串恢复（可收藏可分享），变更写回 replaceState
   const initialParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const [keyword, setKeyword] = useState(initialParams.get("q") ?? "");
-  const [lifecycle, setLifecycle] = useState(initialParams.get("lifecycle") === "archived" || initialParams.get("lifecycle") === "all" ? initialParams.get("lifecycle")! : "active");
+  // 生命周期过滤（M70 语义分层）：active 默认= 进行中+已弃用（弃用可见带警示）；可单看 deprecated
+  const initialLifecycle = ["deprecated", "archived", "all"].includes(initialParams.get("lifecycle") ?? "") ? initialParams.get("lifecycle")! : "active";
+  const [lifecycle, setLifecycle] = useState(initialLifecycle);
   const [facets, setFacets] = useState<AssetFacets | null>(null);
   const [type, setType] = useState(initialParams.get("type") ?? "");
   const [family, setFamily] = useState(initialParams.get("family") ?? "");
@@ -1591,8 +1597,9 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
             <option key={l.label} value={l.label}>{l.label}（{l.count}）</option>
           ))}
         </select>
-        <select aria-label="生命周期过滤" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)}>
-          <option value="active">进行中</option>
+        <select aria-label="生命周期过滤" value={lifecycle} onChange={(e) => setLifecycle(e.target.value)} title="进行中 = 默认视图，含已弃用（弃用资产仍可见、带警示，HF deprecated models 口径）；归档 = 隐藏的终态资产">
+          <option value="active">进行中（含已弃用）</option>
+          <option value="deprecated">仅已弃用</option>
           <option value="archived">已归档</option>
           <option value="all">全部</option>
         </select>
@@ -1617,7 +1624,9 @@ function AssetList({ project, onOpen, onRegister }: { project?: ProjectInfo; onO
         <div className="state">
           {hasFilter
             ? "当前筛选条件下没有资产。"
-            : lifecycle === "archived" ? "没有已归档资产。" : "暂无资产。上传文件并登记后出现在这里。"}
+            : lifecycle === "archived" ? "没有已归档资产。"
+            : lifecycle === "deprecated" ? "没有已弃用资产（弃用 = 仍可见带警示 + 继任者指引，与归档分层）。"
+            : "暂无资产。上传文件并登记后出现在这里。"}
         </div>
       ) : (
         <table className="list">
@@ -1923,28 +1932,99 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
     }
   }
 
+  // 弃用（M70，MLflow Archived/Docker Hub deprecated/HF deprecated models 锚点）：
+  // 弃用 = 仍可见仍可取用但带警示 + 继任者指引，可逆；与归档（隐藏+终态）分层。
+  async function deprecate() {
+    const note = window.prompt("弃用原因（必填，将写入审计日志并展示在详情页横幅）：");
+    if (!note || note.trim().length < 4) {
+      if (note !== null) window.alert("原因至少 4 个字符。");
+      return;
+    }
+    const ref = window.prompt("继任者资产（可选，填资产名或别名，精确匹配；留空表示暂无继任者）：");
+    if (ref === null) return;
+    try {
+      const res = await api<{ repeated: boolean; successor: { id: string; name: string } | null }>(
+        `/assets/${assetId}/deprecate`,
+        { method: "POST", body: { teamId, note: note.trim(), successorRef: ref.trim() ? ref.trim() : undefined } }
+      );
+      setLifecycleMsg(res.repeated ? "弃用信息已更新（原因/继任者）。" : "已标记弃用：目录仍可见并带警示，下载/引用不受阻。");
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "操作失败");
+    }
+  }
+
+  async function undeprecate() {
+    const reason = window.prompt("取消弃用的原因（必填，将写入审计日志）：");
+    if (!reason || reason.trim().length < 4) {
+      if (reason !== null) window.alert("原因至少 4 个字符。");
+      return;
+    }
+    try {
+      await api(`/assets/${assetId}/undeprecate`, { method: "POST", body: { teamId, reason: reason.trim() } });
+      setLifecycleMsg("已取消弃用，资产回到进行中。");
+      await reload();
+    } catch (err) {
+      window.alert(err instanceof ApiError ? `${err.message}${err.details ? `：${JSON.stringify(err.details)}` : ""}` : "操作失败");
+    }
+  }
+
   if (error) return <div className="state error">{error}</div>;
   if (!detail) return <div className="state">加载中…</div>;
   const head = detail.revisions[0];
   const archived = detail.lifecycle === "archived";
+  const deprecated = detail.lifecycle === "deprecated";
   const headArtifacts = head?.artifacts ?? [];
   // 上游/下游健康提示（M54，Atlas「分类沿血缘传播」的读侧诚实形态）：
-  // 依赖链上有非进行中资产时警示——只提示不自动改状态，治理动作仍由人执行
+  // 依赖链上有非进行中资产时警示——只提示不自动改状态，治理动作仍由人执行；
+  // M70 起区分文案：已弃用（可循继任者迁移）与已归档（终态）
   const badUpstream = rels?.incoming.filter((r) => r.source_lifecycle && r.source_lifecycle !== "active") ?? [];
   const badDownstream = rels?.outgoing.filter((r) => r.target_lifecycle && r.target_lifecycle !== "active") ?? [];
   const depAlert = [...badUpstream, ...badDownstream];
   return (
     <>
+      {deprecated && (
+        <div
+          className="card"
+          style={{ padding: "10px 14px", marginBottom: 10, borderLeft: "4px solid #b3541e", background: "var(--card, #fff)" }}
+          role="alert"
+        >
+          <strong style={{ color: "#b3541e" }}>⚠ 此资产已被标记弃用{detail.deprecatedAt ? `（${new Date(detail.deprecatedAt).toLocaleDateString("zh-CN")}）` : ""}</strong>
+          {detail.deprecationNote && <span>：{detail.deprecationNote}</span>}
+          {detail.successor && (
+            <span>
+              　请改用继任者：
+              <a
+                href={`?view=assets&asset=${detail.successor.id}`}
+                onClick={(e) => { if (onOpenAsset) { e.preventDefault(); onOpenAsset(detail.successor!.id); } }}
+                style={{ fontWeight: 600 }}
+              >
+                {detail.successor.name}
+              </a>
+              {detail.successor.lifecycle === "deprecated" && (
+                <span className="badge" style={{ background: "#5a5a66", color: "#fff", marginLeft: 6, fontSize: 11 }}>注意：继任者自身也已弃用</span>
+              )}
+            </span>
+          )}
+          {!detail.successor && <span style={{ color: "var(--muted, #666)" }}>（未指定继任者）</span>}
+          <div style={{ fontSize: 12.5, color: "var(--muted, #666)", marginTop: 4 }}>
+            弃用不隐藏：目录仍可见、下载与引用不受阻；修复后可「取消弃用」回到进行中。
+          </div>
+        </div>
+      )}
       <div className="card">
         <h3>
           {detail.name}
           {archived && (
             <span className="badge" style={{ background: "#6b5b3e", color: "#fff", marginLeft: 8 }}>已归档</span>
           )}
+          {deprecated && (
+            <span className="badge" style={{ background: "#5a5a66", color: "#fff", marginLeft: 8 }}>已弃用</span>
+          )}
         </h3>
         <div className="kv">
           <span className="k">类型</span><span><span className="badge">{detail.type_key}</span>v{detail.type_version}</span>
-          <span className="k">生命周期</span><span>{archived ? "已归档（目录默认视图隐藏，禁止新草稿）" : detail.lifecycle === "deprecated" ? "已弃用" : "进行中"}</span>
+          <span className="k">生命周期</span><span>{archived ? "已归档（目录默认视图隐藏，禁止新草稿）" : deprecated ? "已弃用（目录可见带警示，仍可取用，可取消）" : "进行中"}</span>
           <span className="k">分类</span><span>{detail.categories.map((c) => c.category_path).join(" · ") || "—"}</span>
           <span className="k">标签</span><span>{detail.labels.join(" · ") || "—"}</span>
           <span className="k">别名</span>
@@ -2002,7 +2082,15 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
           {archived ? (
             <button onClick={() => void changeLifecycle("restore")}>恢复资产</button>
           ) : (
-            <button onClick={() => void changeLifecycle("archive")}>归档资产…</button>
+            <>
+              <button onClick={() => void deprecate()} title="标记弃用：目录仍可见带警示 + 继任者指引，可随时取消（与归档分层）">
+                弃用资产…
+              </button>
+              {deprecated && (
+                <button onClick={() => void undeprecate()} title="取消弃用，资产回到进行中">取消弃用</button>
+              )}
+              <button onClick={() => void changeLifecycle("archive")}>归档资产…</button>
+            </>
           )}
           {!archived && detail.labels.length > 0 && (
             <PropagateLabelsBtn teamId={teamId} assetId={detail.id} onDone={() => void reload()} />
@@ -2012,6 +2100,14 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
               在图谱中查看
             </button>
           )}
+          <a
+            className="ref-chip"
+            href={`/api/v1/assets/${detail.id}/sbom?teamId=${teamId}`}
+            download
+            title="导出 CycloneDX 1.5 SBOM：主体 + 关系闭包（直接依赖）的机器可读物料清单，供应链工具可消费；导出计一次下载热度并进团队动态"
+          >
+            导出 SBOM
+          </a>
           <CopyRefBtn text={`资产「${detail.name}」(id: ${detail.id}, 类型 ${detail.type_key} v${detail.type_version})`} teamId={teamId} assetId={detail.id} />
           <BibTeXBtn teamId={teamId} assetId={detail.id} />
           <PinDetailBtn teamId={teamId} assetId={detail.id} initialPinned={detail.pinned === true} />
@@ -2023,9 +2119,9 @@ function AssetDetailPanel({ teamId, projectId, assetId, role, onOpenGraph, onOpe
             <IconAlert size={14} />
             <span>
               依赖链上存在非进行中资产：
-              {badUpstream.map((r) => `上游「${r.source_name}」（${LIFECYCLE_LABEL[r.source_lifecycle!] ?? r.source_lifecycle}）`).join("、")}
+              {badUpstream.map((r) => `上游「${r.source_name}」（${LIFECYCLE_LABEL[r.source_lifecycle!] ?? r.source_lifecycle}${r.source_lifecycle === "deprecated" ? "，请查继任者" : ""}）`).join("、")}
               {badUpstream.length > 0 && badDownstream.length > 0 ? "；" : ""}
-              {badDownstream.map((r) => `下游「${r.target_name}」（${LIFECYCLE_LABEL[r.target_lifecycle!] ?? r.target_lifecycle}）`).join("、")}
+              {badDownstream.map((r) => `下游「${r.target_name}」（${LIFECYCLE_LABEL[r.target_lifecycle!] ?? r.target_lifecycle}${r.target_lifecycle === "deprecated" ? "，请查继任者" : ""}）`).join("、")}
               ——本资产可能受影响，请核查（血缘传播提示；归档/弃用等治理动作仍由人执行）。
             </span>
           </div>

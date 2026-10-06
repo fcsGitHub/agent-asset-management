@@ -18,7 +18,8 @@
     "./cite": "./src/cite.ts",
     "./lineage": "./src/lineage.ts",
     "./prop-filter": "./src/prop-filter.ts",
-    "./completeness-summary": "./src/completeness-summary.ts"
+    "./completeness-summary": "./src/completeness-summary.ts",
+    "./sbom": "./src/sbom.ts"
   },
   "dependencies": {
     "ajv": "^8.17.0"

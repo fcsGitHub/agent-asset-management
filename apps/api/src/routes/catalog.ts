@@ -231,12 +231,14 @@ export async function createRelationAssertion(
 
 /** 目录行查询（M67 抽共享）：search / completeness-summary / export 共用同一条 SQL 与过滤语义。
  *  propFilters 逐项 `r.properties->>$k = $v`（->> 右参可参数化，无注入面；文本等值）。
- *  userId 存在时行附 pinned（当前用户视角，M69③）且 pinnedOnly 可过滤「我的收藏」。 */
+ *  userId 存在时行附 pinned（当前用户视角，M69③）且 pinnedOnly 可过滤「我的收藏」。
+ *  lifecycle（M70）：active（默认）= active + deprecated——弃用资产仍可见仍可取用，带
+ *  警示不隐藏（HF deprecated models / Docker Hub deprecated images 口径）；归档才是隐藏。 */
 async function queryAssetRows(
   teamId: string,
   opts: {
     q?: string; type?: string; label?: string; typePrefix?: string;
-    lifecycle: "active" | "archived" | "all";
+    lifecycle: "active" | "deprecated" | "archived" | "all";
     propFilters: PropFilter[];
     sort: "newest" | "refs" | "usage" | "completeness";
     limit: number;
@@ -325,7 +327,7 @@ async function queryAssetRows(
                  WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
               ))
           AND ($3 = '' OR tv.type_key = $3)
-          AND ($4 = 'all' OR a.lifecycle = CASE WHEN $4 = 'archived' THEN 'archived' ELSE 'active' END)
+          AND ($4 = 'all' OR ($4 = 'active' AND a.lifecycle IN ('active', 'deprecated')) OR a.lifecycle = $4)
           AND ($5 = '' OR EXISTS (
                 SELECT 1 FROM asset_labels l
                  WHERE l.team_id = a.team_id AND l.asset_id = a.id AND l.label = $5
@@ -1311,11 +1313,15 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------- 查询 ----------
-  // lifecycle 过滤：active（默认，排除归档）/ archived（仅归档）/ all
+  // lifecycle 过滤（M70 语义分层）：active（默认）= 进行中 + 已弃用（弃用可见带警示不隐藏）/
+  // deprecated（仅已弃用）/ archived（仅归档）/ all
   // M53 分面：label（精确）与 typePrefix（前缀，支撑 文档/代码/测试/数据 家族快筛）
   // M54（Amundsen 排序信号）：relation_count 被引数；sort=refs 按关联数降序（默认最新登记）
   // M67②：prop=key=value（可重复）按 head 修订属性等值过滤（OpenMetadata 任意属性筛选）
   // M67④：行附 matched_alias（命中 q 的第一个别名）——⌘K/引用候选解释「为何命中」
+  const LIFECYCLE_VALUES = ["active", "deprecated", "archived", "all"] as const;
+  const parseLifecycle = (raw: unknown): (typeof LIFECYCLE_VALUES)[number] =>
+    (LIFECYCLE_VALUES as readonly string[]).includes(String(raw)) ? (raw as (typeof LIFECYCLE_VALUES)[number]) : "active";
   app.get("/assets/search", async (req) => {
     const auth = requireAuth(req);
     const query = (req.query ?? {}) as {
@@ -1330,7 +1336,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       throw ERR.INVALID(`属性筛选格式不正确：${problems.join("；")}`, problems);
     }
     const limit = Math.min(Number(query.limit ?? 50), 200);
-    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const lifecycle = parseLifecycle(query.lifecycle);
     const sort =
       query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
     // sort=completeness 时先取满候选集（≤200），分数算完在 JS 内升序再截断
@@ -1408,7 +1414,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     if (problems.length > 0) {
       throw ERR.INVALID(`属性筛选格式不正确：${problems.join("；")}`, problems);
     }
-    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const lifecycle = parseLifecycle(query.lifecycle);
     const sort =
       query.sort === "refs" || query.sort === "usage" || query.sort === "completeness" ? query.sort : "newest";
     const EXPORT_CAP = 500;
@@ -1485,7 +1491,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
-    const lifecycle = query.lifecycle === "archived" || query.lifecycle === "all" ? query.lifecycle : "active";
+    const lifecycle = parseLifecycle(query.lifecycle);
     const rows = await queryAssetRows(teamId, { lifecycle, propFilters: [], sort: "newest", limit: 200, userId: auth.userId });
     const scored = await scoreAssetRows(teamId, rows);
     const entries = scored.map((r) => ({
@@ -1906,8 +1912,12 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const revOffset = Math.max(Number(query.revOffset ?? 0), 0);
     return withTeam(teamId, async (client) => {
       const { rows } = await client.query(
-        `SELECT a.id, a.name, a.lifecycle, a.created_at, tv.type_key, tv.version AS type_version, tv.id AS type_version_id
-           FROM assets a JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+        `SELECT a.id, a.name, a.lifecycle, a.created_at, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
+                a.deprecated_at, a.deprecation_note,
+                s.id AS successor_id, s.name AS successor_name, s.lifecycle AS successor_lifecycle
+           FROM assets a
+           JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+           LEFT JOIN assets s ON s.team_id = a.team_id AND s.id = a.successor_asset_id
           WHERE a.team_id = $1 AND a.id = $2`,
         [teamId, assetId]
       );
@@ -1999,6 +2009,13 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         usage,
         completeness,
         pinned: !!pinRows[0],
+        // 弃用元数据（M70，MLflow/Docker Hub/HF deprecated 锚点）：标记时间/原因/继任者——
+        // 详情页警示横幅与 Agent 读取告警的数据源；未弃用时全空
+        deprecatedAt: asset.deprecated_at instanceof Date ? asset.deprecated_at.toISOString() : (asset.deprecated_at ?? null),
+        deprecationNote: asset.deprecation_note ?? null,
+        successor: asset.successor_id
+          ? { id: asset.successor_id, name: asset.successor_name, lifecycle: asset.successor_lifecycle }
+          : null,
         // 派生血缘字段提示（M67①，HF base_model）：head 属性里声明的血缘引用——
         // 展示为可物化提示，不自动建边（物化走 POST /assets/:id/lineage/materialize）
         lineageRefs: extractLineageRefs(head?.properties ?? {}),
@@ -2116,6 +2133,118 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       await client.query(
         `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
          VALUES ($1, $2, 'asset.restore', 'asset', $3, $4)`,
+        [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
+      );
+      // 图投影脏标记（M49）：lifecycle 变更
+      await markGraphDirty(client, body.teamId);
+    });
+    return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "active" });
+  });
+
+  // ---------- 生命周期：弃用 / 取消弃用（M70）----------
+  // 弃用语义（MLflow Model Registry Archived 阶段 / Docker Hub deprecated images /
+  // HF deprecated models 锚点）：与归档分层——弃用 = 仍在目录默认视图（带警示）+
+  // 仍可下载/引用/读 + 继任者指引；归档 = 隐藏 + 禁草稿终态。弃用不阻断草稿与 CR
+  //（修复后取消弃用即回进行中，动作可逆）。权限与归档同口径：创建者或管理员。
+  // 重复弃用 = 更新原因/继任者（幂等管理动作，审计如实标注 repeated）。
+  async function resolveSuccessorRef(
+    client: PoolClient,
+    teamId: string,
+    ref: string
+  ): Promise<{ id: string; name: string }> {
+    // 解析口径与 Agent resolveAssetRef 同源语义：名称精确 → 别名精确；模糊不猜
+    const { rows: byName } = await client.query<{ id: string; name: string }>(
+      `SELECT id, name FROM assets WHERE team_id = $1 AND name = $2`,
+      [teamId, ref]
+    );
+    if (byName[0]) return byName[0];
+    if (byName.length === 0) {
+      const { rows: byAlias } = await client.query<{ id: string; name: string }>(
+        `SELECT a.id, a.name FROM asset_aliases al JOIN assets a ON a.team_id = al.team_id AND a.id = al.asset_id
+          WHERE al.team_id = $1 AND al.alias = $2`,
+        [teamId, ref.toLowerCase()]
+      );
+      if (byAlias[0]) return byAlias[0];
+    }
+    throw ERR.INVALID(`继任者「${ref}」未解析到资产：仅支持名称或别名的精确匹配，请先核对目录`);
+  }
+
+  app.post("/assets/:assetId/deprecate", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({
+        teamId: z.string().uuid(),
+        note: z.string().min(4).max(500),
+        successorRef: z.string().min(1).max(200).optional(),
+      }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    const successor = body.successorRef ? body.successorRef.trim() : "";
+    if (successor === assetId) throw ERR.CONFLICT("SUCCESSOR_SELF", "继任者不能是资产自身");
+    const result = await withTeam(body.teamId, async (client) => {
+      const asset = await loadAssetForLifecycle(client, body.teamId, assetId);
+      if (asset.lifecycle === "archived") {
+        throw ERR.CONFLICT("ARCHIVED_STATE", "归档是终态：请先恢复资产（restore）再标记弃用");
+      }
+      if (role !== "admin" && asset.created_by !== auth.userId) {
+        throw ERR.FORBIDDEN();
+      }
+      const resolved = successor ? await resolveSuccessorRef(client, body.teamId, successor) : null;
+      await client.query(
+        `UPDATE assets SET lifecycle = 'deprecated', deprecated_at = now(), deprecated_by = $3,
+            deprecation_note = $4, successor_asset_id = $5, meta_version = meta_version + 1
+          WHERE team_id = $1 AND id = $2`,
+        [body.teamId, assetId, auth.userId, body.note, resolved?.id ?? null]
+      );
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'asset.deprecate', 'asset', $3, $4)`,
+        [body.teamId, auth.userId, assetId, JSON.stringify({
+          note: body.note,
+          successor: resolved,
+          name: asset.name,
+          repeated: asset.lifecycle === "deprecated",
+        })]
+      );
+      // 图投影脏标记（M49）：lifecycle 变更
+      await markGraphDirty(client, body.teamId);
+      return { successor: resolved, repeated: asset.lifecycle === "deprecated" };
+    });
+    // M67 教训：send 放事务回调外，避免响应先于 COMMIT 刷出
+    return reply.code(200).send({ teamId: body.teamId, assetId, lifecycle: "deprecated", ...result });
+  });
+
+  app.post("/assets/:assetId/undeprecate", async (req, reply) => {
+    checkCsrf(req);
+    const auth = requireAuth(req);
+    const { assetId } = req.params as { assetId: string };
+    if (!/^[0-9a-f-]{36}$/.test(assetId)) throw ERR.NOT_FOUND();
+    const body = parseBody(
+      z.object({ teamId: z.string().uuid(), reason: z.string().min(4).max(500) }),
+      req.body
+    );
+    const role = await teamRole(auth.userId, body.teamId);
+    await withTeam(body.teamId, async (client) => {
+      const asset = await loadAssetForLifecycle(client, body.teamId, assetId);
+      if (asset.lifecycle !== "deprecated") {
+        throw ERR.CONFLICT("NOT_DEPRECATED", "仅已弃用状态的资产可取消弃用");
+      }
+      if (role !== "admin" && asset.created_by !== auth.userId) {
+        throw ERR.FORBIDDEN();
+      }
+      await client.query(
+        `UPDATE assets SET lifecycle = 'active', deprecated_at = NULL, deprecated_by = NULL,
+            deprecation_note = NULL, successor_asset_id = NULL, meta_version = meta_version + 1
+          WHERE team_id = $1 AND id = $2`,
+        [body.teamId, assetId]
+      );
+      await client.query(
+        `INSERT INTO audit_events (team_id, actor_id, action, object_kind, object_id, detail)
+         VALUES ($1, $2, 'asset.undeprecate', 'asset', $3, $4)`,
         [body.teamId, auth.userId, assetId, JSON.stringify({ reason: body.reason, name: asset.name })]
       );
       // 图投影脏标记（M49）：lifecycle 变更

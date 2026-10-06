@@ -916,3 +916,47 @@ kill -9 崩溃注入、冷启动引导、并发压测）。唯一非通过验收
    筛选 OR 组合/正则（需括号语法）；pin 的团队级聚合（「最多人收藏」排序——等
    真实使用积累，不预造指标）；如继续迭代，建议再做用户走查/收集真实使用反馈，
    或由用户直接点名需求。
+
+   M70 已完成（资产弃用与继任治理 + SBOM 标准导出轮，两项；调研笔记
+   research-M70-deprecation-sbom.md）。①**资产弃用与继任治理**（MLflow Model
+   Registry Archived 阶段 / Docker Hub deprecated images / HF deprecated models
+   + Dependabot deprecation alerts 锚点）：坐实真缺口——assets.lifecycle 的
+   'deprecated' 枚举自基线 CHECK 约束就存在、前端备好「已弃用」徽标，但全链路
+   不可达（无管理端点；queryAssetRows 的 CASE ELSE 'active' 把它当归档悄悄
+   过滤；Agent 检索硬编码 ='active'；facets 与目录口径不一致）。迁移 0030 补
+   deprecated_at/deprecated_by/deprecation_note/successor_asset_id（复合 FK 同
+   团队）；POST /assets/:id/deprecate（note 必填 + successorRef 名称精确→别名
+   精确解析；未解析 422/自身 409/归档态 409 ARCHIVED_STATE；重复弃用=幂等更新
+   原因继任者，审计标 repeated）与 /undeprecate（清空回 active）；权限同归档
+   （创建者或管理员）、meta_version 递增、图投影盖脏标记、send 事务外（M67
+   教训）。**语义分层：弃用=目录仍可见（带警示）+ 取用不受阻 + 继任者指引 +
+   可逆；归档=隐藏终态**——lifecycle 过滤 active（默认）改含 deprecated、新增
+   deprecated 单看（search/summary/export 同源 parseLifecycle）；Agent
+   asset.search/graph.assetsByType 返回 active+deprecated（lifecycle 如实标注、
+   弃用排后），asset.getRevision 读弃用资产附 deprecation{warning,note,
+   successor} 告警（Dependabot 式转述，不阻断）；顺带修通用 asset.search 不过
+   滤归档不标 lifecycle 的缺口。UI：详情弃用横幅（日期/原因/继任者直达；继任者
+   自身已弃用如实提示）+「弃用资产…/取消弃用」按钮 + 目录「仅已弃用」筛选
+   （URL 化）+ 依赖告警文案区分已弃用（请查继任者）/已归档；审计
+   asset.deprecate/asset.undeprecate 进动态过滤与 ⌘K 白名单（「看弃用记录」
+   L1 句式）。②**SBOM 导出**（OWASP CycloneDX 1.5 锚点，1.5 新增
+   machine-learning-model/data 组件类型与七类资产对位）：@taw/domain/sbom 纯
+   函数 typeKeyToComponentType（七类映射、未识别回落如实保留原键）+ buildSbom
+   （bom-ref 确定性 urn:taw:asset:{id}@r{seq}；dependsOn 只列闭包集内出边——
+   截断如实收窄；空依赖显式区分「无/未知」；制品 sha-256 进 hashes；taw:*
+   属性带类型/生命周期/修订摘要，弃用附 note/successor）；GET /assets/:id/
+   sbom?depth=1..3（默认 1=直接依赖，方向固定 out 与 derivedFrom 断言方向一致）
+   attachment RFC 5987 中文文件名；主体计 download 热度 + asset.sbom 审计盖章
+   进动态与 ⌘K；详情页「导出 SBOM」直链。tests/m70 八项（纯函数三断言 + 端到端
+   五：弃用治理全负例/目录三态可见性/取消弃用回滚/SBOM 结构热度审计外团队
+   404/Agent 告警与不误报）；全量 70 套件 351 项全绿（环境注记：宿主重启致
+   PG/graphdb 退出，重新拉起后零代码改动全绿）。浏览器实测（新注册团队走真实
+   登记链路）：弃用双弹窗（原因+继任者）→ 横幅「请改用继任者」、继任者链接
+   直达新引擎详情、新引擎依赖告警「上游已弃用，请查继任者」、SBOM 200
+   CycloneDX 1.5+attachment 中文名+dependsOn 指向继任者+弃用属性、目录
+   ?lifecycle=deprecated 唯一定位、默认视图两资产并标「已弃用」徽标、动态页
+   下拉两新动作+时间线第一条即弃用。截图：m70-ui-deprecate-banner、
+   m70-ui-catalog-deprecated-filter、m70-ui-activity-deprecate。
+   暂缓项：无新增。可选后续方向（M70 后）：SPDX 第二输出格式（有真实消费方再
+   加）；弃用影响面清单（Dependabot 式多下游聚合视图——等真实多下游场景）；
+   版本级弃用（与通道回滚关系需先想清楚）；AI 草稿质量反馈环（同 M69 口径）。

@@ -35,7 +35,9 @@ export const READONLY_TOOLS: ToolDef[] = [
   {
     name: "asset.search",
     tier: "read",
-    description: "按名称关键词与类型检索本团队资产目录，返回资产与最新修订摘要。",
+    description:
+      "按名称关键词与类型检索本团队资产目录，返回资产与最新修订摘要。" +
+      "含进行中与已弃用资产（lifecycle 字段如实标注，已弃用应提醒用户），不含归档资产。",
     parameters: {
       type: "object",
       properties: {
@@ -46,7 +48,7 @@ export const READONLY_TOOLS: ToolDef[] = [
     },
     async execute(client, ctx, args) {
       const { rows } = await client.query(
-        `SELECT a.id, a.name, tv.type_key, r.id AS head_revision_id, r.content_digest
+        `SELECT a.id, a.name, a.lifecycle, tv.type_key, r.id AS head_revision_id, r.content_digest
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
            JOIN LATERAL (SELECT id, content_digest FROM asset_revisions
@@ -54,7 +56,8 @@ export const READONLY_TOOLS: ToolDef[] = [
           WHERE a.team_id = $1
             AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
             AND ($3 = '' OR tv.type_key = $3)
-          ORDER BY a.created_at DESC LIMIT 20`,
+            AND a.lifecycle <> 'archived'
+          ORDER BY (a.lifecycle = 'deprecated'), a.created_at DESC LIMIT 20`,
         [ctx.teamId, String(args.q ?? ""), String(args.type ?? "")]
       );
       return rows;
@@ -88,11 +91,22 @@ export const READONLY_TOOLS: ToolDef[] = [
           );
       if (!rows[0]) throw new Error("修订不存在或与资产不匹配");
       await recordUsage(client, ctx.teamId, assetId, "agent_read", ctx.userId);
+      // 弃用告警（M70，Dependabot deprecation 锚点）：读取如实告知不阻断——
+      // Agent 应把弃用与继任者转述给用户，而不是静默读走
+      const dep = await client.query(
+        `SELECT a.lifecycle, a.deprecation_note, s.name AS successor_name
+           FROM assets a LEFT JOIN assets s ON s.team_id = a.team_id AND s.id = a.successor_asset_id
+          WHERE a.team_id = $1 AND a.id = $2`,
+        [ctx.teamId, assetId]
+      );
+      const deprecation = dep.rows[0]?.lifecycle === "deprecated"
+        ? { warning: "该资产已被标记弃用，请提醒用户改用继任者", note: dep.rows[0].deprecation_note ?? "", successor: dep.rows[0].successor_name ?? null }
+        : null;
       const arts = await client.query(
         `SELECT blob_digest, artifact_role, original_name FROM revision_artifacts WHERE team_id = $1 AND revision_id = $2`,
         [ctx.teamId, String(rows[0].id)]
       );
-      return { ...rows[0], artifacts: arts.rows };
+      return { ...rows[0], deprecation, artifacts: arts.rows };
     },
   },
   {
@@ -129,7 +143,8 @@ export const READONLY_TOOLS: ToolDef[] = [
     tier: "read",
     description:
       "按资产类型检索资产（本体检索：默认包含该类型及其全部子类的类闭包，如检索 analysis.asset 会同时命中其子类 sim.report 下的资产）。" +
-      "图数据库驱动；图库不可用时自动回落 SQL 并在 engine 字段如实标注（graph / sql-fallback / sql）。只返回 active 资产，最多 20 条。",
+      "图数据库驱动；图库不可用时自动回落 SQL 并在 engine 字段如实标注（graph / sql-fallback / sql）。" +
+      "返回进行中与已弃用资产（lifecycle 字段如实标注；已弃用应提醒用户并转述继任者），归档资产不返回，最多 20 条。",
     parameters: {
       type: "object",
       properties: {
@@ -158,8 +173,8 @@ export const READONLY_TOOLS: ToolDef[] = [
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
           WHERE a.team_id = $1 AND tv.type_key = ANY($2::text[])
-            AND ($3 = '' OR a.name ILIKE '%' || $3 || '%') AND a.lifecycle = 'active'
-          ORDER BY a.name LIMIT 20`,
+            AND ($3 = '' OR a.name ILIKE '%' || $3 || '%') AND a.lifecycle IN ('active', 'deprecated')
+          ORDER BY (a.lifecycle = 'deprecated'), a.name LIMIT 20`,
         [ctx.teamId, keys, q]
       );
       return { engine, keys, count: rows.length, assets: rows };
