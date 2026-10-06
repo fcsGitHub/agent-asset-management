@@ -326,7 +326,9 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(req);
     const body = parseBody(candidateImportSchema, req.body);
     await teamRole(auth.userId, body.teamId);
-    return withTeam(body.teamId, async (client) => {
+    // 响应在事务外发出（M67 教训口径统一，M72 收口）：本端点只读、无 read-your-writes
+    // 伤害，但 send-in-transaction 是已认定的反模式——统一在回调内返回纯对象
+    const payload = await withTeam(body.teamId, async (client) => {
       const plan = await planImport(client, body.teamId, body.assetId, body.candidates);
       const duplicates: Array<{ index: number; reason: "queue" | "batch"; relationType: string; sourceText: string; targetText: string }> = [];
       plan.forEach((p, i) => {
@@ -335,14 +337,15 @@ export async function semanticRoutes(app: FastifyInstance): Promise<void> {
           duplicates.push({ index: i, reason: p.reason, relationType: c.relationType, sourceText: c.sourceText, targetText: c.targetText });
         }
       });
-      return reply.code(200).send({
+      return {
         teamId: body.teamId,
         assetId: body.assetId,
         total: body.candidates.length,
         wouldImport: plan.filter((p) => p.importable).length,
         duplicates,
-      });
+      };
     });
+    return reply.code(200).send(payload);
   });
 
   app.get("/semantic/candidates", async (req) => {

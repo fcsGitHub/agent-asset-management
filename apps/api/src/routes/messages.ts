@@ -32,6 +32,12 @@ export async function messageRoutes(app: FastifyInstance): Promise<void> {
       );
       if (!sess[0]) throw ERR.NOT_FOUND();
       if (sess[0].visibility === "private" && sess[0].created_by !== auth.userId) throw ERR.FORBIDDEN();
+      // seq 分配并发防护（M72）：MAX(seq)+1 后插入的 check-then-insert 竞态下会产生
+      // 重复 seq（唯一约束 500）——同会话写入用事务级咨询锁串行化（事务结束自动释放）
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`, [
+        body.teamId,
+        sessionId,
+      ]);
       const { rows: last } = await client.query<{ seq: string }>(
         `SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE team_id = $1 AND session_id = $2`,
         [body.teamId, sessionId]

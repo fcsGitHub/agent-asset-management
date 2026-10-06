@@ -117,6 +117,15 @@ export async function branchRoutes(app: FastifyInstance): Promise<void> {
         throw ERR.CONFLICT("ASSET_ARCHIVED", "资产已归档，不能写入新草稿修订；先恢复资产再操作");
       }
 
+      // 首草稿并发防护（M72）：branch_entries 尚无行时下面的 FOR UPDATE 无行可锁，
+      // 两个并发首草稿都会走「读 main 头 → INSERT」路径并以 PK 冲突 500 收场——
+      // 以（分支 × 资产）键取事务级咨询锁，把 check-then-insert 串行化（已有行时
+      // 行锁照常生效，咨询锁只是补上无行可锁的空窗）
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))`, [
+        body.teamId,
+        branchId,
+        body.assetId,
+      ]);
       // 解析当前头：分支已有条目 → 其 head；否则 main/stable 头（最新修订）
       const { rows: entry } = await client.query<{ base_revision_id: string; head_revision_id: string }>(
         `SELECT base_revision_id, head_revision_id FROM branch_entries

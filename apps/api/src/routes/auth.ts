@@ -29,6 +29,33 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+// 登录失败限速（M72，OWASP Authentication Cheat Sheet 防爆破锚点）：进程内滑动窗，
+// 键 = 请求 IP + 邮箱小写（同 IP 下不同账号互不影响）。诚实边界：单实例内存态，
+// 多实例部署需共享存储（Redis 等）——与 activityHub 实时通道同口径，不做分布式声称。
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const LOGIN_MAX_FAILURES = 10;
+const loginFailures = new Map<string, { n: number; resetAt: number }>();
+const loginFailKey = (ip: string, email: string) => `${ip}|${email.trim().toLowerCase()}`;
+
+function loginThrottled(key: string): boolean {
+  const rec = loginFailures.get(key);
+  if (!rec) return false;
+  if (rec.resetAt <= Date.now()) {
+    loginFailures.delete(key);
+    return false;
+  }
+  return rec.n >= LOGIN_MAX_FAILURES;
+}
+
+function recordLoginFailure(key: string): void {
+  const rec = loginFailures.get(key);
+  if (!rec || rec.resetAt <= Date.now()) {
+    loginFailures.set(key, { n: 1, resetAt: Date.now() + LOGIN_WINDOW_MS });
+    return;
+  }
+  rec.n += 1;
+}
+
 export function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) {
@@ -72,14 +99,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/auth/login", { config: { exemptAuth: true } }, async (req, reply) => {
     const body = parseBody(loginSchema, req.body);
+    const failKey = loginFailKey(req.ip ?? "unknown", body.email);
+    if (loginThrottled(failKey)) {
+      throw ERR.TOO_MANY("登录失败次数过多，请 15 分钟后再试");
+    }
     const { rows } = await q<{ id: string; password_hash: string; is_active: boolean }>(
       `SELECT id, password_hash, is_active FROM users WHERE email = $1`,
       [body.email]
     );
     const user = rows[0];
     if (!user || !user.is_active || !verifyPassword(body.password, user.password_hash)) {
+      recordLoginFailure(failKey);
       throw ERR.UNAUTHORIZED();
     }
+    loginFailures.delete(failKey); // 成功登录清零计数（正常用户偶失手不被累积锁死）
     const sessionId = await createAuthSession(user.id);
     setAuthCookies(reply, sessionId, csrfToken());
     return { userId: user.id, email: body.email };
@@ -124,11 +157,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       body.email,
     ]);
     if (!user[0]) throw ERR.NOT_FOUND();
-    await q(`INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, $3)`, [
-      teamId,
-      user[0].id,
-      body.role,
-    ]);
+    try {
+      await q(`INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, $3)`, [
+        teamId,
+        user[0].id,
+        body.role,
+      ]);
+    } catch (err) {
+      // 并发/重复添加：团队内 (team_id, user_id) 唯一——报 409 契约而非 500 INTERNAL
+      if ((err as { code?: string }).code === "23505") {
+        throw ERR.CONFLICT("MEMBER_EXISTS", "该用户已是团队成员");
+      }
+      throw err;
+    }
     return reply.code(201).send({ teamId, userId: user[0].id, role: body.role });
   });
 }

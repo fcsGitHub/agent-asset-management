@@ -140,6 +140,12 @@ describe("M17 Agent 提案审核（真实 LLM 生成 + 审核状态机）", () =
     const list = await call("GET", `/projects/${projectId}/proposals?teamId=${teamId}&status=pending`, { session: member });
     const kinds = (list.json as { kind: string }[]).map((p) => p.kind);
     expect(!kinds.includes("issue_triage"), "issue_triage 回执不应出现在提案列表").toBe(true);
+    // M72 语义对齐：提案审核需要项目成员身份（与批量审核端点同口径——单条端点此前
+    // 只查团队成员，团队成员可审任意项目提案是授权缺口）——审核前把审核员加进项目
+    const addPm = await call("POST", `/projects/${projectId}/members`, {
+      session: admin, body: { teamId, email: `m17member-${runId}@t.dev`, role: "member" },
+    });
+    expectOk(addPm.status === 201, addPm.json, "把审核员加进项目失败");
     // 成员接受并附备注
     const rev = await call("POST", `/proposals/${seedId}/review`, {
       session: member, body: { teamId, decision: "accepted", note: "确有依赖关系，待登记后补充断言" },

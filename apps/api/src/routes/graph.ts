@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { q, withTeam } from "../db.js";
 import { ERR } from "../errors.js";
+import { likeContains } from "../like.js";
 import { checkCsrf, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
 import {
@@ -161,10 +162,10 @@ export async function graphRoutes(app: FastifyInstance): Promise<void> {
            ) r ON true
           WHERE a.team_id = $1
             AND tv.type_key = ANY($2::text[])
-            AND ($3 = '' OR a.name ILIKE '%' || $3 || '%')
+            AND ($3 = '' OR a.name ILIKE $5 ESCAPE '\\')
             AND ($4 = 'all' OR ($4 = 'active' AND a.lifecycle IN ('active', 'deprecated')) OR a.lifecycle = $4)
-          ORDER BY (a.lifecycle = 'deprecated'), a.name LIMIT $5`,
-        [teamId, keys, String(query.q ?? ""), lifecycle, limit]
+          ORDER BY (a.lifecycle = 'deprecated'), a.name LIMIT $6`,
+        [teamId, keys, String(query.q ?? ""), lifecycle, likeContains(String(query.q ?? "")), limit]
       )
     );
     return { teamId, typeKey, engine, keys, assets: rows.rows };

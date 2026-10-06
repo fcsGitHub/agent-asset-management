@@ -1006,3 +1006,51 @@ m71-ui-closure-prop-filter、m71-ui-ontology-closure-deprecated。环境注记�
 暂缓项：无新增。可选后续方向（M71 后）：类型多继承/接口类型（Foundry Interfaces
 全量——需 schema 级改造）；独立业务术语表（labels 已覆盖轻量场景）；全文/向量语义
 检索（需搜索引擎基建）；观测属性键进 Agent 工具（ontology.* 已带模式声明键）。
+
+### M72 安全与缺陷收口轮（已完成）
+
+用户点名：继续优化迭代，修复漏洞。本轮对 apps/api/src 全量做四类模式审计（CSRF/
+权限/事务内 send/SQL 拼接 + 逻辑缺陷），审计结论：60 个变更路由全带 checkCsrf、
+SQL 模板内插均为白名单或参数化（干净）；真实问题 13 处，四组收口（详见
+research-M72-security-hardening.md，OWASP CSV Injection 页面本轮实读）：
+**A 入口面**：①CSV 公式注入——M69 导出 csvEscape 只做引号 doubling，资产名（用户
+可控）`=WEBSERVICE(...)` 导出即公式执行（OWASP CSV Injection：`=`+`-`@`/Tab/CR/LF
+及全角 ＝＋－＠ 开头危险）→ 危险开头前缀单引号强制文本语义。②LIKE 通配符——8 处
+`ILIKE '%'||$q||'%'` 的 q 未转义，`100%` 恒真匹配/`_` 任意单字符（搜索语义失真）→
+新共享 likeContains()（转义 `\` `%` `_`）+ `ESCAPE '\'`，catalog/agent tools/graph
+全量替换。③登录无限速（爆破面）→ 进程内滑动窗（键=ip+邮箱小写，15 分钟 10 败
+→ 429 RATE_LIMITED 新错误码；成功登录清零）；诚实边界：单实例内存态，多实例需
+共享存储（与 activityHub 同口径）。
+**B 授权面**：④work-items 状态变更无前置 teamRole——被移出团队的旧 assignee/creator
+仍可改状态（assignee 检查语义是「成员中的负责人免 admin」不是豁免成员资格）→ 入口
+补 teamRole。⑤proposals 单条 review 只查团队成员不查项目成员（与批量端点
+assertProjectAccess 口径不一致，团队成员可审任意项目提案）→ 事务内查 project_members
+（RLS 须租户上下文）。⑥releases review-and-publish 幂等回放先于权限校验——被移出的
+旧发布者带原 key 可永久重放发布回执 → admin 校验提到 idempotentReply 之前（403 不
+消耗幂等键）。
+**C 守卫失效与错误契约**：⑦弃用自继守卫可绕过（M70 回归）：`successor === assetId`
+拿 UUID 比对名称/别名 ref 恒假，传资产自己的名称即可自己继任自己 → 守卫移到
+resolveSuccessorRef 解析后比对 resolved.id；顺带补 successorRef 的 UUID 直解析
+（与 resolveAssetRef/resolveCollectionRef 的 id-or-name 全局口径一致——m70 测试回归
+暴露：其「UUID 自身 409」断言当初测的正是坏守卫行为）。⑧重复加团队成员 500 → 23505
+映射 409 MEMBER_EXISTS。⑨lead 基线通道死代码：project_members 受 RLS，旧代码用全局
+连接查询恒 0 行，「项目创建者（lead，非团队 admin）可建基线」自上线起不可达 → 检查
+移入 withTeam 租户上下文。
+**D 并发与教训收口**：⑩M67 教训（事务内 send）两处漏网：semantic import/preview、
+ontology/export?format=turtle——均只读（无 read-your-writes 伤害），按口径统一移到
+事务外，注释如实说明。⑪三处 check-then-insert 竞态 advisory lock：messages 会话
+seq、requirement_revisions 需求 seq（MAX+1 并发重复 seq/唯一约束 500）、branches
+首草稿（branch_entries 无行时 FOR UPDATE 空转）→ pg_advisory_xact_lock
+(hashtextextended(键串,0)) 事务级串行化。⑫runs cancel 冗余 teamRole 双查清理。
+**明确不修（如实记录）**：详情 relation 计数 confirmed-only（M65 完整度有意口径）；
+login 免 CSRF（设计内豁免）；输入侧全角公式字符消毒（出口侧防护已足够不误伤合法名）。
+tests/m72 十一项（纯函数一+端到端十）；m17 对齐新语义（审核员先经
+POST /projects/:id/members 入项目再审核）；全量 72 套件 370 项全绿（+11，m70 两项
+回归由 UUID 直解析修复后同绿）。浏览器实测（M71 演示团队真实会话）：页内登记
+`=1+1|WEBSERVICE(m72演示)` → 页内 fetch 导出 200，断言单元格为
+`"'=1+1|WEBSERVICE(m72演示)"`（前缀防护生效）。注记：IAB 截图表面（webview）本轮
+中途崩溃（guest not attached），目录行截图未补拍——CSV 证据以页内真实 fetch 断言
+输出为准（research 笔记存原文）。
+暂缓项：无新增。可选后续方向（M72 后）：限速共享存储化（Redis，多实例部署时）；
+注册端点验证码/邮箱验证（反垃圾注册，需邮件基建）；project_members 管理界面
+（目前唯一 API 通道）；CSV 导出列级脱敏开关（含敏感属性时）。

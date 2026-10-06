@@ -506,11 +506,14 @@ export async function releaseRoutes(app: FastifyInstance): Promise<void> {
     const idemKey = req.headers["idempotency-key"];
     const idem = typeof idemKey === "string" ? idemKey.slice(0, 128) : undefined;
 
+    // 权限先于幂等回放（M72 审计修复）：回放查询原本在 fn 内的 admin 校验之后才发生，
+    // 非成员若持有他人的 Idempotency-Key 可探到该团队的发布回执；403 也不应消耗幂等键。
+    const publishRole = await teamRole(auth.userId, body.teamId);
+    if (publishRole !== "admin") {
+      throw ERR.FORBIDDEN(); // B03：成员不能发布
+    }
+
     const result = await idempotentReply(body.teamId, auth.userId, "review-and-publish", idem, async () => {
-      const role = await teamRole(auth.userId, body.teamId);
-      if (role !== "admin") {
-        throw ERR.FORBIDDEN(); // B03：成员不能发布
-      }
       return withTeam(body.teamId, async (client) => {
         // 1) 锁 CR 行
         const { rows: crRows } = await client.query<CRRow>(

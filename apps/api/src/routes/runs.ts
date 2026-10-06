@@ -245,7 +245,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     const auth = requireAuth(req);
     const { runId } = req.params as { runId: string };
     const body = parseBody(z.object({ teamId: z.string().uuid(), reason: z.string().max(500).default("") }), req.body);
-    await teamRole(auth.userId, body.teamId);
+    const memberRole = await teamRole(auth.userId, body.teamId);
     const { rows: run } = await withTeam(body.teamId, async (client) =>
       client.query<{ status: string; created_by: string }>(
         `SELECT status, created_by FROM agent_runs WHERE team_id = $1 AND id = $2 FOR UPDATE`,
@@ -253,10 +253,9 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
       )
     );
     if (!run[0]) throw ERR.NOT_FOUND();
-    // 创建人或被授权操作人（管理员）可取消
-    if (run[0].created_by !== auth.userId) {
-      const role = await teamRole(auth.userId, body.teamId);
-      if (role !== "admin") throw ERR.FORBIDDEN();
+    // 创建人或被授权操作人（管理员）可取消（M72：复用入口处的 teamRole 结果，省一次冗余往返）
+    if (run[0].created_by !== auth.userId && memberRole !== "admin") {
+      throw ERR.FORBIDDEN();
     }
     if (TERMINAL.has(run[0].status)) {
       return reply.code(409).send({ error: { code: "ALREADY_TERMINAL", message: `运行已结束（${run[0].status}）`, retryable: false } });

@@ -22,4 +22,5 @@ export const ERR = {
     new AppError("SCHEMA_INVALID", 422, message, false, details),
   CSRF: () => new AppError("CSRF_TOKEN_INVALID", 403, "CSRF 校验失败，请刷新页面重试"),
   DEPENDENCY: (message: string) => new AppError("DEPENDENCY_UNAVAILABLE", 503, message, true),
+  TOO_MANY: (message = "尝试过于频繁，请稍后再试") => new AppError("RATE_LIMITED", 429, message, true),
 } as const;

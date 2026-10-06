@@ -841,9 +841,22 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       req.body
     );
     await assertTeamMember(auth.userId, body.teamId);
-    return withTeam(body.teamId, async (client) =>
-      reviewProposal(client, body.teamId, auth.userId, proposalId, body.decision, body.note ?? null)
-    );
+    const result = await withTeam(body.teamId, async (client) => {
+      // 项目归属对齐批量端点（M72 审计修复）：assertTeamMember 只证团队成员——
+      // 提案必须属于调用者为成员的项目（project_members 受 RLS，须在租户上下文内查）
+      const { rows: proj } = await client.query<{ project_id: string }>(
+        `SELECT project_id FROM agent_proposals WHERE team_id = $1 AND id = $2`,
+        [body.teamId, proposalId]
+      );
+      if (!proj[0]) throw ERR.NOT_FOUND();
+      const { rows: pm } = await client.query(
+        `SELECT 1 FROM project_members WHERE team_id = $1 AND project_id = $2 AND user_id = $3`,
+        [body.teamId, proj[0].project_id, auth.userId]
+      );
+      if (!pm[0]) throw ERR.FORBIDDEN();
+      return reviewProposal(client, body.teamId, auth.userId, proposalId, body.decision, body.note ?? null);
+    });
+    return result;
   });
 
   // 提案批量审核：逐条独立判定，逐条如实回执（已处理条目标 PROPOSAL_NOT_PENDING，不中断其余）

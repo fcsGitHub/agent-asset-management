@@ -89,6 +89,12 @@ export async function projectLifecycleRoutes(app: FastifyInstance): Promise<void
     await teamRole(auth.userId, body.teamId);
     const revId = newId();
     await withTeam(body.teamId, async (client) => {
+      // seq 分配并发防护（M72）：同需求修订写入用事务级咨询锁串行化（MAX(seq)+1
+      // check-then-insert 竞态会产生重复 seq / 唯一约束 500）
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`, [
+        body.teamId,
+        requirementId,
+      ]);
       const { rows: last } = await client.query<{ seq: number }>(
         `SELECT MAX(seq) AS seq FROM requirement_revisions WHERE team_id = $1 AND requirement_id = $2`,
         [body.teamId, requirementId]
@@ -114,15 +120,20 @@ export async function projectLifecycleRoutes(app: FastifyInstance): Promise<void
       req.body
     );
     const role = await teamRole(auth.userId, body.teamId);
-    if (role !== "admin") {
-      // 项目负责人也可建基线：检查 project lead
-      const { rows: lead } = await q(`SELECT 1 FROM project_members WHERE team_id = $1 AND project_id = $2 AND user_id = $3 AND role = 'lead'`, [body.teamId, projectId, auth.userId]);
-      if (!lead[0]) throw ERR.FORBIDDEN();
-    }
     const baselineId = newId();
     await withTeam(body.teamId, async (client) => {
+      if (role !== "admin") {
+        // 项目负责人也可建基线（M72 审计修复：project_members 受 RLS，必须在租户
+        // 上下文内查——旧代码用全局连接查询恒 0 行，「lead 可建基线」通道自上线起
+        // 不可达，非 admin lead 永远 403）
+        const { rows: lead } = await client.query(
+          `SELECT 1 FROM project_members WHERE team_id = $1 AND project_id = $2 AND user_id = $3 AND role = 'lead'`,
+          [body.teamId, projectId, auth.userId]
+        );
+        if (!lead[0]) throw ERR.FORBIDDEN();
+      }
       await client.query(
-        `INSERT INTO requirement_baselines (team_id, id, project_id, name, created_by) VALUES ($1,$2,$3,$4,$5)`,
+        `INSERT INTO requirement_baselines (team_id, id, project_id, name, created_by) VALUES ($1, $2, $3, $4, $5)`,
         [body.teamId, baselineId, projectId, body.name, auth.userId]
       );
       // 快照每条需求的最新修订
@@ -239,6 +250,10 @@ export async function projectLifecycleRoutes(app: FastifyInstance): Promise<void
       }),
       req.body
     );
+    // 成员资格先于 assignee/creator 放宽（M72 审计修复）：该检查的语义是「成员里的
+    // 负责人/创建人免 admin」，不是豁免成员资格——被移出团队的旧 assignee/creator
+    // 不得再改状态（teamId 来自请求体，不校验归属即授权缺口）
+    await teamRole(auth.userId, body.teamId);
     await withTeam(body.teamId, async (client) => {
       const { rows } = await client.query<{ assignee_id: string; created_by: string }>(
         `SELECT assignee_id, created_by FROM work_items WHERE team_id = $1 AND id = $2 FOR UPDATE`,

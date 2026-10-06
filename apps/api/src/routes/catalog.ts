@@ -65,6 +65,7 @@ export { stableStringify };
 
 // 类型链装载与属性校验（M59 抽共享关卡）：登记/分支保存/dry-run 共用同一实现
 import { loadTypeChain, validateAgainstChain, typeKeyClosure, loadOntology, type TypeDefRow } from "../ontology.js";
+import { likeContains } from "../like.js";
 import { schemaToFormSpec } from "@taw/domain/schema-form";
 import { computeCompleteness, OWNER_KEYS } from "@taw/domain/completeness";
 import { buildCitation } from "@taw/domain/cite";
@@ -281,12 +282,14 @@ async function queryAssetRows(
       typeKeys = await typeKeyClosure(client, teamId, opts.type);
       if (typeKeys.length === 0) return { rows: [], typeClosure: [] };
     }
+    // LIKE 通配符转义（M72）：q 按字面量匹配——% _ 不再充当通配符（$2 保留原值做空判断）
+    const qPattern = params.push(likeContains(String(opts.q ?? "")));
     const keysParam = params.push(typeKeys ?? []);
     const result = await client.query(
       `SELECT a.id, a.name, a.lifecycle, tv.type_key, tv.version AS type_version, tv.id AS type_version_id,
               r.id AS head_revision_id, r.content_digest, r.created_at, r.properties,
               (SELECT al.alias FROM asset_aliases al
-                WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
+                WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE $${qPattern} ESCAPE '\\'
                 ORDER BY al.alias LIMIT 1) AS matched_alias,
               ${pinExpr} AS pinned,
               EXISTS (
@@ -332,9 +335,9 @@ async function queryAssetRows(
             WHERE c.team_id = a.team_id AND c.asset_id = a.id
          ) cc ON true
         WHERE a.team_id = $1
-          AND ($2 = '' OR a.name ILIKE '%' || $2 || '%' OR EXISTS (
+          AND ($2 = '' OR a.name ILIKE $${qPattern} ESCAPE '\\' OR EXISTS (
                 SELECT 1 FROM asset_aliases al
-                 WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE '%' || $2 || '%'
+                 WHERE al.team_id = a.team_id AND al.asset_id = a.id AND al.alias ILIKE $${qPattern} ESCAPE '\\'
               ))
           AND ($3 = '' OR tv.type_key = ANY($${keysParam}::text[]))
           AND ($4 = 'all' OR ($4 = 'active' AND a.lifecycle IN ('active', 'deprecated')) OR a.lifecycle = $4)
@@ -1109,7 +1112,9 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     const teamId = String(query.teamId ?? "");
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await teamRole(auth.userId, teamId);
-    return withTeam(teamId, async (client) => {
+    // 响应在事务外发出（M67 教训口径统一，M72 收口）：turtle 序列化在回调内完成、
+    // 回调返回标记结果，send 移到 COMMIT 之后
+    const out = await withTeam(teamId, async (client): Promise<{ turtle?: string; json?: Record<string, unknown> }> => {
       const { rows: typeRows } = await client.query<TypeDefRow>(
         `SELECT id, type_key, version, title, json_schema, unit_vocabularies, parent_type_version_id, status
            FROM asset_type_versions WHERE team_id = $1 ORDER BY type_key, version`,
@@ -1177,25 +1182,32 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
 
       const digest = createHash("sha256").update(stableStringify({ classes, objectProperties })).digest("hex");
       if (query.format === "turtle") {
-        const body = toTurtle({
-          teamId,
-          ontologyDigest: digest,
-          classes: classes as unknown as TurtleDoc["classes"],
-          objectProperties: objectProperties as unknown as TurtleDoc["objectProperties"],
-        });
-        return reply.code(200).header("content-type", "text/turtle; charset=utf-8").send(body);
+        return {
+          turtle: toTurtle({
+            teamId,
+            ontologyDigest: digest,
+            classes: classes as unknown as TurtleDoc["classes"],
+            objectProperties: objectProperties as unknown as TurtleDoc["objectProperties"],
+          }),
+        };
       }
       return {
-        format: "taw-ontology/1",
-        teamId,
-        exportedAt: new Date().toISOString(),
-        classCount: classes.length,
-        objectPropertyCount: objectProperties.length,
-        classes,
-        objectProperties,
-        ontologyDigest: digest,
+        json: {
+          format: "taw-ontology/1",
+          teamId,
+          exportedAt: new Date().toISOString(),
+          classCount: classes.length,
+          objectPropertyCount: objectProperties.length,
+          classes,
+          objectProperties,
+          ontologyDigest: digest,
+        },
       };
     });
+    if (out.turtle !== undefined) {
+      return reply.code(200).header("content-type", "text/turtle; charset=utf-8").send(out.turtle);
+    }
+    return out.json;
   });
 
   // ---------- 资产登记（创建身份 + 首个不可变修订） ----------
@@ -1489,7 +1501,13 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         items,
       }, null, 2);
     }
-    const csvEscape = (v: string): string => `"${v.replace(/"/g, '""')}"`;
+    // CSV 公式注入防护（M72，OWASP CSV Injection 口径）：以 = + - @、Tab/CR/LF（含
+    // 全角 ＝＋－＠）开头的单元格会被 Excel/Calc 按公式执行——资产名完全用户可控，
+    // 前缀单引号强制文本语义（Excel 视其为文本标记不显示）。引号 doubling 照旧。
+    const csvEscape = (v: string): string => {
+      const safe = /^[=+\-@\t\r\n\uFF1D\uFF0B\uFF0D\uFF20]/.test(v) ? "'" + v : v;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
     const header = "name,type_key,type_version,lifecycle,relation_count,usage_90d,alias_count,label_count,has_artifacts,completeness_score,content_digest,created_at,pinned";
     const lines: string[] = [header];
     for (const it of items) {
@@ -2192,7 +2210,17 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     teamId: string,
     ref: string
   ): Promise<{ id: string; name: string }> {
-    // 解析口径与 Agent resolveAssetRef 同源语义：名称精确 → 别名精确；模糊不猜
+    // 解析口径与 Agent resolveAssetRef 同源语义：UUID → 名称精确 → 别名精确；模糊不猜。
+    // M72 补 UUID 直解析：API 消费方手里已有的就是 id（详情响应/目录行），传 id 是自然
+    // 用法——自继守卫在解析出 id 后统一比对（旧守卫拿 UUID 比对名称 ref 恒假可绕过）
+    if (/^[0-9a-f-]{36}$/.test(ref)) {
+      const { rows: byId } = await client.query<{ id: string; name: string }>(
+        `SELECT id, name FROM assets WHERE team_id = $1 AND id = $2`,
+        [teamId, ref]
+      );
+      if (byId[0]) return byId[0];
+      throw ERR.INVALID(`继任者「${ref}」未解析到资产：id 不存在于本团队，请先核对目录`);
+    }
     const { rows: byName } = await client.query<{ id: string; name: string }>(
       `SELECT id, name FROM assets WHERE team_id = $1 AND name = $2`,
       [teamId, ref]
@@ -2206,7 +2234,7 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
       );
       if (byAlias[0]) return byAlias[0];
     }
-    throw ERR.INVALID(`继任者「${ref}」未解析到资产：仅支持名称或别名的精确匹配，请先核对目录`);
+    throw ERR.INVALID(`继任者「${ref}」未解析到资产：仅支持 id、名称或别名的精确匹配，请先核对目录`);
   }
 
   app.post("/assets/:assetId/deprecate", async (req, reply) => {
@@ -2224,7 +2252,6 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
     );
     const role = await teamRole(auth.userId, body.teamId);
     const successor = body.successorRef ? body.successorRef.trim() : "";
-    if (successor === assetId) throw ERR.CONFLICT("SUCCESSOR_SELF", "继任者不能是资产自身");
     const result = await withTeam(body.teamId, async (client) => {
       const asset = await loadAssetForLifecycle(client, body.teamId, assetId);
       if (asset.lifecycle === "archived") {
@@ -2234,6 +2261,11 @@ export async function catalogRoutes(app: FastifyInstance): Promise<void> {
         throw ERR.FORBIDDEN();
       }
       const resolved = successor ? await resolveSuccessorRef(client, body.teamId, successor) : null;
+      // 自继守卫在解析后比对（M72 审计修复：successorRef 是名称/别名，旧守卫拿 UUID
+      // 比对恒假——传资产自己的名称即可绕过、自己继任自己）
+      if (resolved && resolved.id === assetId) {
+        throw ERR.CONFLICT("SUCCESSOR_SELF", "继任者不能是资产自身（按名称/别名解析命中了本资产）");
+      }
       await client.query(
         `UPDATE assets SET lifecycle = 'deprecated', deprecated_at = now(), deprecated_by = $3,
             deprecation_note = $4, successor_asset_id = $5, meta_version = meta_version + 1

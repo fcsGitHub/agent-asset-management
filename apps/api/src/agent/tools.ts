@@ -7,6 +7,7 @@ import type { PoolClient } from "pg";
 import { canonicalDigest } from "@taw/domain/digest";
 import { GraphUnavailableError, findShortestPath, neighborhood, resolveTypeClosure } from "@taw/graph";
 import { loadOntology, typeKeyClosure } from "../ontology.js";
+import { likeContains } from "../like.js";
 import { flattenOntologyTree, relationsForClosure } from "@taw/domain/ontology-tree";
 
 export type ToolTier = "read" | "draft";
@@ -56,6 +57,8 @@ export const READONLY_TOOLS: ToolDef[] = [
         typeKeys = await typeKeyClosure(client, ctx.teamId, type);
         if (typeKeys.length === 0) return [];
       }
+      const q = String(args.q ?? "");
+      const qPattern = likeContains(q);
       const { rows } = await client.query(
         `SELECT a.id, a.name, a.lifecycle, tv.type_key, r.id AS head_revision_id, r.content_digest
            FROM assets a
@@ -63,11 +66,11 @@ export const READONLY_TOOLS: ToolDef[] = [
            JOIN LATERAL (SELECT id, content_digest FROM asset_revisions
                           WHERE team_id = a.team_id AND asset_id = a.id ORDER BY seq DESC LIMIT 1) r ON true
           WHERE a.team_id = $1
-            AND ($2 = '' OR a.name ILIKE '%' || $2 || '%')
+            AND ($2 = '' OR a.name ILIKE $5 ESCAPE '\\')
             AND ($3 = '' OR tv.type_key = ANY($4::text[]))
             AND a.lifecycle <> 'archived'
           ORDER BY (a.lifecycle = 'deprecated'), a.created_at DESC LIMIT 20`,
-        [ctx.teamId, String(args.q ?? ""), type, typeKeys ?? []]
+        [ctx.teamId, q, type, typeKeys ?? [], qPattern]
       );
       return rows;
     },
@@ -279,9 +282,9 @@ export const READONLY_TOOLS: ToolDef[] = [
            FROM assets a
            JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
           WHERE a.team_id = $1 AND tv.type_key = ANY($2::text[])
-            AND ($3 = '' OR a.name ILIKE '%' || $3 || '%') AND a.lifecycle IN ('active', 'deprecated')
+            AND ($3 = '' OR a.name ILIKE $4 ESCAPE '\\') AND a.lifecycle IN ('active', 'deprecated')
           ORDER BY (a.lifecycle = 'deprecated'), a.name LIMIT 20`,
-        [ctx.teamId, keys, q]
+        [ctx.teamId, keys, q, likeContains(q)]
       );
       return { engine, keys, count: rows.length, assets: rows };
     },
@@ -385,9 +388,9 @@ export const READONLY_TOOLS: ToolDef[] = [
         `SELECT c.id, c.name, c.description,
                 (SELECT count(*)::int FROM asset_collection_items i WHERE i.team_id = c.team_id AND i.collection_id = c.id) AS item_count
            FROM asset_collections c
-          WHERE c.team_id = $1 AND ($2 = '' OR c.name ILIKE '%' || $2 || '%')
+          WHERE c.team_id = $1 AND ($2 = '' OR c.name ILIKE $3 ESCAPE '\\')
           ORDER BY c.created_at DESC LIMIT 20`,
-        [ctx.teamId, kw]
+        [ctx.teamId, kw, likeContains(kw)]
       );
       return rows;
     },
@@ -450,8 +453,8 @@ async function resolveAssetRef(
     );
     if (alias.rows.length === 1) return { id: alias.rows[0].id, name: alias.rows[0].name };
     const like = await client.query<{ id: string; name: string }>(
-      `SELECT id, name FROM assets WHERE team_id = $1 AND name ILIKE '%' || $2 || '%' ORDER BY name LIMIT 6`,
-      [teamId, name]
+      `SELECT id, name FROM assets WHERE team_id = $1 AND name ILIKE $2 ESCAPE '\\' ORDER BY name LIMIT 6`,
+      [teamId, likeContains(name)]
     );
     if (like.rows.length === 1) return { id: like.rows[0].id, name: like.rows[0].name };
     if (like.rows.length === 0) throw new Error(`${side}.name「${name}」未命中任何本团队资产（名称或别名）`);
