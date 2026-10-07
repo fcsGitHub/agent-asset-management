@@ -57,7 +57,7 @@ const RAIL_PAGES: { key: PageKey; label: string; icon: ReactNode }[] = [
 ];
 
 interface ProjectInfo { teamId: string; projectId: string; name: string; code: string; status: string }
-interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean }
+interface SessionInfo { sessionId: string; title: string; visibility: string; mine: boolean; archived: boolean; titleIsAuto?: boolean }
 interface Msg { id: string; role: string; content: string; seq: number }
 interface AssetRow { id: string; name: string; lifecycle: string; type_key: string; type_version: string; head_revision_id: string; content_digest: string; has_artifacts?: boolean; relation_count?: number; completenessScore?: number; matched_alias?: string | null; pinned?: boolean }
 interface AssetFacets { typeKeys: string[]; labels: { label: string; count: number }[]; categories: string[]; propertyKeys?: { key: string; count: number }[] }
@@ -735,6 +735,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               project={project}
               me={me}
               onNavigate={(p) => setPage(p)}
+              onOpenAsset={openAssetFromSearch}
             />
           </main>
         ) : page === "activity" ? (
@@ -796,13 +797,14 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
               {p.projectId === projectId && (
                 <button
                   className="new-btn small"
+                  title="直接创建，首条任务发送后自动以任务命名（可随时重命名）"
                   onClick={async () => {
-                    const title = window.prompt("新会话标题：");
-                    if (!title) return;
                     try {
+                      // 免弹窗（M73）：不强制先起标题——服务端生成占位「会话 MM-DD HH:mm」，
+                      // 首条 Agent 运行自动改写为任务摘要
                       const created = await api<{ sessionId: string }>(
                         `/projects/${p.projectId}/sessions`,
-                        { method: "POST", body: { teamId: p.teamId, title, visibility: "project" } }
+                        { method: "POST", body: { teamId: p.teamId, visibility: "project" } }
                       );
                       const fresh = await api<SessionInfo[]>(
                         `/projects/${p.projectId}/sessions`,
@@ -832,7 +834,12 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                       <span className="session-ico" aria-hidden="true">
                         {s.visibility === "private" ? <IconLock size={12} /> : <IconMessage size={12} />}
                       </span>
-                      <span className="ellipsis">{s.title}</span>
+                      <span
+                        className={`ellipsis${s.titleIsAuto ? " auto-title" : ""}`}
+                        title={s.titleIsAuto ? "自动命名占位——发送首条任务后自动以任务命名" : s.title}
+                      >
+                        {s.title}
+                      </span>
                     </button>
                     {(s.mine || isTeamAdmin) && (
                       <span className="session-actions">
@@ -920,6 +927,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
             sessionTitle={sessions.find((s) => s.sessionId === sessionId)?.title}
             onOpenAsset={openAssetFromSearch}
             onRunStateChange={handleRunState}
+            onRunStarted={reloadSessions}
             collapsed={agentCollapsed}
             onToggleCollapse={() => setAgentCollapsed((v) => !v)}
           />
@@ -987,7 +995,7 @@ export function Workbench({ me, onLoggedOut }: { me: Me; onLoggedOut: () => void
                 }}
               />
             ) : wsView === "overview" ? (
-              <ProjectOverview project={project} me={me} />
+              <ProjectOverview project={project} me={me} onOpenDashboard={() => setPage("dashboard")} />
             ) : wsView === "assets" ? (
               <AssetList
                 project={project}
@@ -1404,7 +1412,7 @@ function CollectionsPanel({ project, userId, role, onOpenAsset }: { project?: Pr
   );
 }
 
-function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
+function ProjectOverview({ project, me, onOpenDashboard }: { project?: ProjectInfo; me: Me; onOpenDashboard?: () => void }) {
   const [memberMsg, setMemberMsg] = useState("");
   if (!project) return <div className="state">选择或创建一个项目开始。</div>;
   const isAdmin = me.teams.find((t) => t.teamId === project.teamId)?.role === "admin";
@@ -1443,6 +1451,11 @@ function ProjectOverview({ project, me }: { project?: ProjectInfo; me: Me }) {
           <li>在「资产目录」查看团队正式资产；在「登记资产」上传并登记新资产。</li>
           <li>左侧对话区可以给 Agent 派任务（真实模型 + 工具）；Agent 仅有草稿写入权限，发布等高权动作由人类执行。</li>
         </ul>
+        {onOpenDashboard && (
+          <div className="btn-row">
+            <button onClick={onOpenDashboard}>查看项目仪表盘 →</button>
+          </div>
+        )}
       </div>
     </>
   );

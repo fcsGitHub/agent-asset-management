@@ -376,7 +376,7 @@ export const READONLY_TOOLS: ToolDef[] = [
     tier: "read",
     description:
       "列出本团队的资产集合（人工策展的跨类型资产组，如权威榜单、新人入门包、评审材料包）。" +
-      "可按名称关键词过滤，返回集合名、描述与条目数。",
+      "可按名称关键词过滤，返回集合名、描述与条目数。看集合内容用 collection.items。",
     parameters: {
       type: "object",
       properties: { q: { type: "string", description: "名称关键词（可选）" } },
@@ -393,6 +393,77 @@ export const READONLY_TOOLS: ToolDef[] = [
         [ctx.teamId, kw, likeContains(kw)]
       );
       return rows;
+    },
+  },
+  {
+    name: "collection.items",
+    tier: "read",
+    description:
+      "列出某个集合的条目资产（名称、类型、生命周期、收录备注），回答「某集合里有什么」。" +
+      "集合传名称（精确匹配）或 id，不确定集合名可先用 collection.search 查。",
+    parameters: {
+      type: "object",
+      properties: {
+        collection: { type: "string", description: "集合名称或 id" },
+      },
+      required: ["collection"],
+    },
+    async execute(client, ctx, args) {
+      const collection = await resolveCollectionRef(client, ctx.teamId, args.collection);
+      const { rows } = await client.query(
+        `SELECT i.note, i.added_at, a.id, a.name, a.lifecycle,
+                COALESCE(tv.type_key, '') AS type_key
+           FROM asset_collection_items i
+           JOIN assets a ON a.team_id = i.team_id AND a.id = i.asset_id
+           LEFT JOIN asset_type_versions tv ON tv.team_id = a.team_id AND tv.id = a.current_type_version_id
+          WHERE i.team_id = $1 AND i.collection_id = $2
+          ORDER BY i.added_at
+          LIMIT 50`,
+        [ctx.teamId, collection.id]
+      );
+      for (const r of rows) await recordUsage(client, ctx.teamId, String(r.id), "agent_read", ctx.userId);
+      return {
+        collectionId: collection.id,
+        collectionName: collection.name,
+        count: rows.length,
+        items: rows,
+      };
+    },
+  },
+  {
+    name: "issue.list",
+    tier: "read",
+    description:
+      "列出本项目的 Issue 工单，回答「现在有哪些待处理的问题/缺陷」。默认只看未结工单" +
+      "（open + in_progress）；status=all 查全部（含已解决/已关闭）。可按标题/正文关键词过滤。",
+    parameters: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["open", "in_progress", "resolved", "closed", "all"],
+          description: "状态过滤，默认未结（open+in_progress）",
+        },
+        q: { type: "string", description: "标题/正文关键词（可选）" },
+      },
+      required: [],
+    },
+    async execute(client, ctx, args) {
+      const status = String(args.status ?? "");
+      const kw = String(args.q ?? "").slice(0, 80);
+      const { rows } = await client.query(
+        `SELECT i.id, i.title, i.status, i.created_at, a.name AS asset_name,
+                u.display_name AS created_by_name
+           FROM issues i
+           LEFT JOIN assets a ON a.team_id = i.team_id AND a.id = i.asset_id
+           JOIN users u ON u.id = i.created_by
+          WHERE i.team_id = $1 AND i.project_id = $2
+            AND ($3 = '' OR i.title ILIKE $4 ESCAPE '\\' OR i.body ILIKE $4 ESCAPE '\\')
+            AND ($5 = 'all' OR ($5 = '' AND i.status IN ('open', 'in_progress')) OR i.status = $5)
+          ORDER BY i.created_at DESC LIMIT 20`,
+        [ctx.teamId, ctx.projectId, kw, likeContains(kw), status]
+      );
+      return { count: rows.length, issues: rows };
     },
   },
 ];

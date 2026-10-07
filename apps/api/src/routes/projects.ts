@@ -34,6 +34,21 @@ async function assertProjectAccess(
   return { role, isMember };
 }
 
+/** 会话占位标题（M73）：本地时间「会话 MM-DD HH:mm」，同分钟内可能重名——
+ *  仅是列表显示项，唯一性由 sessionId 保证；首条 Agent 运行会把它改写为任务摘要。 */
+export function autoSessionTitle(d: Date = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `会话 ${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 会话自动标题的任务摘要（M73）：取首行、折叠空白、截 24 字加省略号；空行任务回退「新任务」。 */
+export function sessionTitleFromPrompt(prompt: string): string {
+  const firstLine = prompt.split(/\r?\n/).find((l) => l.trim()) ?? "";
+  const flat = firstLine.replace(/\s+/g, " ").trim();
+  if (!flat) return "新任务";
+  return flat.length > 24 ? `${flat.slice(0, 24)}…` : flat;
+}
+
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.post("/projects", async (req, reply) => {
     checkCsrf(req);
@@ -165,20 +180,25 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const body = parseBody(
       z.object({
         teamId: z.string().uuid(),
-        title: z.string().min(1).max(128),
+        // 标题可选（M73）：缺省由服务端生成占位「会话 MM-DD HH:mm」并标 title_is_auto，
+        // 首条 Agent 运行创建时自动改写为任务摘要；显式命名则永不自动改。
+        title: z.string().min(1).max(128).optional(),
         visibility: z.enum(["private", "project"]).default("private"),
       }),
       req.body
     );
     await assertProjectAccess(auth.userId, body.teamId, projectId);
     const id = newId();
+    const title = body.title ?? autoSessionTitle();
+    const titleIsAuto = body.title === undefined;
     await withTeam(body.teamId, async (client) => {
       await client.query(
-        `INSERT INTO sessions (team_id, id, project_id, title, visibility, created_by) VALUES ($1, $2, $3, $4, $5, $6)`,
-        [body.teamId, id, projectId, body.title, body.visibility, auth.userId]
+        `INSERT INTO sessions (team_id, id, project_id, title, title_is_auto, visibility, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [body.teamId, id, projectId, title, titleIsAuto, body.visibility, auth.userId]
       );
     });
-    return reply.code(201).send({ teamId: body.teamId, sessionId: id, projectId, title: body.title });
+    return reply.code(201).send({ teamId: body.teamId, sessionId: id, projectId, title });
   });
 
   app.get("/projects/:projectId/sessions", async (req) => {
@@ -188,8 +208,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     if (!/^[0-9a-f-]{36}$/.test(teamId)) throw ERR.INVALID("teamId 查询参数缺失");
     await assertProjectAccess(auth.userId, teamId, projectId);
     const { rows } = await withTeam(teamId, async (client) =>
-      client.query<{ id: string; title: string; visibility: string; created_by: string; archived: boolean }>(
-        `SELECT id, title, visibility, created_by, archived FROM sessions
+      client.query<{ id: string; title: string; visibility: string; created_by: string; archived: boolean; title_is_auto: boolean }>(
+        `SELECT id, title, visibility, created_by, archived, title_is_auto FROM sessions
           WHERE team_id = $1 AND project_id = $2
             AND (visibility = 'project' OR created_by = $3)
           ORDER BY created_at DESC`,
@@ -202,6 +222,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       visibility: r.visibility,
       mine: r.created_by === auth.userId,
       archived: r.archived,
+      titleIsAuto: r.title_is_auto,
     }));
   });
 
@@ -230,7 +251,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       }
       const sets: string[] = [];
       const vals: unknown[] = [body.teamId, sessionId];
-      if (body.title !== undefined) { sets.push(`title = $${vals.length + 1}`); vals.push(body.title); }
+      // 显式改名即接管命名权：title_is_auto 置 false，此后 Agent 运行不再自动改写
+      if (body.title !== undefined) { sets.push(`title = $${vals.length + 1}`); vals.push(body.title); sets.push("title_is_auto = false"); }
       if (body.archived !== undefined) { sets.push(`archived = $${vals.length + 1}`); vals.push(body.archived); }
       await client.query(`UPDATE sessions SET ${sets.join(", ")} WHERE team_id = $1 AND id = $2`, vals);
       return {
@@ -286,9 +308,10 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       );
 
       // 资产库与关系（团队域，如实标注）
-      const { rows: assetCounts } = await client.query<{ active: string; archived: string }>(
+      const { rows: assetCounts } = await client.query<{ active: string; deprecated: string; archived: string }>(
         `SELECT count(*) FILTER (WHERE lifecycle = 'archived')::text AS archived,
-                count(*) FILTER (WHERE lifecycle <> 'archived')::text AS active
+                count(*) FILTER (WHERE lifecycle = 'deprecated')::text AS deprecated,
+                count(*) FILTER (WHERE lifecycle = 'active')::text AS active
            FROM assets WHERE team_id = $1`,
         [teamId]
       );
@@ -300,6 +323,15 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         `SELECT count(*) FILTER (WHERE status = 'confirmed')::text AS confirmed,
                 count(*) FILTER (WHERE status = 'proposed')::text AS proposed
            FROM relation_assertions WHERE team_id = $1`,
+        [teamId]
+      );
+      // 待审与候选（M73，与顶栏徽标同口径）：Agent 提案按项目、语义候选按团队
+      const { rows: proposalCounts } = await client.query<{ pending: string }>(
+        `SELECT count(*)::text AS pending FROM agent_proposals WHERE team_id = $1 AND project_id = $2 AND status = 'pending'`,
+        [teamId, projectId]
+      );
+      const { rows: semanticCounts } = await client.query<{ pending: string }>(
+        `SELECT count(*)::text AS pending FROM semantic_candidates WHERE team_id = $1 AND status = 'pending'`,
         [teamId]
       );
 
@@ -315,11 +347,17 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
             merged: n(crCounts[0]?.merged),
           },
           releases: { total: n(releaseCounts[0]?.total), last30d: n(releaseCounts[0]?.last30d) },
+          pendingProposals: n(proposalCounts[0]?.pending),
         },
         teamScope: {
-          assets: { active: n(assetCounts[0]?.active), archived: n(assetCounts[0]?.archived) },
+          assets: {
+            active: n(assetCounts[0]?.active),
+            deprecated: n(assetCounts[0]?.deprecated),
+            archived: n(assetCounts[0]?.archived),
+          },
           revisions: n(revisionCounts[0]?.total),
           relations: { confirmed: n(relationCounts[0]?.confirmed), proposed: n(relationCounts[0]?.proposed) },
+          pendingSemanticCandidates: n(semanticCounts[0]?.pending),
         },
       };
     });

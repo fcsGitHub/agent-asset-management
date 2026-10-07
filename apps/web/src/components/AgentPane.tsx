@@ -78,17 +78,228 @@ function toolSummary(t: RunToolBlock): string {
   const a = (t.args ?? {}) as Record<string, unknown>;
   const s = (v: unknown): string =>
     typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
+  const shortId = (v: unknown): string =>
+    typeof v === "string" && v.length > 11 ? `${v.slice(0, 8)}…` : s(v);
   switch (t.name) {
     case "asset.search": return s(a.q ?? a.query) || "检索资产";
-    case "asset.getRevision": return s(a.assetName) || (s(a.assetId) ? `读取资产 ${s(a.assetId).slice(0, 8)}…` : "读取资产修订");
+    case "asset.getRevision": return s(a.assetName) || (s(a.assetId) ? `读取资产 ${shortId(a.assetId)}` : "读取资产修订");
     case "relation.query": return s(a.assetName) || s(a.name) || "查询关系";
     case "issue.create": return s(a.title) || "创建工单";
     case "proposal.create": return s(a.title) || s(a.kind) || "提交提案";
     case "external.notify": return s(a.target) || s(a.channel) || "外部通知";
+    case "issue.list": return s(a.q) ? `搜工单：${s(a.q)}` : "列出问题工单";
+    case "collection.search": return s(a.q) ? `搜集合：${s(a.q)}` : "列出集合";
+    case "collection.items": return s(a.collection) ? `集合「${s(a.collection)}」内容` : "查看集合内容";
+    case "graph.assetsByType": return s(a.typeKey) || "按类型检索";
+    case "graph.path": {
+      const from = s(a.fromName) || shortId(a.fromAssetId) || "?";
+      const to = s(a.toName) || shortId(a.toAssetId) || "?";
+      return from === "?" && to === "?" ? "关联路径" : `${from} ↔ ${to}`;
+    }
+    case "graph.neighbors": return s(a.name) || shortId(a.assetId) || "邻域";
     default: {
       const first = Object.values(a).map(s).find((v) => v);
       return first ? (first.length > 60 ? `${first.slice(0, 60)}…` : first) : "";
     }
+  }
+}
+
+/* ---------- 工具结果可读化（M73） ----------
+ * 检索/路径/集合/工单类结果渲染为人类可读视图（资产行可点击直达详情），
+ * 原始 JSON 收进「原始结果」折叠（渐进披露）；未覆盖的工具维持纯 JSON。
+ * 渲染一律防御：结果形状与预期不符时返回 null 回退 JSON，绝不崩掉对话面板。 */
+
+const LIFECYCLE_BADGE: Record<string, { text: string; cls: string }> = {
+  deprecated: { text: "已弃用", cls: "lc-deprecated" },
+  archived: { text: "已归档", cls: "lc-archived" },
+};
+
+function LcBadge({ lc }: { lc?: unknown }) {
+  const b = LIFECYCLE_BADGE[String(lc ?? "")];
+  return b ? <span className={`lc ${b.cls}`}>{b.text}</span> : null;
+}
+
+type Row = Record<string, unknown>;
+
+/** 资产行简表：名称可点击，附类型键与生命周期徽标；超过 10 行折叠计数。 */
+function AssetRows({ rows, onOpenAsset, noteOf }: {
+  rows: Row[]; onOpenAsset?: (id: string) => void; noteOf?: (r: Row) => string;
+}) {
+  const shown = rows.slice(0, 10);
+  return (
+    <div className="asset-rows">
+      {shown.map((r, i) => {
+        const id = String(r.id ?? "");
+        const name = String(r.name ?? id.slice(0, 8));
+        const typeKey = String(r.type_key ?? r.typeKey ?? "");
+        const note = noteOf?.(r);
+        const body = (
+          <>
+            <span className="ar-name ellipsis">{name}</span>
+            {typeKey && <span className="ar-type">{typeKey}</span>}
+            <LcBadge lc={r.lifecycle} />
+          </>
+        );
+        return id && onOpenAsset ? (
+          <button key={`${id}-${i}`} className="asset-row" title={note ? `${note}（点击在工作区打开）` : "在工作区打开"} onClick={() => onOpenAsset(id)}>
+            {body}
+            {note && <span className="ar-note ellipsis">{note}</span>}
+          </button>
+        ) : (
+          <span key={`${id}-${i}`} className="asset-row static" title={note}>
+            {body}
+            {note && <span className="ar-note ellipsis">{note}</span>}
+          </span>
+        );
+      })}
+      {rows.length > shown.length && <div className="rows-more">…另有 {rows.length - shown.length} 条未展开（见原始结果）</div>}
+    </div>
+  );
+}
+
+/** 关联路径条：A —relKey→ B —relKey→ C，节点可点击；缺失边如实显示匿名箭头。 */
+function PathChain({ result, onOpenAsset }: { result: { nodes?: Row[]; edges?: Row[]; hops?: number }; onOpenAsset?: (id: string) => void }) {
+  const nodes = (result.nodes ?? []) as { assetId?: string; name?: string }[];
+  const edges = (result.edges ?? []) as { relKey?: string; source?: string; target?: string }[];
+  return (
+    <div className="path-chain" role="list">
+      {nodes.map((n, i) => {
+        const prev = i > 0 ? nodes[i - 1] : null;
+        const edge = prev
+          ? edges.find((e) => (e.source === prev.assetId && e.target === n.assetId) || (e.source === n.assetId && e.target === prev.assetId))
+          : undefined;
+        const rel = String(edge?.relKey ?? "");
+        return (
+          <Fragment key={`${n.assetId ?? i}`}>
+            {i > 0 && (
+              <span className="path-edge" title={rel ? `关系 ${rel}（双向查询）` : "关联"}>
+                {rel ? `— ${rel} →` : "—→"}
+              </span>
+            )}
+            {n.assetId && onOpenAsset ? (
+              <button className="path-node" role="listitem" title={`在工作区打开 ${n.name ?? n.assetId}`} onClick={() => onOpenAsset(n.assetId!)}>
+                {n.name ?? `${n.assetId.slice(0, 8)}…`}
+              </button>
+            ) : (
+              <span className="path-node static">{n.name ?? "未知资产"}</span>
+            )}
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+const ISSUE_STATUS: Record<string, { text: string; cls: string }> = {
+  open: { text: "未处理", cls: "st-open" },
+  in_progress: { text: "处理中", cls: "st-in_progress" },
+  resolved: { text: "已解决", cls: "st-resolved" },
+  closed: { text: "已关闭", cls: "st-closed" },
+};
+
+function ToolResultView({ name, result, onOpenAsset }: { name: string; result: unknown; onOpenAsset?: (id: string) => void }): ReactNode {
+  if (result == null || typeof result !== "object") return null;
+  try {
+    switch (name) {
+      case "asset.search": {
+        if (!Array.isArray(result)) return null;
+        const rows = result as Row[];
+        return rows.length ? <AssetRows rows={rows} onOpenAsset={onOpenAsset} /> : <div className="tool-empty">没有匹配的资产</div>;
+      }
+      case "graph.assetsByType": {
+        const r = result as { engine?: string; keys?: string[]; assets?: unknown };
+        if (!Array.isArray(r.assets)) return null;
+        return (
+          <>
+            <div className="tool-mini">
+              <span className="engine-tag">{String(r.engine ?? "sql")}</span>
+              检索类型 {(r.keys ?? []).join("、") || "?"}
+            </div>
+            {(r.assets as Row[]).length
+              ? <AssetRows rows={r.assets as Row[]} onOpenAsset={onOpenAsset} />
+              : <div className="tool-empty">该类型闭包下没有进行中/已弃用的资产</div>}
+          </>
+        );
+      }
+      case "graph.path": {
+        const r = result as { found?: boolean; hops?: number; reason?: string; nodes?: Row[]; edges?: Row[] };
+        if (r.found === false) return <div className="tool-empty">两个资产之间没有已确认的关联路径{r.reason ? `（${r.reason}）` : ""}</div>;
+        if (!Array.isArray(r.nodes)) return null;
+        return (
+          <>
+            <PathChain result={r as { nodes?: Row[]; edges?: Row[] }} onOpenAsset={onOpenAsset} />
+            <div className="tool-mini">{r.hops ?? Math.max((r.nodes.length ?? 1) - 1, 0)} 跳</div>
+          </>
+        );
+      }
+      case "graph.neighbors": {
+        const r = result as { found?: boolean; reason?: string; hint?: string; assetId?: string; nodes?: Row[]; edges?: Row[] };
+        if (r.found === false) return <div className="tool-empty">{r.hint ?? r.reason ?? "该资产不在图投影中"}</div>;
+        if (!Array.isArray(r.nodes)) return null;
+        const others = (r.nodes as Row[]).filter((n) => String(n.assetId ?? "") !== String(r.assetId ?? ""));
+        return (
+          <>
+            <AssetRows rows={others} onOpenAsset={onOpenAsset} />
+            <div className="tool-mini">邻域 {others.length} 个资产 · {((r.edges ?? []) as unknown[]).length} 条关系边</div>
+          </>
+        );
+      }
+      case "collection.search": {
+        if (!Array.isArray(result)) return null;
+        const rows = result as { id?: string; name?: string; description?: string; item_count?: number }[];
+        return rows.length ? (
+          <div className="asset-rows">
+            {rows.map((c, i) => (
+              <span key={c.id ?? i} className="asset-row static" title={c.description ?? ""}>
+                <span className="ar-name ellipsis">{c.name ?? "?"}</span>
+                <span className="ar-note">{c.item_count ?? 0} 项</span>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div className="tool-empty">没有匹配的集合</div>
+        );
+      }
+      case "collection.items": {
+        const r = result as { collectionName?: string; items?: unknown };
+        if (!Array.isArray(r.items)) return null;
+        const items = r.items as Row[];
+        return (
+          <>
+            <div className="tool-mini">集合「{r.collectionName ?? "?"}」· {items.length} 项</div>
+            {items.length
+              ? <AssetRows rows={items} onOpenAsset={onOpenAsset} noteOf={(row) => String(row.note ?? "")} />
+              : <div className="tool-empty">该集合还没有条目</div>}
+          </>
+        );
+      }
+      case "issue.list": {
+        const r = result as { issues?: unknown };
+        if (!Array.isArray(r.issues)) return null;
+        const issues = r.issues as Row[];
+        return issues.length ? (
+          <div className="asset-rows">
+            {issues.slice(0, 8).map((it, i) => {
+              const st = ISSUE_STATUS[String(it.status ?? "")] ?? { text: String(it.status ?? ""), cls: "st-closed" };
+              return (
+                <span key={String(it.id ?? i)} className="asset-row static" title={String(it.title ?? "")}>
+                  <span className={`lc ${st.cls}`}>{st.text}</span>
+                  <span className="ar-name ellipsis">{String(it.title ?? "")}</span>
+                  {it.asset_name ? <span className="ar-type ellipsis">{String(it.asset_name)}</span> : null}
+                </span>
+              );
+            })}
+            {issues.length > 8 && <div className="rows-more">…另有 {issues.length - 8} 条未展开</div>}
+          </div>
+        ) : (
+          <div className="tool-empty">当前筛选下没有工单</div>
+        );
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null;
   }
 }
 
@@ -150,12 +361,24 @@ function ToolCard({ tool, onOpenAsset }: { tool: RunToolBlock; onOpenAsset?: (as
         )}
         <div className="tool-detail-label">参数</div>
         <pre>{JSON.stringify(tool.args, null, 2)}</pre>
-        {tool.state === "ok" && tool.result != null && (
-          <>
-            <div className="tool-detail-label">结果</div>
-            <pre>{JSON.stringify(tool.result, null, 2).slice(0, 1200)}</pre>
-          </>
-        )}
+        {tool.state === "ok" && tool.result != null && (() => {
+          const view = <ToolResultView name={tool.name} result={tool.result} onOpenAsset={onOpenAsset} />;
+          const raw = <pre>{JSON.stringify(tool.result, null, 2).slice(0, 1200)}</pre>;
+          return (
+            <>
+              <div className="tool-detail-label">结果</div>
+              {view ? (
+                <>
+                  {view}
+                  <details className="raw-json">
+                    <summary>原始结果</summary>
+                    {raw}
+                  </details>
+                </>
+              ) : raw}
+            </>
+          );
+        })()}
         {(tool.state === "error" || tool.state === "denied") && tool.error && (
           <>
             <div className="tool-detail-label">错误</div>
@@ -307,10 +530,12 @@ function RunBlock({ run, onOpenAsset, renderText }: { run: RunView; onOpenAsset?
   );
 }
 
-export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRunStateChange, collapsed, onToggleCollapse }: {
+export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRunStateChange, onRunStarted, collapsed, onToggleCollapse }: {
   project?: ProjectRef; sessionId: string; sessionTitle?: string; onOpenAsset?: (assetId: string) => void;
   /** 运行状态上报（顶栏状态药丸）：有无正在流式运行的 run */
   onRunStateChange?: (running: boolean) => void;
+  /** 运行创建成功（M73）：自动标题会话的标题在服务端被改写，抽屉会话列表据此刷新 */
+  onRunStarted?: () => void;
   /** 对话区收起（M67⑥）：组件保持挂载（SSE 订阅/输入状态不断线），只换渲染成细条 */
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -525,7 +750,8 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
       const why = p.reason === "budget_tool_calls" ? `工具调用达到预算上限（${p.limit}）`
         : p.reason === "budget_tokens" ? `token 达到预算上限（${p.limit}）`
         : p.reason === "max_turns" ? "运行轮数达到上限" : p.reason;
-      patch((r) => ({ ...r, status: "blocked", streaming: false, note: `已暂停等待处置：${why}` }));
+      // 行动指引（M73）：blocked 不是死路——如实告知可发新消息继续（新运行重新检索现场）
+      patch((r) => ({ ...r, status: "blocked", streaming: false, note: `已暂停等待处置：${why}。可发送新消息继续任务（下一运行会重新检索现场）。` }));
       es.close();
     });
     es.addEventListener("cancelled", () => {
@@ -567,6 +793,8 @@ export function AgentPane({ project, sessionId, sessionTitle, onOpenAsset, onRun
       });
       setRuns((prev) => [...prev, { id: created.runId, status: "running", prompt: content, text: "", note: "", streaming: true, tools: [], createdAt: new Date().toISOString(), refs, thoughts: [], turn: -1 }]);
       openEventStream(project.teamId, created.runId);
+      // 自动标题（M73）：首条运行已在服务端改写会话标题，通知抽屉刷新可见
+      onRunStarted?.();
       // 用户消息已在创建事务中持久化：立即刷新，让自己的气泡先出现在运行块之上
       stickRef.current = true;
       void api<Msg[]>(`/sessions/${sessionId}/messages`, { query: { teamId: project.teamId } }).then(setMsgs).catch(() => undefined);

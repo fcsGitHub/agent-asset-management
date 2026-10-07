@@ -1054,3 +1054,54 @@ POST /projects/:id/members 入项目再审核）；全量 72 套件 370 项全�
 暂缓项：无新增。可选后续方向（M72 后）：限速共享存储化（Redis，多实例部署时）；
 注册端点验证码/邮箱验证（反垃圾注册，需邮件基建）；project_members 管理界面
 （目前唯一 API 通道）；CSV 导出列级脱敏开关（含敏感属性时）。
+
+### M73 可发现性与会话体验轮（已完成）
+
+用户点名：优化迭代，加强页面显示，agent功能。调研锚点与缺口坐实见
+research-M73-discoverability.md（Anthropic/LangChain 工具对称性原则、ChatGPT 会话
+自动标题、AgentPM/Linear 仪表盘范式，均本轮实读）。四组落地：
+**A Agent 工具补全（「能写不能读」不对称）**：READONLY 层新增 ①`issue.list`——
+默认未结（open+in_progress）、status=all 全量、q 标题/正文过滤（likeContains
+字面量口径同 M72）；②`collection.items`——集合名称/id 双解析（复用
+resolveCollectionRef），条目带收录备注/类型/生命周期，逐条 recordUsage 计
+agent_read 使用热度。runner 系统提示词同步；runs 创建的 allowed_tools 留档列从
+硬编码 6 项旧清单改为 allAgentTools() 同源生成（此前留档失真，运行器本就不读此列）。
+**B 会话自动标题（迁移 0031）**：sessions.title_is_auto 布尔列（存量 false——历史
+标题全为用户显式输入）。新建会话免弹窗：POST /projects/:id/sessions title 可选，
+缺省生成占位「会话 MM-DD HH:mm」并标自动；创建运行事务内条件更新
+（AND title_is_auto）改写为 prompt 首行摘要（折空白截 24 字加省略号，空回退
+「新任务」）——并发首条只有一条生效、事务前显式命名不被覆盖；PATCH 改名即接管
+命名权（置 false 永不自动改）。前端：新建会话一键直建（无 prompt 弹窗）、抽屉
+自动标题斜体浅显样式 + 悬停说明、AgentPane onRunStarted 回调触发抽屉刷新。
+**C 工具结果可读化（AgentPane）**：ToolResultView 按工具名分派——asset.search/
+graph.assetsByType 资产行简表（名称可点击直达详情+类型 chip+生命周期徽标）、
+graph.path 路径条（节点 chip—relKey→节点，缺失边如实匿名箭头）、graph.neighbors
+邻域列表、collection.search/items（集合名+条目+收录备注）、issue.list（状态徽标
+行）；全部防御式——形状不符返回 null 回退原 JSON，原始结果收进「原始结果」折叠
+（渐进披露不丢透明度）；toolSummary 补 graph.*/collection.*/issue.* 摘要格式
+（graph.path 显示「A ↔ B」）。blocked 运行提示补诚实行动指引（可发新消息继续，
+下一运行重新检索现场——真续跑需跨运行上下文传递，如实不做）。
+**D 总览仪表加强**：overview 端点——assets 弃用单列计数（修复 M70 语义变更未
+同步的 active 混算）、pendingProposals（项目域）/pendingSemanticCandidates
+（团队域，与顶栏徽标同口径）；DashboardPage——新增「待审提案+候选」统计卡
+（>0 黄色提示）、「团队资产」卡弃用子项、完整度水位卡（平均分三档着色+分桶
+徽标+低分清单 top5 点击直达详情，替换低价值「快捷入口」卡；GET
+/assets/completeness-summary 与目录/详情同分数源）；工作台「项目概况」卡补
+「查看项目仪表盘 →」跳转。
+tests/m73 九项（纯函数二+端到端七：issue.list 默认未结/all/q/%字面量、
+collection.items 备注与幽灵集合报错、无 title 占位+DB 标记、首条运行自动改名+
+显式命名不改写、PATCH 接管命名权、overview 弃用/提案/候选计数、allowed_tools
+同源）；全量 73 套件 379 项全绿（+9 零回归）。浏览器实测（M73 演示团队真实
+登录会话，真实 DeepSeek 运行）：新建会话免弹窗出占位标题、发送任务后抽屉/顶栏
+同步自动改名（prompt 截 24 字）、三工具卡全中（issue.list/collection.items/
+graph.path「轨道分析模型 ↔ 热控设计报告」）、collection.items 可读视图带收录
+备注、graph.path 路径条「节点—partOf→节点 + 1 跳 + 原始结果折叠」、路径节点
+点击直达资产详情且使用热度 Agent 读取 +2（埋点生效）、总览五统计卡+完整度
+水位卡（65 平均分/分桶徽标/低分空态文案）、Agent 运行进「最近动态」人机混排。
+截图三张：docs/evidence/m73-ui-{dashboard,agent-run,tool-cards}.png。
+环境注记：IAB 定位器 click 持续超时（webview 表面），交互改走 cua 坐标/页内
+evaluate，验证结论不受影响；宿主重启后 taw-postgres/graphdb 退出重新拉起零
+改动全绿（同 M70）。
+暂缓项：无新增。可选后续方向（M73 后）：proposal.list/activity 类 Agent 读工具；
+blocked 真·续跑（跨运行 messages 上下文传递）；会话标题 LLM 语义摘要（规则版
+先落地）；Agent 面板工具卡渲染器覆盖 ontology.* 两工具。

@@ -15,12 +15,25 @@ interface Overview {
     branches: { open: number; total: number };
     changeRequests: { open: number; awaitingReview: number; changesRequested: number; merged: number };
     releases: { total: number; last30d: number };
+    pendingProposals?: number;
   };
   teamScope: {
-    assets: { active: number; archived: number };
+    assets: { active: number; deprecated?: number; archived: number };
     revisions: number;
     relations: { confirmed: number; proposed: number };
+    pendingSemanticCandidates?: number;
   };
+}
+
+// 完整度团队汇总（M73 接入总览）：/assets/completeness-summary 与目录/详情同一分数源
+interface CompletenessSummaryView {
+  count: number;
+  average: number;
+  buckets: { green: number; yellow: number; red: number };
+  low: { id: string; name: string; score: number; missingTitles: string[] }[];
+  lowThreshold: number;
+  sampled: number;
+  note?: string;
 }
 
 interface ActivityItem {
@@ -151,14 +164,18 @@ export function DashboardPage({
   project,
   me,
   onNavigate,
+  onOpenAsset,
 }: {
   project?: ProjectInfo;
   me: Me;
   onNavigate: (page: "activity" | "approvals" | "workbench") => void;
+  /** 低分资产点击直达工作区详情（M73） */
+  onOpenAsset?: (id: string) => void;
 }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [activity, setActivity] = useState<ActivityItem[] | null>(null);
   const [issues, setIssues] = useState<IssueRow[] | null>(null);
+  const [completeness, setCompleteness] = useState<CompletenessSummaryView | null>(null);
   const [error, setError] = useState("");
 
   const reload = useCallback(() => {
@@ -173,6 +190,9 @@ export function DashboardPage({
     void api<IssueRow[]>(`/projects/${project.projectId}/issues`, { query: { teamId: project.teamId } })
       .then(setIssues)
       .catch(() => setIssues([]));
+    void api<CompletenessSummaryView>("/assets/completeness-summary", { query: { teamId: project.teamId } })
+      .then(setCompleteness)
+      .catch(() => setCompleteness(null));
   }, [project]);
 
   useEffect(reload, [reload]);
@@ -201,8 +221,18 @@ export function DashboardPage({
               sub={`${overview.projectScope.changeRequests.awaitingReview} 待审 / ${overview.projectScope.changeRequests.changesRequested} 已退回`}
               tone={pendingReviews > 0 ? "warn" : "ok"}
             />
+            <StatCard
+              label="待审提案+候选"
+              value={(overview.projectScope.pendingProposals ?? 0) + (overview.teamScope.pendingSemanticCandidates ?? 0)}
+              sub={`Agent 提案 ${overview.projectScope.pendingProposals ?? 0} · 语义候选 ${overview.teamScope.pendingSemanticCandidates ?? 0}（团队域）`}
+              tone={(overview.projectScope.pendingProposals ?? 0) + (overview.teamScope.pendingSemanticCandidates ?? 0) > 0 ? "warn" : undefined}
+            />
             <StatCard label="发布（近 30 天）" value={overview.projectScope.releases.last30d} sub={`累计 ${overview.projectScope.releases.total} 次`} />
-            <StatCard label="团队资产" value={overview.teamScope.assets.active} sub={`归档 ${overview.teamScope.assets.archived}`} />
+            <StatCard
+              label="团队资产"
+              value={overview.teamScope.assets.active + (overview.teamScope.assets.deprecated ?? 0)}
+              sub={`弃用 ${overview.teamScope.assets.deprecated ?? 0} · 归档 ${overview.teamScope.assets.archived}`}
+            />
             <StatCard label="修订总数" value={overview.teamScope.revisions} />
             <StatCard label="已确认关系" value={overview.teamScope.relations.confirmed} sub={`待定 ${overview.teamScope.relations.proposed}`} />
           </div>
@@ -250,13 +280,49 @@ export function DashboardPage({
               )}
             </section>
             <section className="card">
-              <h3>快捷入口</h3>
-              <div className="btn-row">
-                <button onClick={() => onNavigate("workbench")}>打开工作台</button>
-                <button onClick={() => onNavigate("approvals")}>审批队列</button>
-                <button onClick={() => onNavigate("activity")}>团队动态</button>
+              <div className="card-head">
+                <h3>元数据完整度</h3>
+                {completeness && completeness.count > 0 && (
+                  <span className="chip chip-dim">抽样 {completeness.sampled} 项</span>
+                )}
               </div>
-              <p className="hint">提示：Ctrl/⌘+K 可随时搜索资产并跳转；按 ? 查看全部快捷键。</p>
+              {completeness === null ? (
+                <div className="state">加载中…</div>
+              ) : completeness.count === 0 ? (
+                <Empty icon="📊" title="还没有资产" hint="登记资产后这里会给出元数据完整度水位。" />
+              ) : (
+                <>
+                  <div className="cw-waterline">
+                    <span className={`cw-avg ${completeness.average >= 80 ? "good" : completeness.average >= 50 ? "mid" : "low"}`}>
+                      {completeness.average}
+                    </span>
+                    <span className="cw-avg-label">平均分</span>
+                    <span className="cw-bucket cw-green">达标 {completeness.buckets.green}</span>
+                    <span className="cw-bucket cw-yellow">一般 {completeness.buckets.yellow}</span>
+                    <span className="cw-bucket cw-red">薄弱 {completeness.buckets.red}</span>
+                  </div>
+                  {completeness.low.length > 0 ? (
+                    <ul className="low-list">
+                      {completeness.low.slice(0, 5).map((e) => (
+                        <li key={e.id}>
+                          {onOpenAsset ? (
+                            <button className="low-name" title="在工作区打开，补齐缺失项" onClick={() => onOpenAsset(e.id)}>
+                              {e.name}
+                            </button>
+                          ) : (
+                            <span className="low-name">{e.name}</span>
+                          )}
+                          <span className="low-score">{e.score}</span>
+                          <span className="low-missing ellipsis">{e.missingTitles.slice(0, 2).join("、") || "综合偏低"}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="hint">所有资产完整度都在 {completeness.lowThreshold} 分以上。</p>
+                  )}
+                  {completeness.note && <p className="hint">{completeness.note}</p>}
+                </>
+              )}
             </section>
           </div>
         </>

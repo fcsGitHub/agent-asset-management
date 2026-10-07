@@ -6,7 +6,9 @@ import { q, withTeam } from "../db.js";
 import { ERR } from "../errors.js";
 import { checkCsrf, newId, requireAuth } from "../auth.js";
 import { parseBody } from "./auth.js";
+import { sessionTitleFromPrompt } from "./projects.js";
 import { executeRun, requestCancel } from "../agent/runner.js";
+import { allAgentTools } from "../agent/tools.js";
 import { subscribeRunEvents } from "../activityHub.js";
 import { DeepSeekProvider, LlmError } from "@taw/agent-adapter/deepseek";
 
@@ -55,8 +57,8 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
 
     const id = newId();
     await withTeam(body.teamId, async (client) => {
-      const { rows: sess } = await client.query<{ created_by: string; visibility: string; project_id: string }>(
-        `SELECT created_by, visibility, project_id FROM sessions WHERE team_id = $1 AND id = $2`,
+      const { rows: sess } = await client.query<{ created_by: string; visibility: string; project_id: string; title_is_auto: boolean }>(
+        `SELECT created_by, visibility, project_id, title_is_auto FROM sessions WHERE team_id = $1 AND id = $2`,
         [body.teamId, sessionId]
       );
       if (!sess[0]) throw ERR.NOT_FOUND();
@@ -66,13 +68,21 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'deepseek',$9)`,
         [body.teamId, id, sessionId, sess[0].project_id, body.prompt,
          JSON.stringify(body.contextRefs),
-         JSON.stringify(["asset.search", "asset.getRevision", "relation.query", "issue.create", "proposal.create", "external.notify"]),
+         // 运行器实际按 allAgentTools() 执行；此列是留档快照，与真实清单同源生成（此前硬编码 6 项已过时）
+         JSON.stringify(allAgentTools().map((t) => t.name)),
          JSON.stringify(body.budget), auth.userId]
       );
       await client.query(
         `INSERT INTO messages (team_id, id, session_id, role, content, seq)
          SELECT $1, $2, $3, 'user', $4, COALESCE(MAX(seq), 0) + 1 FROM messages WHERE team_id = $1 AND session_id = $3`,
         [body.teamId, randomUUID(), sessionId, body.prompt]
+      );
+      // 自动标题会话（M73）：首条运行把占位标题改写为任务摘要。条件更新（AND title_is_auto）
+      // 保证并发首条运行只有一条生效，且用户恰在本事务前显式命名的不会被覆盖。
+      await client.query(
+        `UPDATE sessions SET title = $3, title_is_auto = false
+          WHERE team_id = $1 AND id = $2 AND title_is_auto`,
+        [body.teamId, sessionId, sessionTitleFromPrompt(body.prompt)]
       );
       // 恢复索引：执行器崩溃后由此定位 team（见 runner.readTeamIdBypassingRls）
       await client.query(
@@ -92,7 +102,7 @@ export async function runRoutes(app: FastifyInstance): Promise<void> {
     await teamRole(auth.userId, teamId);
     return withTeam(teamId, async (client) => {
       const { rows } = await client.query(
-        `SELECT id, session_id, status, prompt, budget, used, result, error, model_provider, created_at, updated_at
+        `SELECT id, session_id, status, prompt, budget, used, result, error, allowed_tools, model_provider, created_at, updated_at
            FROM agent_runs WHERE team_id = $1 AND id = $2`,
         [teamId, runId]
       );
